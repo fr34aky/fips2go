@@ -23,6 +23,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const LOCAL_RESPONDER: &str = "[::1]:5354";
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
+/// Guards the (lock-free) startup window so `status()`/`stop()` from the UI
+/// thread never block behind a slow `start()` holding the `ENGINE` mutex.
+static STARTING: AtomicBool = AtomicBool::new(false);
 
 struct Engine {
     running: Arc<AtomicBool>,
@@ -50,16 +53,37 @@ pub fn is_running() -> bool {
 /// Start the embedded node. `tun_fd` is borrowed (dup'd internally); the
 /// caller keeps ownership of its own fd. `protect` receives every underlay
 /// socket fd (wire it to `VpnService.protect`).
+///
+/// The `ENGINE` mutex is held only for the final install, not for the whole
+/// (possibly slow) node startup — `status()` polls stay responsive.
 pub fn start(
     config_json: &str,
     tun_fd: RawFd,
     protect: Option<fips::SocketProtect>,
 ) -> Result<StartInfo, String> {
-    let mut slot = ENGINE.lock().unwrap();
-    if slot.is_some() {
+    if ENGINE.lock().unwrap().is_some() {
         return Err("already running".into());
     }
+    if STARTING.swap(true, Ordering::SeqCst) {
+        return Err("start already in progress".into());
+    }
+    let result = start_inner(config_json, tun_fd, protect);
+    let outcome = match result {
+        Ok((engine, info)) => {
+            *ENGINE.lock().unwrap() = Some(engine);
+            Ok(info)
+        }
+        Err(e) => Err(e),
+    };
+    STARTING.store(false, Ordering::SeqCst);
+    outcome
+}
 
+fn start_inner(
+    config_json: &str,
+    tun_fd: RawFd,
+    protect: Option<fips::SocketProtect>,
+) -> Result<(Engine, StartInfo), String> {
     let shim_config = ShimConfig::from_json(config_json)?;
     crate::init_logging(shim_config.log_level.as_deref());
     let fips_config = shim_config.to_fips_config()?;
@@ -161,7 +185,7 @@ pub fn start(
     })?;
 
     tracing::info!(npub = %npub, address = %address, "fips engine started");
-    *slot = Some(Engine {
+    let engine = Engine {
         running,
         stop_tx: Some(stop_tx),
         node_thread: Some(node_thread),
@@ -170,8 +194,8 @@ pub fn start(
         npub: npub.clone(),
         address: address.clone(),
         tun_fd: owned_fd,
-    });
-    Ok(StartInfo { npub, address })
+    };
+    Ok((engine, StartInfo { npub, address }))
 }
 
 /// Stop the engine: drain the node, stop the pump, close our fd. Idempotent.

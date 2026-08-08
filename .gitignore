@@ -14,3 +14,4 @@ target/
 # Toolchain archives
 *.zip
 *.tar.gz
+/dist/

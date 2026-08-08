@@ -10,7 +10,6 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
-import org.json.JSONObject
 import kotlin.concurrent.thread
 
 /**
@@ -125,7 +124,7 @@ class FipsVpnService : VpnService() {
         val notification: Notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("FIPS mesh connected")
             .setContentText(address)
-            .setSmallIcon(android.R.drawable.stat_sys_vpn_ic)
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .build()
