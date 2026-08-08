@@ -87,7 +87,11 @@ Two issues found and fixed on-device:
    `fd00::/8` that is not the node's** (`fd00::53`, `engine::DNS_SENTINEL`,
    shared with Kotlin via the new `FipsNative.dnsServer()` JNI accessor). The
    kernel routes the sentinel out the fd; the pump peels off `:53` to the
-   proxy. (Re-test pending on-device.)
+   proxy. **Verified on-device after the fix:** `<npub>.fips` resolves to the
+   correct mesh address (ping 0.44 ms via hairpin), and upstream forwarding
+   works — a Nostr relay (`relay.damus.io`) connected, which required
+   resolving its hostname through the proxy. Nostr rendezvous is fully live
+   (`nostr notify loop received first event`).
 
 Note: `avc: denied ... cgroup` SELinux lines are benign — Rust's
 `available_parallelism()` cgroup probe; the worker pool still spawns. Worth
