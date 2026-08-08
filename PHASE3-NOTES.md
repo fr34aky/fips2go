@@ -246,13 +246,22 @@ Verified on Pixel 9 Pro: all three pages render cleanly (dark Material 3);
 live status + logs update; npub resolve returns the correct address; old flat
 prefs migrate into the new Settings fields.
 
+## On-device status
+
+**Exercised end-to-end on a Pixel 9 Pro (GrapheneOS / Android).** The sections
+above record the specific verifications: connect + mesh join (~1300 nodes),
+`.fips` + upstream DNS, per-app split tunnel, Wi-Fi↔cellular hand-off, Keystore
+identity + regenerate, the Material 3 UI, npub resolve, and the log viewer.
+Network-change handling, the battery profile, and the identity migration were
+each confirmed on-device.
+
 ## Not done / next
 
-- On-device testing (no adb on this machine): install `app-debug.apk`, check
-  logcat tag `fips`, verify peer handshake to a desktop node, `.fips`
-  browsing, and normal-DNS passthrough.
-- Network-change handling (Wi-Fi↔cellular): the node's sockets survive but
-  NAT bindings change; needs a rebind/re-STUN nudge on
-  `ConnectivityManager` callbacks.
-- Always-on VPN, battery profile (1s tick vs Doze), Keystore, runtime peer
-  connect/disconnect UI, QR config exchange, x86_64 ABI for emulator.
+- Measure actual battery/wakeup savings over a real Doze cycle (profile is
+  applied and doesn't break the mesh, but the saving isn't quantified).
+- Broaden forwarder testing under real-app load (QUIC/video, large downloads,
+  IPv4+IPv6 mix); no clearnet ICMP forwarding.
+- Multi-ABI (`armeabi-v7a`, `x86_64`) + a signed release build.
+- Always-on VPN wiring; identity backup/export; runtime peer connect/disconnect
+  UI; QR config exchange; optional seamless (no-restart) network rebind (needs
+  a runtime socket-rebind API in fips).
