@@ -2,7 +2,10 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="16dp">
+    android:clipToPadding="false"
+    android:paddingHorizontal="16dp"
+    android:paddingTop="16dp"
+    android:paddingBottom="96dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -57,6 +60,61 @@
             android:layout_height="wrap_content"
             android:paddingVertical="6dp"
             android:text="Nostr rendezvous (relay discovery + NAT traversal)" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Nostr relays (one per line; blank = defaults)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/nostr_relays"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="top"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:minLines="2" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="STUN servers (one per line; blank = defaults)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/stun_servers"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="top"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:minLines="2" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- Transports -->
+        <TextView style="@style/SettingsHeader" android:text="Transports" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="UDP bind (host:port; blank = ephemeral)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/udp_bind"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="TCP bind (host:port; blank = no TCP)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/tcp_bind"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
 
         <!-- DNS -->
         <TextView style="@style/SettingsHeader" android:text="DNS" />

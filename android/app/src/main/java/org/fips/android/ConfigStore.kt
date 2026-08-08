@@ -18,6 +18,10 @@ object ConfigStore {
     const val PEER_ENDPOINT = "peer_endpoint"
     const val PEER_TRANSPORT = "peer_transport"
     const val NOSTR = "nostr"
+    const val NOSTR_RELAYS = "nostr_relays"
+    const val STUN_SERVERS = "stun_servers"
+    const val UDP_BIND = "udp_bind"
+    const val TCP_BIND = "tcp_bind"
     const val DNS_UPSTREAMS = "dns_upstreams"
     const val ENABLE_FIPS_DNS = "enable_fips_dns"
     const val WORKER_THREADS = "worker_threads"
@@ -83,13 +87,6 @@ peers: []
             )
         }
 
-        val upstreams = JSONArray()
-        (p.getString(DNS_UPSTREAMS, "") ?: "")
-            .split('\n', ',')
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .forEach { upstreams.put(it) }
-
         val config = JSONObject()
             .put("nsec", nsec)
             .put("peers", peers)
@@ -100,11 +97,28 @@ peers: []
             .put("battery_saver", p.getBoolean(BATTERY_SAVER, true))
             .put("log_level", p.getString(LOG_LEVEL, "info"))
 
+        val upstreams = toList(p.getString(DNS_UPSTREAMS, ""))
         if (upstreams.length() > 0) config.put("dns_upstreams", upstreams)
+        val relays = toList(p.getString(NOSTR_RELAYS, ""))
+        if (relays.length() > 0) config.put("nostr_relays", relays)
+        val stun = toList(p.getString(STUN_SERVERS, ""))
+        if (stun.length() > 0) config.put("stun_servers", stun)
+        p.getString(UDP_BIND, "")?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { config.put("udp_bind", it) }
+        p.getString(TCP_BIND, "")?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { config.put("tcp_bind", it) }
 
         val yaml = p.getString(FIPS_YAML, "")?.trim() ?: ""
         if (yaml.isNotEmpty()) config.put("fips_yaml", yaml)
 
         return config.toString()
+    }
+
+    /** Split newline/comma-separated text into a JSON array of trimmed entries. */
+    private fun toList(text: String?): JSONArray {
+        val arr = JSONArray()
+        (text ?: "").split('\n', ',').map { it.trim() }.filter { it.isNotEmpty() }
+            .forEach { arr.put(it) }
+        return arr
     }
 }

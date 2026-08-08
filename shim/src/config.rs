@@ -45,6 +45,21 @@ pub struct ShimConfig {
     /// tracing filter, e.g. "info" or "fips=debug".
     #[serde(default)]
     pub log_level: Option<String>,
+    /// Nostr relays (used for both advert and DM relays) when `enable_nostr`
+    /// is set. Empty → FIPS built-in defaults.
+    #[serde(default)]
+    pub nostr_relays: Vec<String>,
+    /// STUN servers for NAT traversal. Empty → FIPS built-in defaults.
+    #[serde(default)]
+    pub stun_servers: Vec<String>,
+    /// UDP transport bind address (e.g. "0.0.0.0:2121"). Empty → ephemeral
+    /// "0.0.0.0:0" (pure-client, no fixed inbound port).
+    #[serde(default)]
+    pub udp_bind: Option<String>,
+    /// TCP transport bind address (e.g. "0.0.0.0:8443"). Empty → no TCP
+    /// transport.
+    #[serde(default)]
+    pub tcp_bind: Option<String>,
     /// Advanced: a full `fips.yaml`. When non-empty it becomes the base
     /// `fips::Config` (all fips parameters — transports, node.*, rendezvous,
     /// dns, lookup, …); the shim then forces the non-negotiable Android bits
@@ -155,14 +170,33 @@ impl ShimConfig {
 
         let mut config = fips::Config::new();
         config.node.identity.nsec = Some(identity.nsec);
+        let udp_bind = self
+            .udp_bind
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "0.0.0.0:0".to_string());
         config.transports.udp = fips::config::TransportInstances::Single(fips::config::UdpConfig {
-            bind_addr: Some("0.0.0.0:0".to_string()),
+            bind_addr: Some(udp_bind),
             ..Default::default()
         });
+        if let Some(tcp) = self.tcp_bind.clone().filter(|s| !s.trim().is_empty()) {
+            config.transports.tcp =
+                fips::config::TransportInstances::Single(fips::config::TcpConfig {
+                    bind_addr: Some(tcp),
+                    ..Default::default()
+                });
+        }
         config.tun.enabled = true; // satisfied by the app-owned seam
         config.dns.enabled = self.enable_fips_dns; // in-process responder, [::1]:5354
         config.node.control.enabled = false;
         config.node.rendezvous.nostr.enabled = self.enable_nostr;
+        if !self.nostr_relays.is_empty() {
+            config.node.rendezvous.nostr.advert_relays = self.nostr_relays.clone();
+            config.node.rendezvous.nostr.dm_relays = self.nostr_relays.clone();
+        }
+        if !self.stun_servers.is_empty() {
+            config.node.rendezvous.nostr.stun_servers = self.stun_servers.clone();
+        }
         if self.battery_saver {
             // Fewer CPU/radio wakeups on mobile; heartbeat stays < the ~30s
             // aggressive-NAT UDP timeout so mappings don't expire.
