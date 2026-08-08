@@ -15,7 +15,6 @@ import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import org.json.JSONArray
 import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
@@ -67,6 +66,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.pick_apps).setOnClickListener {
             startActivity(Intent(this, AppPickerActivity::class.java))
         }
+        findViewById<Button>(R.id.regenerate).setOnClickListener {
+            confirmRegenerate()
+        }
     }
 
     override fun onStart() {
@@ -115,22 +117,31 @@ class MainActivity : AppCompatActivity() {
     private fun prefs() = getSharedPreferences("fips", Context.MODE_PRIVATE)
 
     private fun ensureIdentity() {
-        val stored = prefs().getString("nsec", "") ?: ""
-        val info = JSONObject(FipsNative.deriveIdentity(stored))
-        if (info.has("error")) {
-            // Stored key unusable — regenerate rather than brick the app.
-            val fresh = JSONObject(FipsNative.deriveIdentity(""))
-            applyIdentity(fresh)
-        } else {
-            applyIdentity(info)
-        }
+        // Decrypts (or creates + migrates) the Keystore-protected nsec.
+        val nsec = IdentityStore.getOrCreate(this)
+        showIdentity(JSONObject(FipsNative.deriveIdentity(nsec)))
     }
 
-    private fun applyIdentity(info: JSONObject) {
+    /** Update the displayed npub/address (the nsec is held by IdentityStore). */
+    private fun showIdentity(info: JSONObject) {
         npub = info.getString("npub")
         address = info.getString("address")
-        prefs().edit().putString("nsec", info.getString("nsec")).apply()
         identityView.text = "$npub\n$address"
+    }
+
+    private fun confirmRegenerate() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Regenerate identity?")
+            .setMessage(
+                "This creates a new node identity (npub and .fips address). " +
+                    "The current identity is permanently replaced. Disconnect first if connected."
+            )
+            .setPositiveButton("Regenerate") { _, _ ->
+                val nsec = IdentityStore.regenerate(this)
+                showIdentity(JSONObject(FipsNative.deriveIdentity(nsec)))
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun loadPeerPrefs() {
@@ -147,31 +158,11 @@ class MainActivity : AppCompatActivity() {
             .apply()
     }
 
-    private fun buildConfig(): String {
-        val peers = JSONArray()
-        val npubText = peerNpub.text.toString().trim()
-        val endpointText = peerEndpoint.text.toString().trim()
-        if (npubText.isNotEmpty() && endpointText.isNotEmpty()) {
-            peers.put(
-                JSONObject()
-                    .put("npub", npubText)
-                    .put("endpoint", endpointText)
-                    .put("transport", "udp")
-            )
-        }
-        return JSONObject()
-            .put("nsec", prefs().getString("nsec", ""))
-            .put("peers", peers)
-            .put("enable_nostr", nostrSwitch.isChecked)
-            .put("log_level", "info")
-            .toString()
-    }
-
     private fun startVpn() {
+        // No config/nsec in the Intent — the service reads peer prefs and
+        // decrypts the nsec from the Keystore itself.
         val intent = Intent(this, FipsVpnService::class.java)
             .setAction(FipsVpnService.ACTION_CONNECT)
-            .putExtra(FipsVpnService.EXTRA_CONFIG, buildConfig())
-            .putExtra(FipsVpnService.EXTRA_ADDRESS, address)
         startForegroundService(intent)
     }
 
