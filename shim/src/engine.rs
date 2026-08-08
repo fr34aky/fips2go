@@ -38,6 +38,24 @@ pub fn dns_server_string() -> String {
     std::net::Ipv6Addr::from(DNS_SENTINEL).to_string()
 }
 
+/// Cap the FMP encrypt/decrypt worker pools for mobile before the node
+/// starts. FIPS reads `FIPS_ENCRYPT_WORKERS` / `FIPS_DECRYPT_WORKERS` at
+/// `start()` (else `available_parallelism()` → ~8 each). We set them here,
+/// respecting any value already present in the environment.
+///
+/// Called on the connect thread before the node thread is spawned, so the
+/// write happens-before any FIPS reader — no concurrent `getenv` for these
+/// keys is in flight, which is what makes the `set_var` sound.
+fn apply_worker_thread_caps(worker_threads: usize) {
+    for key in ["FIPS_ENCRYPT_WORKERS", "FIPS_DECRYPT_WORKERS"] {
+        if std::env::var_os(key).is_none() {
+            // SAFETY: single-threaded w.r.t. these keys — see doc comment.
+            unsafe { std::env::set_var(key, worker_threads.to_string()) };
+        }
+    }
+    tracing::info!(worker_threads, "capped FMP worker pools for mobile");
+}
+
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 /// Guards the (lock-free) startup window so `status()`/`stop()` from the UI
 /// thread never block behind a slow `start()` holding the `ENGINE` mutex.
@@ -102,6 +120,7 @@ fn start_inner(
 ) -> Result<(Engine, StartInfo), String> {
     let shim_config = ShimConfig::from_json(config_json)?;
     crate::init_logging(shim_config.log_level.as_deref());
+    apply_worker_thread_caps(shim_config.worker_threads);
     let fips_config = shim_config.to_fips_config()?;
 
     let mut node = fips::Node::new(fips_config).map_err(|e| format!("node init: {e}"))?;

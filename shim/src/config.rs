@@ -23,6 +23,13 @@ pub struct ShimConfig {
     /// off to avoid colliding with a daemon on the same machine.
     #[serde(default = "default_true")]
     pub enable_fips_dns: bool,
+    /// Cap for the FMP encrypt/decrypt worker thread pools. Unset lets FIPS
+    /// default to `available_parallelism()` (8+8 on a Pixel 9 Pro — far more
+    /// than a phone needs and a needless battery/wakeup cost). The shim caps
+    /// both pools to this before the node starts; `0` gives one encrypt worker
+    /// and in-line decrypt on the rx_loop (fewest threads).
+    #[serde(default = "default_worker_threads")]
+    pub worker_threads: usize,
     /// tracing filter, e.g. "info" or "fips=debug".
     #[serde(default)]
     pub log_level: Option<String>,
@@ -45,6 +52,13 @@ fn default_transport() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// Mobile default: one encrypt worker + one decrypt worker (2 threads vs the
+/// ~16 `available_parallelism()` would spawn). Plenty for phone-scale mesh
+/// traffic and much lighter on battery.
+fn default_worker_threads() -> usize {
+    1
 }
 
 fn default_dns_upstreams() -> Vec<String> {
@@ -155,5 +169,12 @@ mod tests {
         assert!(!config.node.control.enabled);
         assert_eq!(config.peers.len(), 1);
         assert_eq!(shim.upstream_addrs().len(), 2, "default upstreams parse");
+        assert_eq!(shim.worker_threads, 1, "mobile worker cap defaults to 1");
+    }
+
+    #[test]
+    fn worker_threads_override_parses() {
+        let shim = ShimConfig::from_json(r#"{"nsec": "", "worker_threads": 3}"#).unwrap();
+        assert_eq!(shim.worker_threads, 3);
     }
 }
