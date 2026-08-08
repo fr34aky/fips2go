@@ -125,6 +125,38 @@ switch causes a ~1–2 s mesh blip (full node restart) rather than a seamless
 socket rebind — acceptable, and far better than the indefinite black-hole; a
 seamless version would need a runtime rebind API added to fips.
 
+## Split tunnel (per-app) — done, verified on-device
+
+Android's `VpnService` confines every covered app to the tunnel's routes, so
+routing only `fd00::/8` cut all other apps off from the internet (verified:
+IPv4 → "No route to host" / ENETUNREACH, public IPv6 → EACCES via the
+`prohibit` rule). There is no `VpnService` config that leaves un-routed
+traffic on the underlay for unmodified apps — the standard fix is a userspace
+forwarder (tun2socks-style). Implemented, scoped per-app:
+
+- **Kotlin**: `AppPickerActivity` (a multi-choice list of launchable apps)
+  persists the selected package set. `FipsVpnService` captures **only** those
+  via `addAllowedApplication` (every other app is left untouched), adds an
+  IPv4 tun address (`10.111.222.1/32`) alongside the mesh IPv6, and routes
+  `fd00::/8` + `::/0` + `0.0.0.0/0` so captured apps' non-mesh traffic reaches
+  us. Empty selection captures only our own app (a no-op).
+- **Shim** (`forward.rs`, `ipstack` crate): the pump classifier sends
+  `fd00::/8` to the mesh and everything else into a userspace TCP/IP stack;
+  each accepted TCP/UDP flow is dialed out on a VPN-**protected** socket and
+  copied through (`copy_bidirectional` for TCP, a datagram pump for UDP). DNS
+  stays on the existing proxy. Runs on its own thread/runtime; torn down with
+  the pump. Gated by `forward_clearnet` (default on; host tests off).
+
+**Verified on Pixel 9 Pro** with only `com.android.shell` (the adb shell,
+uid 2000) selected: from the captured shell, IPv4 clearnet TCP (`1.1.1.1:443`),
+public IPv6 TCP (`2606:4700:4700::1111:443`), and hostname connects
+(`one.one.one.one:443`, DNS-proxy + forwarded TCP) all succeed — while the
+same app still reaches the mesh (`.fips` resolves, 0.5 ms). `dumpsys` confirms
+the VPN captures `Uid: 2000` only; every other app is on the normal network.
+Caveat: ICMP to clearnet isn't forwarded (only TCP/UDP), and all captured-app
+traffic flows through the app's userspace stack (battery/latency cost — the
+reason it's per-app).
+
 ## Not done / next
 
 - On-device testing (no adb on this machine): install `app-debug.apk`, check
