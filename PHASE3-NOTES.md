@@ -196,19 +196,29 @@ promoted`); the exemption dialog appears. NOT measured: actual battery/wakeup
 reduction over time and Doze survival (needs long observation) — only that the
 profile applies and doesn't break the mesh.
 
-## Open issue — other-app connectivity block (unresolved, deprioritized)
+## Other-app connectivity block — RESOLVED (was a testing artifact)
 
-While testing the split tunnel, `ip rule` showed a full-capture `prohibit`
-rule over `uidrange 0-99999` (minus our app uid 10242) that blocks every other
-app's network (not just DNS — literal-IP connects fail too), and it **survived
-a reboot** with the app auto-running and no active VPN / no always-on / no
-lockdown. Root cause not pinned down (possibly leaked netd state from
-reinstalling an active VPN during testing, or a per-app-VPN + default-route
-interaction). Investigation was stopped at the user's request to continue other
-work. **Revisit**: on a clean device, connect a per-app VPN and confirm
-uncaptured apps keep connectivity; if the per-app + `::/0`+`0.0.0.0/0` routes
-themselves install a system-wide prohibit, the split-tunnel design needs
-rework.
+Symptom: `ip rule` had a full-capture `prohibit` over `uidrange 0-99999`
+(minus our app uid 10242) that blocked every other app's network (literal-IP
+connects failed, not just DNS).
+
+Root cause: **stale/leaked netd `prohibit` rules from the EARLY full-tunnel
+test sessions** (before the per-app `addAllowedApplication` change, when the
+VPN captured all apps), left behind by repeatedly reinstalling / force-killing
+an active full-capture VPN during development. NOT a design bug.
+
+Verified on a clean device (reboot + clean reinstall + fresh per-app connect):
+with the per-app VPN active (captures only the selected app, e.g. DuckDuckGo
+`10292`), **there are no `prohibit` rules and every uncaptured app has full
+connectivity** (uid-2000 shell: IPv4 + hostname DNS both OK). A clean
+Disconnect leaves no residual rules. The current code can never recreate the
+block: `FipsVpnService` always calls `addAllowedApplication` (the selected
+apps, or just our own package when none are selected), so the VPN is always
+per-app — there is no full-capture code path anymore.
+
+Takeaway for development: avoid reinstalling/force-killing while the VPN is
+connected; use Disconnect first. For end users (clean connect/disconnect, no
+reinstall churn) this doesn't occur.
 
 ## Not done / next
 
