@@ -8,4 +8,6 @@
     <color name="fips_secondary">#4A635B</color>
     <color name="status_ok">#2E7D32</color>
     <color name="status_off">#9E9E9E</color>
+    <!-- Launcher icon backdrop: the navy from docs/logos/fips_logo.png. -->
+    <color name="ic_launcher_background">#00081A</color>
 </resources>
