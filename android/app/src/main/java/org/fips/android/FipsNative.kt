@@ -1,0 +1,35 @@
+package org.fips.android
+
+/**
+ * JNI bridge to the Rust shim (libfips_android.so). Signatures mirror the
+ * exports in `shim/src/jni_api.rs` — keep both sides in sync.
+ */
+object FipsNative {
+    init {
+        System.loadLibrary("fips_android")
+    }
+
+    /**
+     * Derive (or generate, when [nsec] is empty) the node identity.
+     * Returns JSON `{nsec, npub, address}` or `{"error": "..."}`.
+     */
+    external fun deriveIdentity(nsec: String): String
+
+    /**
+     * Start the embedded node. [callback] receives `protectFd(int)` for every
+     * underlay socket. Returns "" on success, an error message otherwise.
+     * Blocks until the node is up (worst case ~60s) — call off the main thread.
+     */
+    external fun start(configJson: String, tunFd: Int, callback: FipsVpnService): String
+
+    /** Stop the node and the fd pump. Idempotent, blocking (graceful drain). */
+    external fun stop()
+
+    external fun isRunning(): Boolean
+
+    /** Compact status JSON: `{running, npub, address, status: {...}}`. */
+    external fun status(): String
+
+    /** Any snapshot-served `show_*` query, e.g. `query("show_peers", "")`. */
+    external fun query(command: String, paramsJson: String): String
+}

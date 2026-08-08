@@ -1,0 +1,28 @@
+[package]
+name = "fips-android-shim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# JNI shim embedding the fips node for the Android app:
+# - `cdylib` → libfips_android.so loaded from Kotlin
+# - `lib`    → host-side unit/integration tests of the engine, pump, and DNS
+#              proxy (everything except the JNI surface itself)
+[lib]
+name = "fips_android"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# The android-hooks worktree (branch android-hooks of ~/fips): app-owned TUN
+# seam + socket-protect hook + TunPacketProcessor + ControlReadHandle::query.
+fips = { path = "../fips", default-features = false }
+jni = "0.21"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true
