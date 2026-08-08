@@ -45,6 +45,22 @@ pub struct ShimConfig {
     /// tracing filter, e.g. "info" or "fips=debug".
     #[serde(default)]
     pub log_level: Option<String>,
+    /// Advanced: a full `fips.yaml`. When non-empty it becomes the base
+    /// `fips::Config` (all fips parameters — transports, node.*, rendezvous,
+    /// dns, lookup, …); the shim then forces the non-negotiable Android bits
+    /// (Keystore identity, app-owned TUN, control socket off) and layers on the
+    /// runtime knobs it owns. When empty, the structured fields above build the
+    /// config programmatically.
+    #[serde(default)]
+    pub fips_yaml: Option<String>,
+}
+
+/// Resolve an npub to its `.fips` mesh address (pure computation). Returns
+/// `(npub, address)`.
+pub fn resolve_npub(npub: &str) -> Result<(String, String), String> {
+    let peer = fips::identity::PeerIdentity::from_npub(npub.trim())
+        .map_err(|e| format!("invalid npub: {e}"))?;
+    Ok((peer.npub(), peer.address().to_ipv6().to_string()))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +126,33 @@ impl ShimConfig {
     /// `[::1]:5354`, app-owned TUN, no control socket, no key files.
     pub fn to_fips_config(&self) -> Result<fips::Config, String> {
         let identity = derive_identity(&self.nsec)?;
+
+        // Advanced mode: a full fips.yaml is the base; only force the Android
+        // non-negotiables on top (structured fips fields are not applied).
+        if let Some(yaml) = self
+            .fips_yaml
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            let mut config: fips::Config =
+                serde_yaml::from_str(yaml).map_err(|e| format!("fips.yaml parse: {e}"))?;
+            config.node.identity.nsec = Some(identity.nsec); // Keystore, not YAML
+            config.tun.enabled = true; // app-owned seam
+            config.node.control.enabled = false; // no unix control socket
+            if config.transports.udp.is_empty() {
+                config.transports.udp =
+                    fips::config::TransportInstances::Single(fips::config::UdpConfig {
+                        bind_addr: Some("0.0.0.0:0".to_string()),
+                        ..Default::default()
+                    });
+            }
+            config
+                .validate()
+                .map_err(|e| format!("config validate: {e}"))?;
+            return Ok(config);
+        }
+
         let mut config = fips::Config::new();
         config.node.identity.nsec = Some(identity.nsec);
         config.transports.udp = fips::config::TransportInstances::Single(fips::config::UdpConfig {

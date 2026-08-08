@@ -1,103 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp">
+    android:layout_height="match_parent">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Node identity"
-        android:textStyle="bold" />
-
-    <TextView
-        android:id="@+id/identity"
+    <com.google.android.material.appbar.AppBarLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:fontFamily="monospace"
-        android:textSize="12sp" />
+        android:fitsSystemWindows="true">
 
-    <Button
-        android:id="@+id/regenerate"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Regenerate identity"
-        android:paddingBottom="12dp" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Peer (optional when Nostr rendezvous is on)"
-        android:textStyle="bold" />
-
-    <EditText
-        android:id="@+id/peer_npub"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="peer npub1…"
-        android:inputType="text" />
-
-    <EditText
-        android:id="@+id/peer_endpoint"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="peer host:port (UDP)"
-        android:inputType="text" />
-
-    <Switch
-        android:id="@+id/nostr_switch"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Nostr rendezvous"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp" />
-
-    <Switch
-        android:id="@+id/battery_switch"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Battery saver (relaxed timers)"
-        android:paddingBottom="8dp" />
-
-    <Button
-        android:id="@+id/pick_apps"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Select mesh apps" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/connect"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Connect" />
-
-        <Button
-            android:id="@+id/disconnect"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Disconnect" />
-    </LinearLayout>
-
-    <ScrollView
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:paddingTop="12dp">
-
-        <TextView
-            android:id="@+id/status"
+        <com.google.android.material.appbar.MaterialToolbar
+            android:id="@+id/toolbar"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:textSize="11sp"
-            android:text="Disconnected" />
-    </ScrollView>
-</LinearLayout>
+            android:layout_height="?attr/actionBarSize"
+            app:title="FIPS Mesh" />
+    </com.google.android.material.appbar.AppBarLayout>
+
+    <androidx.fragment.app.FragmentContainerView
+        android:id="@+id/fragment_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:layout_behavior="@string/appbar_scrolling_view_behavior" />
+
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/bottom_nav"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        app:menu="@menu/bottom_nav" />
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Fips" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/fips_primary</item>
+        <item name="colorOnPrimary">@color/fips_on_primary</item>
+        <item name="colorPrimaryContainer">@color/fips_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/fips_on_primary_container</item>
+        <item name="colorSecondary">@color/fips_secondary</item>
+        <item name="android:statusBarColor">?attr/colorSurface</item>
+    </style>
+</resources>

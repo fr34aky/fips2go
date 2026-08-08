@@ -21,7 +21,7 @@
     <application
         android:label="FIPS Mesh"
         android:allowBackup="false"
-        android:theme="@style/Theme.AppCompat.DayNight">
+        android:theme="@style/Theme.Fips">
 
         <activity
             android:name=".MainActivity"

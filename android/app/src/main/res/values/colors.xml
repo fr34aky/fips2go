@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- A calm teal/green palette that reads as "mesh / secure". -->
+    <color name="fips_primary">#1F6F5C</color>
+    <color name="fips_on_primary">#FFFFFF</color>
+    <color name="fips_primary_container">#A6F2DC</color>
+    <color name="fips_on_primary_container">#002019</color>
+    <color name="fips_secondary">#4A635B</color>
+    <color name="status_ok">#2E7D32</color>
+    <color name="status_off">#9E9E9E</color>
+</resources>

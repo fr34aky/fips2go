@@ -47,4 +47,10 @@ object FipsNative {
 
     /** Any snapshot-served `show_*` query, e.g. `query("show_peers", "")`. */
     external fun query(command: String, paramsJson: String): String
+
+    /** Resolve an npub to its `.fips` address. JSON `{npub,address}` or `{error}`. */
+    external fun resolveNpub(npub: String): String
+
+    /** The most recent node log lines (newline-joined). */
+    external fun recentLogs(maxLines: Int): String
 }
