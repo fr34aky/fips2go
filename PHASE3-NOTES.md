@@ -178,6 +178,38 @@ npub/address); connect works with the service decrypting the Keystore nsec
 (`fips engine started` + `Peer promoted`); the regenerate dialog warns before
 replacing the identity (Cancel leaves it untouched).
 
+## Battery / Doze profile — done, verified on-device (partial)
+
+- **Shim**: `battery_saver` config (default on) relaxes the node timers for
+  mobile — maintenance tick 1→5s, link heartbeat 10→20s, link-dead 30→60s —
+  to cut CPU/radio wakeups. Heartbeat stays under the ~30s aggressive-NAT UDP
+  timeout so mappings don't expire. Logged on apply. Pairs with the earlier
+  worker-thread cap (1+1).
+- **Kotlin**: "Battery saver (relaxed timers)" switch (default on); on connect
+  the app requests the battery-optimization exemption
+  (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) so Doze/App Standby doesn't freeze
+  the service.
+
+**Verified on Pixel 9 Pro**: `battery saver: relaxed node timers tick_secs=5
+heartbeat_secs=20 link_dead_secs=60` applied; mesh still forms (`Peer
+promoted`); the exemption dialog appears. NOT measured: actual battery/wakeup
+reduction over time and Doze survival (needs long observation) — only that the
+profile applies and doesn't break the mesh.
+
+## Open issue — other-app connectivity block (unresolved, deprioritized)
+
+While testing the split tunnel, `ip rule` showed a full-capture `prohibit`
+rule over `uidrange 0-99999` (minus our app uid 10242) that blocks every other
+app's network (not just DNS — literal-IP connects fail too), and it **survived
+a reboot** with the app auto-running and no active VPN / no always-on / no
+lockdown. Root cause not pinned down (possibly leaked netd state from
+reinstalling an active VPN during testing, or a per-app-VPN + default-route
+interaction). Investigation was stopped at the user's request to continue other
+work. **Revisit**: on a clean device, connect a per-app VPN and confirm
+uncaptured apps keep connectivity; if the per-app + `::/0`+`0.0.0.0/0` routes
+themselves install a system-wide prohibit, the split-tunnel design needs
+rework.
+
 ## Not done / next
 
 - On-device testing (no adb on this machine): install `app-debug.apk`, check
