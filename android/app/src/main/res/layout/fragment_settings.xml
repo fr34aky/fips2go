@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Bootstrap peer -->
+        <TextView style="@style/SettingsHeader" android:text="Bootstrap peer" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Peer npub">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/peer_npub"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Peer endpoint (host:port)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/peer_endpoint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Transport (udp / tcp)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/peer_transport"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- Discovery -->
+        <TextView style="@style/SettingsHeader" android:text="Discovery" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/nostr"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="Nostr rendezvous (relay discovery + NAT traversal)" />
+
+        <!-- DNS -->
+        <TextView style="@style/SettingsHeader" android:text="DNS" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/enable_fips_dns"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="In-app .fips resolver" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Upstream DNS (one per line, host:port)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/dns_upstreams"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:minLines="2" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- Performance -->
+        <TextView style="@style/SettingsHeader" android:text="Performance &amp; battery" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/battery_saver"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="Battery saver (relaxed timers)" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/forward_clearnet"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="Forward non-mesh traffic (split tunnel)" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Worker threads (encrypt/decrypt)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/worker_threads"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="number" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- Logging -->
+        <TextView style="@style/SettingsHeader" android:text="Logging" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Log level (error/warn/info/debug/trace)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/log_level"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- Advanced -->
+        <TextView style="@style/SettingsHeader" android:text="Advanced: raw fips.yaml" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="When set, this fully defines the fips config (every parameter) and overrides the structured fips settings above."
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?android:attr/textColorSecondary"
+            android:paddingBottom="8dp" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="fips.yaml">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/fips_yaml"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:gravity="top"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:minLines="6"
+                android:textSize="12sp" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/load_template"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Load template" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/save"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="24dp"
+            android:text="Save settings" />
+    </LinearLayout>
+</ScrollView>

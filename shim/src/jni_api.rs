@@ -148,6 +148,33 @@ pub extern "system" fn Java_org_fips_android_FipsNative_status(
     to_jstring(&env, &crate::engine::status_json())
 }
 
+/// `resolveNpub(npub)` → JSON `{npub, address}` (the `.fips` mesh address) or
+/// `{"error": "..."}`. Pure computation; works whether or not the node runs.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_fips_android_FipsNative_resolveNpub(
+    mut env: JNIEnv,
+    _class: JClass,
+    npub: JString,
+) -> jstring {
+    let npub = from_jstring(&mut env, &npub);
+    let json = match crate::config::resolve_npub(&npub) {
+        Ok((npub, address)) => serde_json::json!({ "npub": npub, "address": address }).to_string(),
+        Err(e) => serde_json::json!({ "error": e }).to_string(),
+    };
+    to_jstring(&env, &json)
+}
+
+/// `recentLogs(maxLines)` → the most recent node log lines, newline-joined.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_fips_android_FipsNative_recentLogs(
+    env: JNIEnv,
+    _class: JClass,
+    max_lines: jint,
+) -> jstring {
+    let max = max_lines.max(0) as usize;
+    to_jstring(&env, &crate::logbuf::recent(max))
+}
+
 /// `query(command, paramsJson)` → any snapshot-served `show_*` result.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_query(
