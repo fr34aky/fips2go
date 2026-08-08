@@ -35,14 +35,18 @@ start rejected, stop idempotent, restartable ×2).
   rendering the `show_status` snapshot.
 - `FipsNative` — the `external fun` mirror of the JNI exports.
 
-## Build
+## Build — **APK built successfully on this machine**
 
 - `./build-native.sh` → shim cross-compiled, `.so` copied to jniLibs
   (11.7 MB arm64, all six JNI symbols verified with `llvm-nm`).
 - APK: `cd android && JAVA_HOME=~/.local/jdk-17 ~/.local/gradle-8.7/bin/gradle assembleDebug`
-  — toolchain installed in userspace this session: Temurin JDK 17
+  — **BUILD SUCCESSFUL**; a copy of the installable artifact is at
+  `dist/fips-android-debug.apk` (26.7 MB, contains
+  `lib/arm64-v8a/libfips_android.so`). Install: `adb install dist/fips-android-debug.apk`.
+- Toolchain installed in userspace this session: Temurin JDK 17
   (`~/.local/jdk-17`), Android SDK platform-34 + build-tools 34.0.0
   (`~/android-sdk`), Gradle 8.7 (`~/.local/gradle-8.7`).
+- `fips-android/` is now a local git repo (branch `main`, no remote).
 
 ## Design decisions
 
