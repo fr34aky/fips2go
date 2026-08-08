@@ -157,6 +157,27 @@ Caveat: ICMP to clearnet isn't forwarded (only TCP/UDP), and all captured-app
 traffic flows through the app's userspace stack (battery/latency cost — the
 reason it's per-app).
 
+## nsec in Android Keystore + regenerate — done, verified on-device
+
+The node secret was plaintext in `SharedPreferences`. Now:
+
+- `SecureStore`: AES-256-GCM under a non-exportable, hardware-backed
+  (TEE/StrongBox) Keystore key, alias `fips_identity_key`, no per-use auth
+  (the background service must decrypt).
+- `IdentityStore`: persists the nsec as Keystore-encrypted ciphertext
+  (`nsec_enc`), migrates a legacy plaintext `nsec` (removing it), regenerates
+  on decrypt failure.
+- The nsec no longer travels in an Intent: `FipsVpnService` decrypts it and
+  builds the shim config itself (removed `EXTRA_CONFIG`/`EXTRA_ADDRESS`).
+- `MainActivity`: "Regenerate identity" button → confirm dialog →
+  `IdentityStore.regenerate`.
+
+**Verified on Pixel 9 Pro**: the pre-existing plaintext `nsec` migrated to
+`nsec_enc` (plaintext removed) with the identity preserved (same
+npub/address); connect works with the service decrypting the Keystore nsec
+(`fips engine started` + `Peer promoted`); the regenerate dialog warns before
+replacing the identity (Cancel leaves it untouched).
+
 ## Not done / next
 
 - On-device testing (no adb on this machine): install `app-debug.apk`, check
