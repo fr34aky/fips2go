@@ -10,9 +10,8 @@ publish = false
 # - cross-compiled for aarch64-linux-android: proves the fips library and a
 #   full binary link with the NDK toolchain.
 [dependencies]
-# The android-hooks worktree (branch android-hooks of ~/fips) — carries the
-# Phase 2 embedder hooks (set_socket_protect, tun_packet_processor).
-fips = { path = "../fips", default-features = false }
+# fips with the Android embedder hooks — fr34aky/fips @ android-hooks, pinned.
+fips = { git = "https://github.com/fr34aky/fips", rev = "bda3997", default-features = false }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
