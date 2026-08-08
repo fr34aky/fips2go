@@ -16,6 +16,7 @@ crate-type = ["cdylib", "lib"]
 # The android-hooks worktree (branch android-hooks of ~/fips): app-owned TUN
 # seam + socket-protect hook + TunPacketProcessor + ControlReadHandle::query.
 fips = { path = "../fips", default-features = false }
+ipstack = "1"
 jni = "0.21"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

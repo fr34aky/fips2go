@@ -9,6 +9,7 @@
 pub mod config;
 pub mod dns;
 pub mod engine;
+pub mod forward;
 mod jni_api;
 pub mod packet;
 pub mod pump;

@@ -15,7 +15,11 @@ use fips::control::read_handle::ControlReadHandle;
 
 use crate::config::ShimConfig;
 use crate::dns::DnsProxy;
+use crate::forward::Forwarder;
 use crate::pump::{Pump, PumpConfig};
+
+/// Clearnet forwarder MTU — matches the tunnel MTU.
+const FORWARD_MTU: u16 = 1280;
 
 /// How long `start()` waits for the node to reach a started state.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
@@ -66,6 +70,7 @@ struct Engine {
     stop_tx: Option<tokio::sync::oneshot::Sender<()>>,
     node_thread: Option<std::thread::JoinHandle<()>>,
     pump: Option<Pump>,
+    forwarder: Option<Forwarder>,
     read_handle: ControlReadHandle,
     npub: String,
     address: String,
@@ -207,8 +212,28 @@ fn start_inner(
         local_responder: LOCAL_RESPONDER.parse().unwrap(),
         upstreams: shim_config.upstream_addrs(),
         writer_tx: writer_tx.clone(),
-        protect,
+        protect: engine_protect.clone(),
     });
+
+    // Clearnet forwarder (split-tunnel): non-mesh packets from the pump go
+    // through a userspace stack and out on protected sockets.
+    let (forwarder, forward_tx) = if shim_config.forward_clearnet {
+        let (forward_tx, forward_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        let forwarder = Forwarder::spawn(
+            forward_rx,
+            writer_tx.clone(),
+            engine_protect.clone(),
+            running.clone(),
+            FORWARD_MTU,
+        )
+        .map_err(|e| {
+            unsafe { libc::close(owned_fd) };
+            format!("spawn forwarder: {e}")
+        })?;
+        (Some(forwarder), Some(forward_tx))
+    } else {
+        (None, None)
+    };
 
     let pump = Pump::spawn(PumpConfig {
         tun_fd: owned_fd,
@@ -218,6 +243,7 @@ fn start_inner(
         inbound_rx,
         dns_addr: DNS_SENTINEL,
         dns,
+        forward_tx,
         writer_tx,
         writer_rx,
     })
@@ -232,6 +258,7 @@ fn start_inner(
         stop_tx: Some(stop_tx),
         node_thread: Some(node_thread),
         pump: Some(pump),
+        forwarder,
         read_handle,
         npub: npub.clone(),
         address: address.clone(),
@@ -254,7 +281,10 @@ pub fn stop() {
     }
     engine.running.store(false, Ordering::Relaxed);
     if let Some(pump) = engine.pump.take() {
-        pump.join();
+        pump.join(); // reader exits and drops forward_tx…
+    }
+    if let Some(forwarder) = engine.forwarder.take() {
+        forwarder.join(); // …which closes the forwarder's device → it ends
     }
     if let Some(handle) = engine.node_thread.take() {
         let _ = handle.join();
@@ -362,6 +392,7 @@ mod tests {
             "peers": [],
             "enable_nostr": false,
             "enable_fips_dns": false, // avoid [::1]:5354 collisions on the host
+            "forward_clearnet": false, // no tun/clearnet in the host test
             "log_level": "warn",
         })
         .to_string();

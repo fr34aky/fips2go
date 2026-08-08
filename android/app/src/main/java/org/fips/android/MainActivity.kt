@@ -64,6 +64,17 @@ class MainActivity : AppCompatActivity() {
                     .setAction(FipsVpnService.ACTION_DISCONNECT)
             )
         }
+        findViewById<Button>(R.id.pick_apps).setOnClickListener {
+            startActivity(Intent(this, AppPickerActivity::class.java))
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val n = prefs().getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet())?.size ?: 0
+        findViewById<Button>(R.id.pick_apps).text =
+            if (n == 0) "Select mesh apps (none — all apps stay off the mesh)"
+            else "Select mesh apps ($n selected)"
     }
 
     override fun onResume() {

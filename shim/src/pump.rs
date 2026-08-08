@@ -45,6 +45,10 @@ pub struct PumpConfig {
     /// are peeled off to the DNS proxy.
     pub dns_addr: [u8; 16],
     pub dns: Arc<DnsProxy>,
+    /// Non-mesh packets (clearnet) go here, to the userspace forwarder. `None`
+    /// disables forwarding (such packets are dropped) — used when the VPN only
+    /// routes `fd00::/8` and no clearnet is expected.
+    pub forward_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     /// The writer channel pair (the sender is also held by the DNS proxy).
     pub writer_tx: Sender<Vec<u8>>,
     pub writer_rx: Receiver<Vec<u8>>,
@@ -60,13 +64,14 @@ impl Pump {
             inbound_rx,
             dns_addr,
             dns,
+            forward_tx,
             writer_tx,
             writer_rx,
         } = config;
 
         let mut threads = Vec::new();
 
-        // Reader: fd → (dns | mesh | write-back)
+        // Reader: fd → (dns | mesh | clearnet-forward | write-back)
         {
             let running = running.clone();
             let writer_tx = writer_tx.clone();
@@ -82,6 +87,7 @@ impl Pump {
                             &writer_tx,
                             &dns_addr,
                             &dns,
+                            forward_tx.as_ref(),
                         );
                         tracing::info!("TUN reader stopped");
                     })?,
@@ -154,6 +160,15 @@ impl Pump {
     }
 }
 
+/// IPv6 mesh prefix (`fd00::/8`); anything else is clearnet.
+const MESH_PREFIX: u8 = fips::identity::FIPS_ADDRESS_PREFIX;
+
+/// True if this is an IPv6 packet destined for the mesh (`fd00::/8`).
+fn is_mesh_bound(packet: &[u8]) -> bool {
+    packet.len() >= 40 && packet[0] >> 4 == 6 && packet[24] == MESH_PREFIX
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_reader(
     fd: RawFd,
     running: &AtomicBool,
@@ -162,6 +177,7 @@ fn run_reader(
     writer_tx: &Sender<Vec<u8>>,
     dns_addr: &[u8; 16],
     dns: &Arc<DnsProxy>,
+    forward_tx: Option<&tokio::sync::mpsc::Sender<Vec<u8>>>,
 ) {
     let mut buf = vec![0u8; READ_BUF];
     while running.load(Ordering::Relaxed) {
@@ -205,12 +221,24 @@ fn run_reader(
         }
         let packet = &mut buf[..n as usize];
 
-        // DNS queries addressed to us never enter the mesh.
+        // DNS queries addressed to our resolver never enter the mesh.
         if DnsProxy::intercepts(packet, dns_addr) {
             dns.handle(packet.to_vec());
             continue;
         }
 
+        // Clearnet (non-mesh) traffic → userspace forwarder, if enabled.
+        // No forwarder: drop (the VPN shouldn't route clearnet to us then).
+        if !is_mesh_bound(packet) {
+            if let Some(fwd) = forward_tx
+                && fwd.blocking_send(packet.to_vec()).is_err()
+            {
+                break; // forwarder gone
+            }
+            continue;
+        }
+
+        // Mesh-bound: run the node's outbound pipeline (filter/clamp/hairpin).
         match processor.process(packet) {
             TunPacketAction::Forward => {
                 if outbound_tx.blocking_send(packet.to_vec()).is_err() {

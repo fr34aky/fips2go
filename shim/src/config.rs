@@ -30,6 +30,11 @@ pub struct ShimConfig {
     /// and in-line decrypt on the rx_loop (fewest threads).
     #[serde(default = "default_worker_threads")]
     pub worker_threads: usize,
+    /// Forward non-mesh (clearnet) traffic through the userspace stack so
+    /// captured apps keep normal internet (the split-tunnel forwarder). On by
+    /// default; the host tests disable it (no clearnet to forward).
+    #[serde(default = "default_true")]
+    pub forward_clearnet: bool,
     /// tracing filter, e.g. "info" or "fips=debug".
     #[serde(default)]
     pub log_level: Option<String>,
