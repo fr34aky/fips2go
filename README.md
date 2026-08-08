@@ -71,12 +71,20 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
 
 ## Status / caveats
 
-- Built and unit-tested on the host (engine lifecycle, DNS proxy, packet
-  codecs) and cross-compiled for arm64; **not yet exercised on a device**
-  (no adb on this machine).
-- mDNS (`lan-mdns`) is compiled out; Android needs `MulticastLock` handling
-  first. BLE/Ethernet transports are not available on Android.
-- Battery: the node ticks at 1s and keeps transports warm; expect Doze to
-  fight long-lived sessions until timers get a mobile profile.
-- Runtime peer add/remove (control `connect`/`disconnect`) not exposed yet —
-  peers come from config at connect time; toggling the VPN re-reads them.
+- **Exercised on a device** (Pixel 9 Pro, GrapheneOS / Android). Verified:
+  connect/disconnect and joining a live ~1300-node mesh; `.fips` resolution
+  and upstream DNS; per-app split tunnel (selected apps get mesh **and**
+  clearnet, other apps untouched); Wi-Fi↔cellular hand-off; Keystore identity
+  + regenerate; the Material 3 UI (Overview / Settings / Diagnostics), npub
+  resolve, and the log viewer; the battery profile (relaxed timers). Also
+  unit-tested on the host (engine lifecycle, DNS proxy, packet codecs) and
+  cross-compiled for arm64.
+- **Not yet measured**: actual battery/wakeup savings over a long Doze cycle
+  (the profile is applied and doesn't break the mesh, but the saving isn't
+  quantified). The forwarder was validated on a few flows, not under broad
+  real-app load.
+- mDNS (`lan-mdns`) LAN discovery: Android needs `MulticastLock` handling
+  first. BLE/Ethernet transports are not available on Android. ICMP to
+  clearnet is not forwarded (TCP/UDP are).
+- Multi-ABI: only `arm64-v8a` is built (add `armeabi-v7a` / `x86_64` for older
+  phones / the emulator). Debug build only; no signed release yet.

@@ -11,7 +11,7 @@ Date: 2026-08-08. All local; nothing committed to the fips repo.
 | `cargo build --lib --target aarch64-linux-android` (default features, incl. `lan-mdns`) | **PASS** — `mdns-sd`/`socket-pktinfo` compile against bionic |
 | Full binary link for Android (`smoke` release build) | **PASS** — ELF aarch64 PIE, `/system/bin/linker64` interpreter |
 | `tun` crate on the Android target | Compiles as-is; no `cfg` gating needed (it's in the tree via `cfg(unix)` but never called on the app-owned path) |
-| On-device run | **Not done** — no adb/emulator on this machine; `smoke/target/aarch64-linux-android/release/fips-smoke` is ready to push to a device (`adb push` + `adb shell` under `/data/local/tmp`) |
+| On-device run | Superseded — the full app (Phase 3) was later exercised on a Pixel 9 Pro end-to-end (connect, mesh join, split tunnel, etc.). This Phase-1 smoke binary was a build-viability check. |
 
 ## The smoke test (`smoke/`)
 
