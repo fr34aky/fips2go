@@ -1,6 +1,11 @@
 # 16 KB page alignment for the native lib. Android 15+ on Pixel 9-class
 # hardware runs with 16 KB memory pages and rejects (or warns on) .so files
 # whose LOAD segments are only 4 KB-aligned. NDK r27's lld defaults to 4 KB;
-# this forces the larger max-page-size so segments align to 0x4000.
+# this forces the larger max-page-size so segments align to 0x4000. Applied
+# to every 64-bit ABI (Google requires 16 KB support for x86_64 too);
+# armeabi-v7a stays 4 KB — 32-bit Android never uses 16 KB pages.
 [target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
