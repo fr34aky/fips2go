@@ -4,7 +4,9 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -38,6 +40,10 @@ class FipsVpnService : VpnService() {
         private const val CHANNEL_ID = "fips_vpn"
         private const val NOTIFICATION_ID = 1
         private const val MESH_MTU = 1280
+        // The tun's IPv4 source address for captured apps' clearnet (any
+        // private range not on the LAN; forwarded flows are re-sourced to the
+        // real egress IP anyway).
+        private const val TUN_IPV4 = "10.111.222.1"
     }
 
     private var tunFd: ParcelFileDescriptor? = null
@@ -46,6 +52,8 @@ class FipsVpnService : VpnService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var currentUnderlying: Network? = null
     private val rebinding = AtomicBoolean(false)
+
+    private fun prefs() = getSharedPreferences("fips", Context.MODE_PRIVATE)
 
     /** Called from Rust (JNI) for every underlay socket the node creates. */
     fun protectFd(fd: Int): Boolean = protect(fd)
@@ -72,17 +80,40 @@ class FipsVpnService : VpnService() {
             Log.w(TAG, "already running")
             return
         }
+        val meshApps = prefs()
+            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
+
         val pfd = try {
-            Builder()
+            val builder = Builder()
                 .setSession("FIPS Mesh")
                 .setMtu(MESH_MTU)
-                .addAddress(address, 128)
+                .addAddress(address, 128)          // mesh IPv6 address
+                .addAddress(TUN_IPV4, 32)          // IPv4 source for clearnet
+                // Capture everything for the selected apps: fd00::/8 goes to the
+                // mesh, the rest (::/0, 0.0.0.0/0) reaches the userspace
+                // forwarder which sends it out on protected sockets.
                 .addRoute("fd00::", 8)
-                // The DNS server must be a routed fd00::/8 sentinel the pump
-                // sees on the fd — NOT `address` (our own tun /128), which the
-                // kernel would deliver locally and never surface to the reader.
+                .addRoute("::", 0)
+                .addRoute("0.0.0.0", 0)
+                // DNS server = the fd00::/8 sentinel the pump intercepts (NOT our
+                // own tun /128, which the kernel would deliver locally).
                 .addDnsServer(FipsNative.dnsServer())
-                .establish()
+
+            // Per-app split tunnel: only the chosen apps are captured; every
+            // other app keeps the normal network untouched. With no selection,
+            // capture only ourselves (a no-op) so nothing else is affected.
+            if (meshApps.isEmpty()) {
+                builder.addAllowedApplication(packageName)
+            } else {
+                for (pkg in meshApps) {
+                    try {
+                        builder.addAllowedApplication(pkg)
+                    } catch (e: PackageManager.NameNotFoundException) {
+                        Log.w(TAG, "mesh app not installed, skipping: $pkg")
+                    }
+                }
+            }
+            builder.establish()
         } catch (e: Exception) {
             Log.e(TAG, "establish failed", e)
             null

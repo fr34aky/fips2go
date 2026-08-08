@@ -21,6 +21,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".AppPickerActivity"
+            android:exported="false"
+            android:label="Mesh apps" />
+
         <service
             android:name=".FipsVpnService"
             android:exported="false"
