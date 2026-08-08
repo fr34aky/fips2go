@@ -6,10 +6,17 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
@@ -34,6 +41,11 @@ class FipsVpnService : VpnService() {
     }
 
     private var tunFd: ParcelFileDescriptor? = null
+
+    private var connectivity: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var currentUnderlying: Network? = null
+    private val rebinding = AtomicBoolean(false)
 
     /** Called from Rust (JNI) for every underlay socket the node creates. */
     fun protectFd(fd: Int): Boolean = protect(fd)
@@ -88,10 +100,113 @@ class FipsVpnService : VpnService() {
             shutdown()
         } else {
             Log.i(TAG, "fips engine running, address $address")
+            registerNetworkMonitoring()
         }
     }
 
+    private val availableNetworks = LinkedHashSet<Network>()
+
+    /**
+     * Watch the underlying (non-VPN) internet networks. On a switch
+     * (Wi-Fi ↔ cellular) the node's UDP socket keeps a stale binding and the
+     * mesh black-holes, so we update the tunnel's underlying network and ask
+     * the engine to rebuild on the same fd (fresh, re-protected socket).
+     *
+     * `registerSystemDefaultNetworkCallback` would name the exact default, but
+     * it's a `@SystemApi` gated on `NETWORK_SETTINGS`. Instead we track all
+     * non-VPN internet networks (the request excludes VPN by default) and pick
+     * a preferred one (Wi-Fi > Ethernet > cellular) — the same approach other
+     * VPN apps use.
+     */
+    private fun registerNetworkMonitoring() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        connectivity = cm
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                synchronized(availableNetworks) { availableNetworks.add(network) }
+                updateUnderlying()
+            }
+            override fun onLost(network: Network) {
+                synchronized(availableNetworks) { availableNetworks.remove(network) }
+                updateUnderlying()
+            }
+        }
+        networkCallback = cb
+        val req = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        try {
+            cm.registerNetworkCallback(req, cb, Handler(Looper.getMainLooper()))
+        } catch (e: Exception) {
+            Log.w(TAG, "registerNetworkCallback failed", e)
+        }
+    }
+
+    /** The non-VPN network we should egress on: Wi-Fi > Ethernet > cellular. */
+    private fun preferredUnderlying(): Network? {
+        val cm = connectivity ?: return null
+        val snapshot = synchronized(availableNetworks) { availableNetworks.toList() }
+        return snapshot.maxByOrNull { net ->
+            val caps = cm.getNetworkCapabilities(net)
+            when {
+                caps == null -> 0
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 3
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 2
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1
+                else -> 0
+            }
+        }
+    }
+
+    private fun updateUnderlying() {
+        val network = preferredUnderlying() ?: return
+        onUnderlyingNetwork(network)
+    }
+
+    private fun onUnderlyingNetwork(network: Network) {
+        // Point the tunnel's accounting/routing at the new underlying network.
+        try {
+            setUnderlyingNetworks(arrayOf(network))
+        } catch (e: Exception) {
+            Log.w(TAG, "setUnderlyingNetworks failed", e)
+        }
+
+        val previous = currentUnderlying
+        currentUnderlying = network
+        when {
+            previous == null -> Log.i(TAG, "baseline underlying network: $network")
+            previous == network -> {} // same network — nothing to rebuild
+            else -> {
+                Log.i(TAG, "underlying network changed $previous -> $network; rebinding node")
+                val fd = tunFd?.fd ?: return
+                if (rebinding.compareAndSet(false, true)) {
+                    thread(name = "fips-rebind") {
+                        try {
+                            FipsNative.onNetworkChanged(fd)
+                        } finally {
+                            rebinding.set(false)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun unregisterNetworkMonitoring() {
+        networkCallback?.let { cb ->
+            try {
+                connectivity?.unregisterNetworkCallback(cb)
+            } catch (e: Exception) {
+                Log.w(TAG, "unregisterNetworkCallback failed", e)
+            }
+        }
+        networkCallback = null
+        currentUnderlying = null
+        synchronized(availableNetworks) { availableNetworks.clear() }
+    }
+
     private fun shutdown() {
+        unregisterNetworkMonitoring()
         thread(name = "fips-disconnect") {
             FipsNative.stop()
             tunFd?.close()
@@ -102,6 +217,7 @@ class FipsVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        unregisterNetworkMonitoring()
         FipsNative.stop()
         tunFd?.close()
         tunFd = null

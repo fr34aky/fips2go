@@ -71,6 +71,10 @@ struct Engine {
     address: String,
     /// Our dup of the VpnService TUN fd; closed after the pump joins.
     tun_fd: RawFd,
+    /// Kept so [`network_changed`] can rebuild the node (fresh, re-protected
+    /// underlay socket on the new network) on the same TUN fd.
+    config_json: String,
+    protect: Option<fips::SocketProtect>,
 }
 
 /// What `start()` reports back to Kotlin.
@@ -130,6 +134,9 @@ fn start_inner(
 
     // The Android seam: app-owned TUN channels, before start().
     let (outbound_tx, inbound_rx) = node.enable_app_owned_tun();
+    // Keep a clone for rebuilds on network change (the original is moved into
+    // the DNS proxy below).
+    let engine_protect = protect.clone();
     if let Some(hook) = protect.clone() {
         node.set_socket_protect(hook);
     }
@@ -229,6 +236,8 @@ fn start_inner(
         npub: npub.clone(),
         address: address.clone(),
         tun_fd: owned_fd,
+        config_json: config_json.to_string(),
+        protect: engine_protect,
     };
     Ok((engine, StartInfo { npub, address }))
 }
@@ -252,6 +261,44 @@ pub fn stop() {
     }
     unsafe { libc::close(engine.tun_fd) };
     tracing::info!("fips engine stopped");
+}
+
+/// Guards against overlapping / re-entrant rebuilds from a burst of network
+/// callbacks.
+static REBINDING: AtomicBool = AtomicBool::new(false);
+
+/// Rebuild the node after an underlying-network change (Wi-Fi ↔ cellular).
+///
+/// The node has no runtime socket-rebind hook and, as observed on-device, does
+/// not recover on its own: its UDP socket keeps a stale source/NAT binding and
+/// the mesh silently black-holes. So we restart the node on the SAME TUN fd —
+/// the tunnel (owned by the Kotlin `ParcelFileDescriptor`) stays up, while the
+/// node gets a fresh socket, re-protected on the new default network, and
+/// re-dials its peers / re-STUNs. `tun_fd` is the same VpnService fd passed to
+/// [`start`] (Kotlin still owns it). No-op when not running.
+pub fn network_changed(tun_fd: RawFd) -> Result<(), String> {
+    // Snapshot what we need to rebuild; bail if not running.
+    let rebuild = {
+        let slot = ENGINE.lock().unwrap();
+        slot.as_ref()
+            .map(|e| (e.config_json.clone(), e.protect.clone()))
+    };
+    let Some((config_json, protect)) = rebuild else {
+        return Ok(());
+    };
+    if REBINDING.swap(true, Ordering::SeqCst) {
+        // A rebuild is already running; the network state it reads will be the
+        // latest, so coalescing this callback into it is correct.
+        return Ok(());
+    }
+    tracing::info!("underlying network changed; restarting node on the same tun fd");
+    stop();
+    let result = start(&config_json, tun_fd, protect).map(|_| ());
+    REBINDING.store(false, Ordering::SeqCst);
+    if let Err(e) = &result {
+        tracing::error!(error = %e, "node rebuild after network change failed");
+    }
+    result
 }
 
 /// Compact status JSON for the UI. Always answers, running or not.
