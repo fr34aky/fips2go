@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Node identity"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/identity"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:textSize="12sp"
+        android:paddingBottom="12dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Peer (optional when Nostr rendezvous is on)"
+        android:textStyle="bold" />
+
+    <EditText
+        android:id="@+id/peer_npub"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="peer npub1…"
+        android:inputType="text" />
+
+    <EditText
+        android:id="@+id/peer_endpoint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="peer host:port (UDP)"
+        android:inputType="text" />
+
+    <Switch
+        android:id="@+id/nostr_switch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Nostr rendezvous"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/connect"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Connect" />
+
+        <Button
+            android:id="@+id/disconnect"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Disconnect" />
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:paddingTop="12dp">
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textSize="11sp"
+            android:text="Disconnected" />
+    </ScrollView>
+</LinearLayout>

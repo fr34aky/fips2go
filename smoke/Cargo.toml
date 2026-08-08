@@ -1,0 +1,20 @@
+[package]
+name = "fips-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Phase 1 smoke test for the Android port:
+# - on the host: runs two in-process nodes wired through the app-owned TUN
+#   seam (`Node::enable_app_owned_tun`) and pushes a packet end-to-end.
+# - cross-compiled for aarch64-linux-android: proves the fips library and a
+#   full binary link with the NDK toolchain.
+[dependencies]
+# The android-hooks worktree (branch android-hooks of ~/fips) — carries the
+# Phase 2 embedder hooks (set_socket_protect, tun_packet_processor).
+fips = { path = "../fips", default-features = false }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true

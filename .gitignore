@@ -1,0 +1,16 @@
+# The fips worktree is tracked by ~/fips (branch android-hooks), not here.
+/fips/
+
+# Rust (Cargo.lock stays tracked — it pins rustables 0.8.7 for host builds)
+target/
+
+# Android / Gradle
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/app/src/main/jniLibs/
+
+# Toolchain archives
+*.zip
+*.tar.gz
