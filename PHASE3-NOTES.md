@@ -97,6 +97,34 @@ Note: `avc: denied ... cgroup` SELinux lines are benign — Rust's
 `available_parallelism()` cgroup probe; the worker pool still spawns. Worth
 capping `FIPS_ENCRYPT/DECRYPT_WORKERS` for mobile later (it chose 8+8).
 
+## Network-change handling (Wi-Fi ↔ cellular) — done, verified on-device
+
+The node's UDP socket keeps a stale source/NAT binding across an
+underlying-network switch and the mesh **silently black-holes** — confirmed
+on-device: after forcing Wi-Fi off, 50s+ passed with zero fips activity, no
+self-heal. The node has no runtime socket-rebind hook, so:
+
+- **Kotlin** (`FipsVpnService`): a `ConnectivityManager` callback tracks
+  non-VPN internet networks and picks a preferred one (Wi-Fi > Ethernet >
+  cellular). `registerSystemDefaultNetworkCallback` would be ideal but is a
+  `@SystemApi` gated on `NETWORK_SETTINGS` (verified absent from the
+  platform-34 jar), so we track the available set ourselves. On a change:
+  `setUnderlyingNetworks()` + `FipsNative.onNetworkChanged(fd)`, on a worker
+  thread, debounced by an `AtomicBoolean`. Needs `ACCESS_NETWORK_STATE`.
+- **Shim** (`engine::network_changed`): restarts the node on the **same TUN
+  fd** — the Kotlin `ParcelFileDescriptor` keeps the tunnel up, so only the
+  node cycles: fresh, re-protected UDP socket on the new network, then it
+  re-dials static peers / re-STUNs. Guarded by a `REBINDING` flag against
+  overlapping rebuilds. New JNI export `onNetworkChanged`.
+
+**Verified on Pixel 9 Pro**: `underlying network changed 156 -> 129` (Wi-Fi→
+LTE) and `129 -> 164` (LTE→Wi-Fi) each tore down and re-formed the mesh
+(`Peer promoted to active`) in ~1–2 s. `setUnderlyingNetworks` confirmed via
+`dumpsys connectivity` (`UnderlyingNetworks: [164]`). Trade-off: a network
+switch causes a ~1–2 s mesh blip (full node restart) rather than a seamless
+socket rebind — acceptable, and far better than the indefinite black-hole; a
+seamless version would need a runtime rebind API added to fips.
+
 ## Not done / next
 
 - On-device testing (no adb on this machine): install `app-debug.apk`, check
