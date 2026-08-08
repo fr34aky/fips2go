@@ -18,7 +18,7 @@ crate-type = ["cdylib", "lib"]
 # of the fr34aky/fips fork, pinned. For local fips development, override with:
 #   [patch."https://github.com/fr34aky/fips"]
 #   fips = { path = "../fips" }
-fips = { git = "https://github.com/fr34aky/fips", rev = "bda3997", default-features = false }
+fips = { git = "https://github.com/fr34aky/fips", rev = "772cabb", default-features = false }
 ipstack = "1"
 jni = "0.21"
 libc = "0.2"

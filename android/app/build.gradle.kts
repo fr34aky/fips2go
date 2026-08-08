@@ -15,7 +15,7 @@ android {
         versionName = "0.1.0"
         // The Rust shim is built per-ABI by ../build-native.sh into
         // src/main/jniLibs/<abi>/libfips_android.so.
-        ndk { abiFilters += listOf("arm64-v8a") }
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
     buildTypes {

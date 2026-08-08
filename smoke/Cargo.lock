@@ -980,7 +980,7 @@ checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 [[package]]
 name = "fips"
 version = "0.5.0-dev"
-source = "git+https://github.com/fr34aky/fips?rev=bda3997#bda39975fb1c3ad49cbc20f33c4e11f3346d1411"
+source = "git+https://github.com/fr34aky/fips?rev=772cabb#772cabb6af7a6bd84c021183f393db27ba743197"
 dependencies = [
  "arc-swap",
  "bech32",

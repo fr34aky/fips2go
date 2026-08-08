@@ -9,8 +9,9 @@ Android port of the FIPS mesh daemon, embedded in a `VpnService` app. A Rust JNI
 ## Build & test commands
 
 ```bash
-# Rust shim → android/app/src/main/jniLibs/arm64-v8a/libfips_android.so
-./build-native.sh
+# Rust shim → android/app/src/main/jniLibs/<abi>/libfips_android.so
+./build-native.sh                # all ABIs: arm64-v8a, armeabi-v7a, x86_64
+./build-native.sh arm64-v8a      # single ABI for faster iteration
 
 # Host-side Rust tests (engine lifecycle, DNS proxy, packet codecs — everything but the JNI surface)
 source ./android-env.sh && (cd shim && cargo test)
@@ -63,8 +64,8 @@ Kotlin side: `MainActivity` hosts bottom-nav fragments (Overview / Settings / Di
 
 ## Constraints & gotchas
 
-- `shim/.cargo/config.toml` forces 16 KB page alignment (`max-page-size=16384`) — required on Android 15+/Pixel 9-class devices; don't remove it.
-- Only `arm64-v8a` is built (no emulator/x86_64 ABI yet). Debug build only; no signed release.
+- `shim/.cargo/config.toml` forces 16 KB page alignment (`max-page-size=16384`) on `aarch64` and `x86_64` — required on Android 15+/Pixel 9-class devices; don't remove it. `armeabi-v7a` stays 4 KB (32-bit Android never uses 16 KB pages).
+- Three ABIs are built and packaged (`arm64-v8a`, `armeabi-v7a`, `x86_64`); only `arm64-v8a` is device-verified. The ABI list lives in three places that must stay in sync: `build-native.sh`, `rust-toolchain.toml`, and `abiFilters` in `android/app/build.gradle.kts`. 32-bit `armeabi-v7a` is the build most likely to break on a fips pin bump (pointer-width casts — e.g. bionic's 32-bit `msghdr.msg_namelen` is `i32`); build it before bumping the pin. Debug build only; no signed release.
 - min SDK 26, target/compile SDK 34.
 - Don't reinstall or force-kill the app while the VPN is connected — it can leak netd routing rules that block other apps' connectivity until reboot. Disconnect first.
 - Launcher icon assets (`android/.../res/mipmap-*`) are generated from the fips repo's `docs/logos/fips_logo.png` (mesh graphic cropped, luminance→alpha, adaptive icon + monochrome layer).
