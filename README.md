@@ -1,19 +1,30 @@
 # fips-android
 
-Android port of [FIPS](../fips): the daemon embedded in a `VpnService` app.
-Unmodified phone apps reach the mesh over `fd00::/8` with `.fips` DNS, while
-their ordinary traffic bypasses the tunnel.
+Android port of [FIPS](https://github.com/jmcorgan/fips): the mesh daemon
+embedded in a `VpnService` app. Selected phone apps reach the mesh over
+`fd00::/8` with `.fips` DNS while keeping normal internet (per-app split
+tunnel with a userspace forwarder).
+
+Standalone repo — it depends on fips as a pinned **git dependency**
+(`fr34aky/fips` @ `android-hooks`, which carries the small embedder hooks:
+socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`), so
+it clones and builds without a sibling fips checkout.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `fips/` | git worktree of `~/fips`, branch **`android-hooks`** — the embedder hooks (socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`). Local only, not pushed. |
-| `shim/` | Rust cdylib `libfips_android.so`: engine (node lifecycle), TUN fd pump, DNS proxy, JNI surface (`org.fips.android.FipsNative`). |
-| `android/` | The Kotlin app: `MainActivity` (identity, peer config, status), `FipsVpnService` (TUN fd, protect callback, foreground notification). |
-| `smoke/` | Two-node host smoke test of the embedding seam (Phases 1–2). |
+| `shim/` | Rust cdylib `libfips_android.so`: engine (node lifecycle), TUN fd pump, DNS proxy, clearnet forwarder, JNI surface (`org.fips.android.FipsNative`). |
+| `android/` | The Kotlin app (Material 3, bottom-nav): Overview / Settings / Diagnostics, `FipsVpnService` (per-app split tunnel, protect callback, foreground service). |
+| `smoke/` | Two-node host smoke test of the embedding seam. |
 | `android-env.sh` | Cross-build env: NDK r27c paths + the `LIBCLANG_PATH` fix for host builds. |
 | `build-native.sh` | Builds the shim for `aarch64-linux-android` and copies it into `android/app/src/main/jniLibs/`. |
+
+## Prerequisites
+
+- Rust 1.94.1 with the `aarch64-linux-android` target, Android NDK r27c
+  (paths in `android-env.sh`).
+- JDK 17, Android SDK (platform-34, build-tools 34) + Gradle 8.7.
 
 ## Build
 
@@ -25,7 +36,17 @@ JAVA_HOME=~/.local/jdk-17 ~/.local/gradle-8.7/bin/gradle assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-(SDK at `~/android-sdk` via `local.properties`; adjust for your machine.)
+(SDK path in `android/local.properties`; adjust for your machine.)
+
+## Local fips development
+
+To hack on the fips hooks against a local checkout instead of the pinned
+fork, add a patch to `shim/Cargo.toml` (and `smoke/Cargo.toml`):
+
+```toml
+[patch."https://github.com/fr34aky/fips"]
+fips = { path = "../fips" }   # your local fips checkout on android-hooks
+```
 
 ## How it works
 
