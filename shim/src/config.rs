@@ -35,6 +35,13 @@ pub struct ShimConfig {
     /// default; the host tests disable it (no clearnet to forward).
     #[serde(default = "default_true")]
     pub forward_clearnet: bool,
+    /// Relax node timers for mobile to cut CPU/radio wakeups: maintenance tick
+    /// 1→5s, link heartbeat 10→20s, link-dead 30→60s. Heartbeat stays under
+    /// the ~30s aggressive-NAT UDP timeout so mappings don't expire. On by
+    /// default; pair with a battery-optimization exemption so Doze doesn't
+    /// kill the service.
+    #[serde(default = "default_true")]
+    pub battery_saver: bool,
     /// tracing filter, e.g. "info" or "fips=debug".
     #[serde(default)]
     pub log_level: Option<String>,
@@ -113,6 +120,19 @@ impl ShimConfig {
         config.dns.enabled = self.enable_fips_dns; // in-process responder, [::1]:5354
         config.node.control.enabled = false;
         config.node.rendezvous.nostr.enabled = self.enable_nostr;
+        if self.battery_saver {
+            // Fewer CPU/radio wakeups on mobile; heartbeat stays < the ~30s
+            // aggressive-NAT UDP timeout so mappings don't expire.
+            config.node.tick_interval_secs = 5;
+            config.node.heartbeat_interval_secs = 20;
+            config.node.link_dead_timeout_secs = 60;
+            tracing::info!(
+                tick_secs = config.node.tick_interval_secs,
+                heartbeat_secs = config.node.heartbeat_interval_secs,
+                link_dead_secs = config.node.link_dead_timeout_secs,
+                "battery saver: relaxed node timers",
+            );
+        }
         for peer in &self.peers {
             config.peers.push(fips::config::PeerConfig::new(
                 peer.npub.clone(),

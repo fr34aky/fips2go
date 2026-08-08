@@ -393,6 +393,7 @@ mod tests {
             "enable_nostr": false,
             "enable_fips_dns": false, // avoid [::1]:5354 collisions on the host
             "forward_clearnet": false, // no tun/clearnet in the host test
+            "battery_saver": false, // keep the 1s tick so the snapshot publishes fast
             "log_level": "warn",
         })
         .to_string();

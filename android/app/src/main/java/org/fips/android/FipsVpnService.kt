@@ -101,6 +101,7 @@ class FipsVpnService : VpnService() {
             .put("nsec", nsec)
             .put("peers", peers)
             .put("enable_nostr", p.getBoolean("nostr", false))
+            .put("battery_saver", p.getBoolean("battery_saver", true))
             .put("log_level", "info")
             .toString()
     }

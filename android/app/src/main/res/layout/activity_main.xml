@@ -53,6 +53,13 @@
         android:paddingTop="8dp"
         android:paddingBottom="8dp" />
 
+    <Switch
+        android:id="@+id/battery_switch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Battery saver (relaxed timers)"
+        android:paddingBottom="8dp" />
+
     <Button
         android:id="@+id/pick_apps"
         android:layout_width="match_parent"
