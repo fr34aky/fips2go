@@ -1,14 +1,19 @@
 package org.fips.android
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
+import android.util.Log
 import android.widget.Button
 import android.widget.EditText
 import android.widget.Switch
@@ -24,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var peerNpub: EditText
     private lateinit var peerEndpoint: EditText
     private lateinit var nostrSwitch: Switch
+    private lateinit var batterySwitch: Switch
 
     private var npub = ""
     private var address = ""
@@ -47,6 +53,7 @@ class MainActivity : AppCompatActivity() {
         peerNpub = findViewById(R.id.peer_npub)
         peerEndpoint = findViewById(R.id.peer_endpoint)
         nostrSwitch = findViewById(R.id.nostr_switch)
+        batterySwitch = findViewById(R.id.battery_switch)
 
         ensureIdentity()
         loadPeerPrefs()
@@ -54,6 +61,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.connect).setOnClickListener {
             savePeerPrefs()
             requestNotificationsIfNeeded()
+            requestBatteryExemptionIfNeeded()
             val prepare = VpnService.prepare(this)
             if (prepare != null) vpnPermission.launch(prepare) else startVpn()
         }
@@ -148,6 +156,7 @@ class MainActivity : AppCompatActivity() {
         peerNpub.setText(prefs().getString("peer_npub", ""))
         peerEndpoint.setText(prefs().getString("peer_endpoint", ""))
         nostrSwitch.isChecked = prefs().getBoolean("nostr", false)
+        batterySwitch.isChecked = prefs().getBoolean("battery_saver", true)
     }
 
     private fun savePeerPrefs() {
@@ -155,7 +164,26 @@ class MainActivity : AppCompatActivity() {
             .putString("peer_npub", peerNpub.text.toString().trim())
             .putString("peer_endpoint", peerEndpoint.text.toString().trim())
             .putBoolean("nostr", nostrSwitch.isChecked)
+            .putBoolean("battery_saver", batterySwitch.isChecked)
             .apply()
+    }
+
+    /**
+     * A long-lived VPN needs a battery-optimization exemption or Doze/App
+     * Standby will freeze the service and drop the mesh. Prompt for it once
+     * (the system dialog is a no-op if already exempt).
+     */
+    private fun requestBatteryExemptionIfNeeded() {
+        val pm = getSystemService(PowerManager::class.java) ?: return
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        try {
+            @SuppressLint("BatteryLife")
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                .setData(Uri.parse("package:$packageName"))
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "battery-optimization request failed", e)
+        }
     }
 
     private fun startVpn() {
