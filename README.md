@@ -26,7 +26,7 @@ it clones and builds without a sibling fips checkout.
 |---|---|---|
 | `arm64-v8a` | `aarch64-linux-android` | Every 64-bit ARM phone/tablet (~2016+); the primary, on-device-verified target. |
 | `armeabi-v7a` | `armv7-linux-androideabi` | Old 32-bit phones. Compiles and packages; not exercised on real 32-bit hardware. |
-| `x86_64` | `x86_64-linux-android` | Android emulator, Chromebooks. Useful for UI work; the mesh side is hard to exercise behind emulator NAT. |
+| `x86_64` | `x86_64-linux-android` | Android emulator, Chromebooks. Emulator-verified: connect, VPN establish, and a live mesh link + npub resolve against a host-side fips daemon reached via `10.0.2.2`. |
 
 All three are packaged into one APK. min SDK 26 (Android 8.0).
 
@@ -69,7 +69,10 @@ Per-ABI notes:
   the fips dependency — build it before bumping the fips pin.
 - **Emulator (x86_64)**: create an AVD on the "Google APIs" x86_64 image
   (API 26+), `adb install` the same APK; the emulator picks the x86_64
-  `.so` automatically.
+  `.so` automatically. To exercise the mesh, run a peer daemon on the host
+  (`fips --config <yaml>` with a UDP bind, `tun.enabled: false`) and set
+  the app's peer endpoint to `10.0.2.2:<port>` — the emulator's alias for
+  the host loopback.
 
 ## Local fips development
 
