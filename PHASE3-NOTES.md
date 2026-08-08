@@ -220,6 +220,32 @@ Takeaway for development: avoid reinstalling/force-killing while the VPN is
 connected; use Disconnect first. For end users (clean connect/disconnect, no
 reinstall churn) this doesn't occur.
 
+## Material 3 redesign — done, verified on-device
+
+Three-page app (Material 3 theme + bottom navigation):
+- **Overview**: connection-status card (live mesh size / link count / node
+  role), node identity + regenerate, mesh-app summary, connect/disconnect.
+- **Settings**: structured controls for the common parameters (bootstrap peer,
+  Nostr rendezvous, DNS upstreams + in-app `.fips` resolver, battery saver,
+  clearnet forwarder, worker threads, log level) **plus** an Advanced raw
+  `fips.yaml` editor (with a "Load template" button). The raw YAML, when set,
+  fully defines the fips config (every fips.yaml parameter) via the shim's
+  `fips_yaml` field; the shim then forces the Android non-negotiables
+  (Keystore identity, app-owned TUN, control socket off).
+- **Diagnostics**: resolve/ping an npub → `.fips` address (`resolveNpub` JNI,
+  pure) with a node-state reachability check (queries show_peers/routing/cache),
+  and a live log viewer (`recentLogs` JNI over an in-memory ring buffer) with
+  copy.
+
+Supporting shim additions: `logbuf` (ring buffer + fanout writer to
+logcat/stderr), `resolveNpub`, `ShimConfig.fips_yaml` (parsed via fips's own
+serde_yaml). `ConfigStore` (Kotlin) centralizes all prefs → shim config JSON,
+shared by the service and Settings.
+
+Verified on Pixel 9 Pro: all three pages render cleanly (dark Material 3);
+live status + logs update; npub resolve returns the correct address; old flat
+prefs migrate into the new Settings fields.
+
 ## Not done / next
 
 - On-device testing (no adb on this machine): install `app-debug.apk`, check
