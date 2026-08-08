@@ -66,7 +66,10 @@ class FipsVpnService : VpnService() {
                 .setMtu(MESH_MTU)
                 .addAddress(address, 128)
                 .addRoute("fd00::", 8)
-                .addDnsServer(address)
+                // The DNS server must be a routed fd00::/8 sentinel the pump
+                // sees on the fd — NOT `address` (our own tun /128), which the
+                // kernel would deliver locally and never surface to the reader.
+                .addDnsServer(FipsNative.dnsServer())
                 .establish()
         } catch (e: Exception) {
             Log.e(TAG, "establish failed", e)

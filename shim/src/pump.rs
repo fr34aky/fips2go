@@ -40,7 +40,10 @@ pub struct PumpConfig {
     pub outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// mesh → app (fed by the node).
     pub inbound_rx: Receiver<Vec<u8>>,
-    pub our_addr: [u8; 16],
+    /// The in-tunnel DNS server address (the `fd00::/8` sentinel we advertise
+    /// to Android, NOT the node's own tun address). Packets to `dns_addr:53`
+    /// are peeled off to the DNS proxy.
+    pub dns_addr: [u8; 16],
     pub dns: Arc<DnsProxy>,
     /// The writer channel pair (the sender is also held by the DNS proxy).
     pub writer_tx: Sender<Vec<u8>>,
@@ -55,7 +58,7 @@ impl Pump {
             processor,
             outbound_tx,
             inbound_rx,
-            our_addr,
+            dns_addr,
             dns,
             writer_tx,
             writer_rx,
@@ -77,7 +80,7 @@ impl Pump {
                             &processor,
                             &outbound_tx,
                             &writer_tx,
-                            &our_addr,
+                            &dns_addr,
                             &dns,
                         );
                         tracing::info!("TUN reader stopped");
@@ -157,7 +160,7 @@ fn run_reader(
     processor: &TunPacketProcessor,
     outbound_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
     writer_tx: &Sender<Vec<u8>>,
-    our_addr: &[u8; 16],
+    dns_addr: &[u8; 16],
     dns: &Arc<DnsProxy>,
 ) {
     let mut buf = vec![0u8; READ_BUF];
@@ -203,7 +206,7 @@ fn run_reader(
         let packet = &mut buf[..n as usize];
 
         // DNS queries addressed to us never enter the mesh.
-        if DnsProxy::intercepts(packet, our_addr) {
+        if DnsProxy::intercepts(packet, dns_addr) {
             dns.handle(packet.to_vec());
             continue;
         }

@@ -63,6 +63,36 @@ start rejected, stop idempotent, restartable ×2).
 - **nsec in SharedPreferences** for MVP — move to Android Keystore /
   EncryptedSharedPreferences before any real-world use.
 
+## On-device findings (Pixel 9 Pro, Android 17, arm64)
+
+Tested on real hardware. **The mesh works end to end:** the app-owned TUN
+seam, socket-protect hook, embedded node, and FMP handshake all run on the
+phone. With a direct peer (`194.191.252.108:2121`) the phone joined a live
+**1308-node mesh** — `link_count: 1`, `is_leaf_only: false`, spanning-tree
+depth 4, `effective_ipv6_mtu: 1203`. Status JSON renders live from
+`ControlReadHandle` over JNI.
+
+Two issues found and fixed on-device:
+
+1. **16 KB page alignment.** Android 15+ on Pixel-9-class hardware runs 16 KB
+   pages; the `.so` was 4 KB-aligned → a "not 16 KB compatible" warning dialog.
+   Fixed with `shim/.cargo/config.toml`
+   (`-Wl,-z,max-page-size=16384`); LOAD segments now `0x4000`.
+
+2. **DNS server address bug (the important one).** The VpnService advertised
+   the node's *own* tun address as the DNS server. A packet to the interface's
+   own `/128` is delivered locally by the kernel and **never written to the TUN
+   fd**, so the pump/DNS-proxy never saw a single query — `.fips` and Nostr
+   relay resolution both failed. Fixed by advertising a **sentinel address in
+   `fd00::/8` that is not the node's** (`fd00::53`, `engine::DNS_SENTINEL`,
+   shared with Kotlin via the new `FipsNative.dnsServer()` JNI accessor). The
+   kernel routes the sentinel out the fd; the pump peels off `:53` to the
+   proxy. (Re-test pending on-device.)
+
+Note: `avc: denied ... cgroup` SELinux lines are benign — Rust's
+`available_parallelism()` cgroup probe; the worker pool still spawns. Worth
+capping `FIPS_ENCRYPT/DECRYPT_WORKERS` for mobile later (it chose 8+8).
+
 ## Not done / next
 
 - On-device testing (no adb on this machine): install `app-debug.apk`, check

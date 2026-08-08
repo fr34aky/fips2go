@@ -25,6 +25,14 @@ object FipsNative {
     /** Stop the node and the fd pump. Idempotent, blocking (graceful drain). */
     external fun stop()
 
+    /**
+     * The in-tunnel DNS server address for `VpnService.Builder.addDnsServer`.
+     * This is a `fd00::/8` sentinel the pump intercepts — deliberately NOT the
+     * node's own tun address (that would be delivered locally by the kernel and
+     * never reach the pump).
+     */
+    external fun dnsServer(): String
+
     external fun isRunning(): Boolean
 
     /** Compact status JSON: `{running, npub, address, status: {...}}`. */
