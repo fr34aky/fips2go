@@ -35,10 +35,11 @@ pub struct DnsProxy {
 
 impl DnsProxy {
     /// Whether `packet` is a DNS query the proxy should intercept
-    /// (plain UDP to `<our_addr>:53`).
-    pub fn intercepts(packet: &[u8], our_addr: &[u8; 16]) -> bool {
+    /// (plain UDP to `<dns_addr>:53`, where `dns_addr` is the advertised
+    /// in-tunnel DNS sentinel).
+    pub fn intercepts(packet: &[u8], dns_addr: &[u8; 16]) -> bool {
         packet::parse_ipv6_udp(packet)
-            .map(|p| p.dst_port == 53 && &p.dst == our_addr)
+            .map(|p| p.dst_port == 53 && &p.dst == dns_addr)
             .unwrap_or(false)
     }
 

@@ -104,6 +104,17 @@ pub extern "system" fn Java_org_fips_android_FipsNative_stop(_env: JNIEnv, _clas
     let _ = std::panic::catch_unwind(crate::engine::stop);
 }
 
+/// `dnsServer()` → the in-tunnel DNS server address to hand
+/// `VpnService.Builder.addDnsServer` (the `fd00::/8` sentinel, not the node
+/// address — see `engine::DNS_SENTINEL`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_fips_android_FipsNative_dnsServer(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    to_jstring(&env, &crate::engine::dns_server_string())
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_isRunning(
     _env: JNIEnv,

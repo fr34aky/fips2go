@@ -22,6 +22,22 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// The in-process FIPS DNS responder (`dns.enabled` default bind).
 const LOCAL_RESPONDER: &str = "[::1]:5354";
 
+/// The DNS server address advertised into the tunnel (`fd00::53`).
+///
+/// It must sit inside the routed `fd00::/8` range but must NOT be the node's
+/// own `/128` tun address: a packet to the interface's own address is
+/// delivered locally by the kernel and never written to the TUN fd, so our
+/// reader would never see the query. A sentinel that isn't assigned to the
+/// interface is instead routed *out* the fd, where the pump peels off
+/// `:53` traffic to the DNS proxy. Kept in sync with the Kotlin side via
+/// [`dns_server_string`] (exposed over JNI).
+pub const DNS_SENTINEL: [u8; 16] = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53];
+
+/// The sentinel as an IPv6 string, for `VpnService.Builder.addDnsServer`.
+pub fn dns_server_string() -> String {
+    std::net::Ipv6Addr::from(DNS_SENTINEL).to_string()
+}
+
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 /// Guards the (lock-free) startup window so `status()`/`stop()` from the UI
 /// thread never block behind a slow `start()` holding the `ENGINE` mutex.
@@ -174,7 +190,7 @@ fn start_inner(
         processor,
         outbound_tx,
         inbound_rx,
-        our_addr: *our_fips_addr.as_bytes(),
+        dns_addr: DNS_SENTINEL,
         dns,
         writer_tx,
         writer_rx,
