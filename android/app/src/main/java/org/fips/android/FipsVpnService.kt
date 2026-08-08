@@ -20,6 +20,8 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Owns the VpnService session and hands its TUN fd to the Rust engine.
@@ -34,8 +36,6 @@ class FipsVpnService : VpnService() {
     companion object {
         const val ACTION_CONNECT = "org.fips.android.CONNECT"
         const val ACTION_DISCONNECT = "org.fips.android.DISCONNECT"
-        const val EXTRA_CONFIG = "config"
-        const val EXTRA_ADDRESS = "address"
         private const val TAG = "FipsVpnService"
         private const val CHANNEL_ID = "fips_vpn"
         private const val NOTIFICATION_ID = 1
@@ -65,14 +65,44 @@ class FipsVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
-                val config = intent.getStringExtra(EXTRA_CONFIG) ?: return START_NOT_STICKY
-                val address = intent.getStringExtra(EXTRA_ADDRESS) ?: return START_NOT_STICKY
+                // Decrypt the Keystore nsec and build the config here so the
+                // secret never rides in an Intent.
+                val nsec = IdentityStore.getOrCreate(this)
+                val identity = JSONObject(FipsNative.deriveIdentity(nsec))
+                if (identity.has("error")) {
+                    Log.e(TAG, "identity error: ${identity.getString("error")}")
+                    return START_NOT_STICKY
+                }
+                val address = identity.getString("address")
+                val config = buildConfig(nsec)
                 startForegroundWithNotification(address)
                 thread(name = "fips-connect") { connect(config, address) }
                 return START_STICKY
             }
         }
         return START_NOT_STICKY
+    }
+
+    /** Build the shim config JSON from prefs + the (decrypted) nsec. */
+    private fun buildConfig(nsec: String): String {
+        val p = prefs()
+        val peers = JSONArray()
+        val npub = p.getString("peer_npub", "")?.trim() ?: ""
+        val endpoint = p.getString("peer_endpoint", "")?.trim() ?: ""
+        if (npub.isNotEmpty() && endpoint.isNotEmpty()) {
+            peers.put(
+                JSONObject()
+                    .put("npub", npub)
+                    .put("endpoint", endpoint)
+                    .put("transport", "udp")
+            )
+        }
+        return JSONObject()
+            .put("nsec", nsec)
+            .put("peers", peers)
+            .put("enable_nostr", p.getBoolean("nostr", false))
+            .put("log_level", "info")
+            .toString()
     }
 
     private fun connect(config: String, address: String) {
