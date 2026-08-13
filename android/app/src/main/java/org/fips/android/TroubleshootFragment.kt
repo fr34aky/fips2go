@@ -49,7 +49,9 @@ class TroubleshootFragment : Fragment() {
             result.text = checkReachability(npubField.text.toString().trim())
         }
 
-        view.findViewById<MaterialButton>(R.id.refresh_logs).setOnClickListener { refreshLogs() }
+        view.findViewById<MaterialButton>(R.id.refresh_logs).setOnClickListener {
+            refreshLogs(force = true)
+        }
         view.findViewById<MaterialButton>(R.id.copy_logs).setOnClickListener {
             val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("fips logs", logView.text))
@@ -95,9 +97,24 @@ class TroubleshootFragment : Fragment() {
         }
     }
 
-    private fun refreshLogs() {
+    /**
+     * Update the log view, keeping it readable while the user scrolls:
+     * replacing the text resets the ScrollView position, so while the user is
+     * scrolled up reading, leave the view frozen — it catches up as soon as
+     * they return to the bottom, or immediately on the Refresh button
+     * (`force`). Unchanged text is never re-set (no relayout, no jump), and
+     * sticking to the bottom uses `scrollTo` rather than `fullScroll`, which
+     * would also move focus.
+     */
+    private fun refreshLogs(force: Boolean = false) {
         val atBottom = !logScroll.canScrollVertically(1)
-        logView.text = FipsNative.recentLogs(500)
-        if (atBottom) logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+        if (!force && !atBottom) return
+        val logs = FipsNative.recentLogs(500)
+        if (logs != logView.text.toString()) {
+            logView.text = logs
+            logScroll.post { logScroll.scrollTo(0, logView.bottom) }
+        } else if (force && !atBottom) {
+            logScroll.post { logScroll.scrollTo(0, logView.bottom) }
+        }
     }
 }
