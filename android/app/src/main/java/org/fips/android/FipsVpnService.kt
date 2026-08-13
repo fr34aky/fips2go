@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -18,6 +19,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import java.net.Inet6Address
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import org.json.JSONObject
@@ -25,10 +27,14 @@ import org.json.JSONObject
 /**
  * Owns the VpnService session and hands its TUN fd to the Rust engine.
  *
- * The tunnel claims only `fd00::/8` (the FIPS mesh range), so ordinary
- * traffic of other apps bypasses the VPN entirely — but their DNS goes to
- * our in-tunnel resolver (the node's own address), where the Rust shim
- * splits `.fips` names to the mesh responder and everything else upstream.
+ * The tunnel captures all traffic of the selected apps: `fd00::/8` goes to
+ * the mesh, everything else reaches the shim's userspace forwarder, which
+ * sends it back out on protected sockets. The IPv6 default route (`::/0`) is
+ * claimed only while the underlying network actually has IPv6 internet:
+ * the forwarder's userspace TCP stack SYN-ACKs a captured app's connect
+ * before dialing the real destination, so a claimed-but-undeliverable `::/0`
+ * would turn every IPv6 connect into a hang (Happy Eyeballs sees a working
+ * connection and never falls back to IPv4) instead of a fast v4 fallback.
  */
 class FipsVpnService : VpnService() {
 
@@ -51,6 +57,10 @@ class FipsVpnService : VpnService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var currentUnderlying: Network? = null
     private val rebinding = AtomicBoolean(false)
+    /** The mesh address the current tunnel was established with. */
+    @Volatile private var meshAddress: String? = null
+    /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
+    @Volatile private var tunnelHasIpv6Clearnet = false
 
     private fun prefs() = getSharedPreferences("fips", Context.MODE_PRIVATE)
 
@@ -87,24 +97,61 @@ class FipsVpnService : VpnService() {
             Log.w(TAG, "already running")
             return
         }
+        connectivity = getSystemService(ConnectivityManager::class.java)
+        meshAddress = address
+        // Initial guess from the current default network; the first network
+        // callback corrects the routes if this was wrong (or changes later).
+        val wantIpv6 = hasIpv6Internet(connectivity?.activeNetwork)
+
+        val pfd = establishTunnel(address, wantIpv6)
+        if (pfd == null) {
+            Log.e(TAG, "VPN not prepared or establish() returned null")
+            shutdown()
+            return
+        }
+        tunFd = pfd
+        tunnelHasIpv6Clearnet = wantIpv6
+
+        val error = FipsNative.start(config, pfd.fd, this)
+        if (error.isNotEmpty()) {
+            Log.e(TAG, "engine start failed: $error")
+            shutdown()
+        } else {
+            Log.i(TAG, "fips engine running, address $address, ipv6Clearnet=$wantIpv6")
+            registerNetworkMonitoring()
+        }
+    }
+
+    /** Build and establish the TUN. `ipv6Clearnet` decides whether `::/0` is claimed. */
+    private fun establishTunnel(address: String, ipv6Clearnet: Boolean): ParcelFileDescriptor? {
         val meshApps = prefs()
             .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
-
-        val pfd = try {
+        return try {
             val builder = Builder()
                 .setSession("FIPS Mesh")
                 .setMtu(MESH_MTU)
                 .addAddress(address, 128)          // mesh IPv6 address
                 .addAddress(TUN_IPV4, 32)          // IPv4 source for clearnet
                 // Capture everything for the selected apps: fd00::/8 goes to the
-                // mesh, the rest (::/0, 0.0.0.0/0) reaches the userspace
-                // forwarder which sends it out on protected sockets.
+                // mesh, the rest reaches the userspace forwarder which sends it
+                // out on protected sockets.
                 .addRoute("fd00::", 8)
-                .addRoute("::", 0)
                 .addRoute("0.0.0.0", 0)
                 // DNS server = the fd00::/8 sentinel the pump intercepts (NOT our
                 // own tun /128, which the kernel would deliver locally).
                 .addDnsServer(FipsNative.dnsServer())
+            // `::/0` only when the underlay can deliver it (see class doc).
+            if (ipv6Clearnet) {
+                builder.addRoute("::", 0)
+            } else {
+                // Keep the resolver asking AAAA: netd emulates AI_ADDRCONFIG
+                // with a UDP connect() probe to 2000:: and skips AAAA queries
+                // entirely when it fails — which kills `.fips` (AAAA-only
+                // names). A /128 to the probe address flips that check while
+                // claiming no real destination, so apps' global-IPv6 connects
+                // still fail fast and fall back to IPv4.
+                builder.addRoute("2000::", 128)
+            }
 
             // Per-app split tunnel: only the chosen apps are captured; every
             // other app keeps the normal network untouched. With no selection,
@@ -125,20 +172,24 @@ class FipsVpnService : VpnService() {
             Log.e(TAG, "establish failed", e)
             null
         }
-        if (pfd == null) {
-            Log.e(TAG, "VPN not prepared or establish() returned null")
-            shutdown()
-            return
-        }
-        tunFd = pfd
+    }
 
-        val error = FipsNative.start(config, pfd.fd, this)
-        if (error.isNotEmpty()) {
-            Log.e(TAG, "engine start failed: $error")
-            shutdown()
-        } else {
-            Log.i(TAG, "fips engine running, address $address")
-            registerNetworkMonitoring()
+    /**
+     * True when `network` has usable IPv6 internet: an IPv6 default route and
+     * a global unicast address. Wi-Fi with SLAAC addresses but no default
+     * route (expired RA) is common — addresses alone are not enough.
+     */
+    private fun hasIpv6Internet(network: Network?): Boolean {
+        if (network == null) return false
+        val lp = connectivity?.getLinkProperties(network) ?: return false
+        val hasDefaultRoute = lp.routes.any { r ->
+            r.destination.prefixLength == 0 && r.destination.address is Inet6Address
+        }
+        if (!hasDefaultRoute) return false
+        return lp.linkAddresses.any { la ->
+            val a = la.address
+            a is Inet6Address && !a.isLinkLocalAddress && !a.isLoopbackAddress &&
+                (a.address[0].toInt() and 0xfe) != 0xfc // exclude ULA (fc00::/7)
         }
     }
 
@@ -166,6 +217,11 @@ class FipsVpnService : VpnService() {
             }
             override fun onLost(network: Network) {
                 synchronized(availableNetworks) { availableNetworks.remove(network) }
+                updateUnderlying()
+            }
+            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                // IPv6 can appear (late RA after Wi-Fi connect) or vanish on
+                // the same network — re-evaluate the `::/0` decision.
                 updateUnderlying()
             }
         }
@@ -211,21 +267,55 @@ class FipsVpnService : VpnService() {
 
         val previous = currentUnderlying
         currentUnderlying = network
+        val wantIpv6 = hasIpv6Internet(network)
         when {
-            previous == null -> Log.i(TAG, "baseline underlying network: $network")
-            previous == network -> {} // same network — nothing to rebuild
+            previous == null -> {
+                Log.i(TAG, "baseline underlying network: $network, ipv6=$wantIpv6")
+                // The tunnel was established from `activeNetwork` before the
+                // callback baseline; fix the routes if that guess was wrong.
+                if (wantIpv6 != tunnelHasIpv6Clearnet) rebindNode()
+            }
+            previous == network && wantIpv6 == tunnelHasIpv6Clearnet -> {} // nothing to rebuild
             else -> {
-                Log.i(TAG, "underlying network changed $previous -> $network; rebinding node")
-                val fd = tunFd?.fd ?: return
-                if (rebinding.compareAndSet(false, true)) {
-                    thread(name = "fips-rebind") {
-                        try {
-                            FipsNative.onNetworkChanged(fd)
-                        } finally {
-                            rebinding.set(false)
-                        }
+                Log.i(
+                    TAG,
+                    "underlying network changed $previous -> $network (ipv6=$wantIpv6); rebinding node"
+                )
+                rebindNode()
+            }
+        }
+    }
+
+    /**
+     * Restart the node so its underlay sockets rebind on the current network.
+     * When the IPv6-clearnet decision no longer matches the tunnel's routes,
+     * establish a replacement tunnel first (Android tears the old session down
+     * when the new one comes up) and move the engine onto the fresh fd.
+     */
+    private fun rebindNode() {
+        if (!rebinding.compareAndSet(false, true)) return
+        thread(name = "fips-rebind") {
+            try {
+                val wantIpv6 = hasIpv6Internet(currentUnderlying)
+                if (wantIpv6 != tunnelHasIpv6Clearnet) {
+                    val address = meshAddress ?: return@thread
+                    Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6")
+                    val fresh = establishTunnel(address, wantIpv6)
+                    if (fresh == null) {
+                        Log.e(TAG, "re-establish for route change failed; keeping old tunnel")
+                        return@thread
                     }
+                    val old = tunFd
+                    tunFd = fresh
+                    tunnelHasIpv6Clearnet = wantIpv6
+                    FipsNative.onNetworkChanged(fresh.fd)
+                    old?.close()
+                } else {
+                    val fd = tunFd?.fd ?: return@thread
+                    FipsNative.onNetworkChanged(fd)
                 }
+            } finally {
+                rebinding.set(false)
             }
         }
     }

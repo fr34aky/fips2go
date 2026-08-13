@@ -36,9 +36,10 @@ object FipsNative {
     external fun isRunning(): Boolean
 
     /**
-     * Rebuild the node on the same TUN fd after the underlying network changed
-     * (Wi-Fi ↔ cellular). Blocking — call off the main thread. No-op if the
-     * engine isn't running.
+     * Rebuild the node on the given TUN fd after the underlying network
+     * changed (Wi-Fi ↔ cellular). Usually the fd from `start`; pass the new
+     * fd instead when the tunnel was re-established with different routes.
+     * Blocking — call off the main thread. No-op if the engine isn't running.
      */
     external fun onNetworkChanged(tunFd: Int)
 
