@@ -2,6 +2,7 @@
 name = "fips-android-shim"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 publish = false
 
 # JNI shim embedding the fips node for the Android app:
