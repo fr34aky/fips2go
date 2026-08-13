@@ -260,7 +260,8 @@ each confirmed on-device.
 - ~~Measure actual battery/wakeup savings~~ **Done 2026-08-13** (screen-off
   A/B, per-thread `/proc` deltas — results in README): saver cuts idle CPU
   ~40%, wakeups ~19%; the pump's 250 ms stop-flag tick (12 wake/s across 3
-  threads) is the dominant remaining idle cost and the next optimization.
+  threads) was the dominant remaining idle cost — since eliminated (eventfd
+  wake + stop sentinel; pump now ~0 idle wakeups, process 19.3 → 7.5 wake/s).
   Still open: a full multi-hour Doze-cycle measurement.
 - Broaden forwarder testing under real-app load (QUIC/video, large downloads,
   IPv4+IPv6 mix); no clearnet ICMP forwarding.

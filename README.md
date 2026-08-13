@@ -123,12 +123,14 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   per-thread `/proc` deltas): `battery_saver` cuts the shim's idle CPU ~40%
   (5.5 vs 9.2 ms CPU/s) and process wakeups ~19% (19.3 vs 23.9 wake/s) —
   mostly via the relaxed maintenance tick and halved heartbeats (encrypt
-  wakeups 0.6 vs 2.0/s). The dominant remaining idle cost is the pump's own
-  250 ms stop-flag tick: 3 threads × 4 wake/s = 12 wake/s (~62% of all
-  process wakeups with saver on), untouched by the profile — eliminating it
-  (eventfd in the reader's poll, sentinel instead of recv timeouts) is the
-  next battery win. Not yet measured: a full multi-hour Doze cycle. The
-  forwarder was validated on a few flows, not under broad real-app load.
+  wakeups 0.6 vs 2.0/s). The pump's former 250 ms stop-flag tick (12 wake/s
+  across 3 threads, ~62% of process wakeups) has since been eliminated
+  (eventfd in the reader's poll, stop sentinel / channel-close instead of
+  recv timeouts): re-measured, the pump now contributes ~0 idle wakeups and
+  the process idles at 7.5 wake/s / 3.7 ms CPU per s (was 19.3 / 5.5 before
+  the fix, same saver-on conditions). Not yet measured: a full multi-hour
+  Doze cycle. The forwarder was validated on a few flows, not under broad
+  real-app load.
 - mDNS (`lan-mdns`) LAN discovery: Android needs `MulticastLock` handling
   first. BLE/Ethernet transports are not available on Android. ICMP to
   clearnet is not forwarded (TCP/UDP are).
