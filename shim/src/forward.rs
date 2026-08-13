@@ -24,6 +24,7 @@ use std::time::Duration;
 use ipstack::{IpStack, IpStackConfig, IpStackStream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpSocket, UdpSocket};
+use tokio::sync::Notify;
 
 use fips::SocketProtect;
 
@@ -101,6 +102,9 @@ fn protect_fd<S: AsRawFd>(socket: &S, protect: &Option<SocketProtect>) {
 /// Owns the forwarder thread + its runtime.
 pub struct Forwarder {
     thread: Option<JoinHandle<()>>,
+    shutdown: Arc<Notify>,
+    /// Signals (by send or disconnect) that the thread reached its last line.
+    done_rx: std::sync::mpsc::Receiver<()>,
 }
 
 impl Forwarder {
@@ -114,6 +118,9 @@ impl Forwarder {
         running: Arc<AtomicBool>,
         mtu: u16,
     ) -> io::Result<Self> {
+        let shutdown = Arc::new(Notify::new());
+        let shutdown_rx = shutdown.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("fips-forwarder".into())
             .spawn(move || {
@@ -127,18 +134,54 @@ impl Forwarder {
                         return;
                     }
                 };
-                rt.block_on(run(inbound, to_tun, protect, running, mtu));
+                rt.block_on(run(inbound, to_tun, protect, running, shutdown_rx, mtu));
+                // A plain `drop(rt)` waits unboundedly for blocking-pool
+                // threads; on-device one parked such thread kept this join —
+                // and the app's whole disconnect — hanging. Bound the wait;
+                // per-flow tasks and stragglers are torn down/abandoned.
+                rt.shutdown_timeout(Duration::from_secs(2));
                 tracing::info!("forwarder stopped");
+                let _ = done_tx.send(());
             })?;
         Ok(Self {
             thread: Some(thread),
+            shutdown,
+            done_rx,
         })
     }
 
+    /// Signal shutdown, then wait a BOUNDED time for the thread.
+    ///
+    /// The forwarder has wedged in several distinct ways on-device (ipstack
+    /// drains keeping `accept()` pending, runtime drop waiting on its
+    /// blocking pool, tokio internals parked through the shutdown notify) —
+    /// and an unbounded join turns any of them into a disconnect that never
+    /// completes and a tunnel that never closes. If the thread won't die in
+    /// time, abandon it: the engine is tearing down anyway, and a leaked
+    /// parked thread is strictly better than a hung `stop()`.
     pub fn join(mut self) {
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        self.shutdown.notify_one();
+        match self.done_rx.recv_timeout(Duration::from_secs(3)) {
+            // Reached its last line (send) or died earlier (disconnect):
+            // the actual join is now instant or near-instant.
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(t) = self.thread.take() {
+                    let _ = t.join();
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!("forwarder did not stop in 3s; abandoning its thread");
+                self.thread.take(); // drop the handle → detach
+            }
         }
+    }
+}
+
+impl Drop for Forwarder {
+    /// If the forwarder is dropped without `join` (engine start-error paths),
+    /// still wake the loop so the thread exits instead of leaking.
+    fn drop(&mut self) {
+        self.shutdown.notify_one();
     }
 }
 
@@ -147,6 +190,7 @@ async fn run(
     to_tun: StdSender<Vec<u8>>,
     protect: Option<SocketProtect>,
     running: Arc<AtomicBool>,
+    shutdown: Arc<Notify>,
     mtu: u16,
 ) {
     let device = ForwardDevice {
@@ -164,7 +208,13 @@ async fn run(
     tracing::info!(mtu, "clearnet forwarder started");
 
     while running.load(Ordering::Relaxed) {
-        match stack.accept().await {
+        let accepted = tokio::select! {
+            r = stack.accept() => r,
+            // `notify_one` stores a permit, so a signal sent while we were
+            // busy in the accept arm still ends the next iteration.
+            _ = shutdown.notified() => break,
+        };
+        match accepted {
             Ok(IpStackStream::Tcp(tcp)) => {
                 let protect = protect.clone();
                 tokio::spawn(async move {
@@ -215,7 +265,14 @@ async fn forward_udp(
     protect: Option<SocketProtect>,
 ) -> io::Result<()> {
     let dst = client.peer_addr();
-    let bind = if dst.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    // Bind to a parsed SocketAddr, NOT a &str: string binds go through
+    // tokio's spawn_blocking resolver and summon the blocking pool, whose
+    // threads a runtime drop then waits on (see the shutdown_timeout above).
+    let bind: std::net::SocketAddr = if dst.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
     let server = UdpSocket::bind(bind).await?;
     protect_fd(&server, &protect);
     server.connect(dst).await?;
@@ -236,5 +293,33 @@ async fn forward_udp(
                 client.write_all(&from_server[..n]).await?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `join()` must return promptly even when the device stays idle-pending
+    /// (a live inbound sender, no packets) — the state a real disconnect left
+    /// the forwarder in, which used to hang `engine::stop()` forever.
+    #[test]
+    fn join_returns_promptly_while_device_pends() {
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (to_tun, _to_tun_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let running = Arc::new(AtomicBool::new(true));
+        let forwarder =
+            Forwarder::spawn(inbound_rx, to_tun, None, running.clone(), 1280).unwrap();
+
+        running.store(false, Ordering::Relaxed);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            forwarder.join();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("forwarder join hung despite shutdown signal");
+        drop(inbound_tx); // keep the sender alive until after the join
     }
 }
