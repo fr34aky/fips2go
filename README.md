@@ -117,7 +117,11 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
 - **Exercised on a device** (Pixel 9 Pro, GrapheneOS / Android). Verified:
   connect/disconnect and joining a live ~1300-node mesh; `.fips` resolution
   and upstream DNS; per-app split tunnel (selected apps get mesh **and**
-  clearnet, other apps untouched); Wi-Fi↔cellular hand-off; Keystore identity
+  clearnet, other apps untouched); automatic Wi-Fi↔cellular hand-over in both
+  directions — the callback burst is coalesced into one node restart and the
+  mesh recovers in ~20 s with no manual reconnect, including on a roaming
+  IPv4-only CGNAT 5G network, with `.fips` resolution surviving past
+  Chromium's 60 s IPv6-probe window; Keystore identity
   + regenerate; the Material 3 UI (Overview / Settings / Diagnostics), npub
   resolve, and the log viewer; the battery profile (relaxed timers). Also
   unit-tested on the host (engine lifecycle, DNS proxy, packet codecs) and
