@@ -190,6 +190,14 @@ class FipsVpnService : VpnService() {
                 // claiming no real destination, so apps' global-IPv6 connects
                 // still fail fast and fall back to IPv4.
                 builder.addRoute("2000::", 128)
+                // Chromium (WebView, so most browsers) runs its OWN AAAA
+                // gate above netd: a UDP connect() probe to Google DNS,
+                // cached 60 s. Without this route, `.fips` browsing dies
+                // exactly one minute after landing on a v4-only underlay.
+                // connect() alone sends no packets; an app genuinely
+                // dialing this address gets captured and dropped, which
+                // IPv6-capable apps treat as any unreachable v6 route.
+                builder.addRoute("2001:4860:4860::8888", 128)
             }
 
             // Per-app split tunnel: only the chosen apps are captured; every
