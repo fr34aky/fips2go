@@ -14,6 +14,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Diagnostics page: resolve/ping an npub, and view the node's logs. */
@@ -22,6 +23,7 @@ class TroubleshootFragment : Fragment() {
     private val poller = Handler(Looper.getMainLooper())
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
+    private lateinit var sessionsView: TextView
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -32,6 +34,7 @@ class TroubleshootFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         logView = view.findViewById(R.id.log_view)
         logScroll = view.findViewById(R.id.log_scroll)
+        sessionsView = view.findViewById(R.id.sessions_view)
         val result = view.findViewById<TextView>(R.id.probe_result)
         val npubField = view.findViewById<EditText>(R.id.probe_npub)
 
@@ -93,8 +96,112 @@ class TroubleshootFragment : Fragment() {
     private val logPoller = object : Runnable {
         override fun run() {
             refreshLogs()
+            refreshSessions()
             poller.postDelayed(this, 2000)
         }
+    }
+
+    /**
+     * Live FMP (network/routing links to direct peers) and FSP (end-to-end
+     * encrypted sessions) view, from the node's lock-free `show_*` snapshots.
+     * FMP byte counters come from `show_links`, joined via `link_id`.
+     */
+    private fun refreshSessions() {
+        val text = if (!FipsNative.isRunning()) {
+            "(node not running)"
+        } else {
+            try {
+                renderSessions()
+            } catch (e: Exception) {
+                "(sessions unavailable: ${e.message})"
+            }
+        }
+        // Only touch the view on change — keeps text selection alive.
+        if (sessionsView.text.toString() != text) sessionsView.text = text
+    }
+
+    private fun queryData(cmd: String): JSONObject {
+        val root = JSONObject(FipsNative.query(cmd, ""))
+        return root.optJSONObject("data") ?: root
+    }
+
+    private fun renderSessions(): String {
+        val peers = queryData("show_peers").optJSONArray("peers") ?: JSONArray()
+        val sessions = queryData("show_sessions").optJSONArray("sessions") ?: JSONArray()
+        val links = queryData("show_links").optJSONArray("links") ?: JSONArray()
+
+        // link_id → (bytes_sent, bytes_recv) for the FMP traffic columns.
+        val linkStats = HashMap<Long, Pair<Long, Long>>()
+        for (i in 0 until links.length()) {
+            val l = links.getJSONObject(i)
+            val s = l.optJSONObject("stats") ?: continue
+            linkStats[l.optLong("link_id")] =
+                Pair(s.optLong("bytes_sent"), s.optLong("bytes_recv"))
+        }
+
+        val out = StringBuilder()
+        out.append("FMP peers (${peers.length()}) — routing layer\n")
+        if (peers.length() == 0) out.append("  (none)\n")
+        for (i in 0 until peers.length()) {
+            val p = peers.getJSONObject(i)
+            val role = when {
+                p.optBoolean("is_parent") -> "▲"
+                p.optBoolean("is_child") -> "▼"
+                else -> "•"
+            }
+            val transport = listOfNotNull(
+                p.optString("transport_type").ifEmpty { null },
+                p.optString("transport_addr").ifEmpty { null },
+            ).joinToString(" ")
+            val traffic = linkStats[p.optLong("link_id")]
+                ?.let { "↑${fmtBytes(it.first)} ↓${fmtBytes(it.second)}" } ?: ""
+            out.append(
+                "$role ${peerName(p)}  ${p.optString("connectivity")}" +
+                    (if (transport.isEmpty()) "" else "  $transport") +
+                    (if (traffic.isEmpty()) "" else "  $traffic") +
+                    age(p.optLong("last_seen_ms")) + "\n"
+            )
+        }
+
+        out.append("\nFSP sessions (${sessions.length()}) — end-to-end\n")
+        if (sessions.length() == 0) out.append("  (none)\n")
+        for (i in 0 until sessions.length()) {
+            val s = sessions.getJSONObject(i)
+            val state = s.optString("state")
+            val mark = if (state == "established") "●" else "◐"
+            val st = s.optJSONObject("stats")
+            val traffic = st?.let {
+                "↑${fmtBytes(it.optLong("bytes_sent"))}/${it.optLong("packets_sent")}p" +
+                    " ↓${fmtBytes(it.optLong("bytes_recv"))}/${it.optLong("packets_recv")}p"
+            } ?: ""
+            out.append(
+                "$mark ${peerName(s)}  $state" +
+                    (if (traffic.isEmpty()) "" else "  $traffic") +
+                    age(s.optLong("last_activity_ms")) + "\n"
+            )
+        }
+        return out.toString().trimEnd()
+    }
+
+    /** display_name when set, else a shortened npub. */
+    private fun peerName(o: JSONObject): String {
+        val dn = o.optString("display_name")
+        if (dn.isNotEmpty() && dn != "null") return dn
+        val npub = o.optString("npub")
+        return if (npub.length > 20) "${npub.take(10)}…${npub.takeLast(6)}" else npub
+    }
+
+    private fun fmtBytes(b: Long): String = when {
+        b >= 1_048_576 -> "%.1fMB".format(b / 1_048_576.0)
+        b >= 1024 -> "%.1fKB".format(b / 1024.0)
+        else -> "${b}B"
+    }
+
+    /** "  Ns ago" when the timestamp is plausibly epoch-ms and recent. */
+    private fun age(ms: Long): String {
+        val d = System.currentTimeMillis() - ms
+        if (ms <= 0 || d < 0 || d > 7 * 24 * 3600_000L) return ""
+        return "  ${if (d < 60_000) "${d / 1000}s" else "${d / 60_000}m"} ago"
     }
 
     /**
