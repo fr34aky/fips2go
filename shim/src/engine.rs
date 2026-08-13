@@ -61,6 +61,14 @@ fn apply_worker_thread_caps(worker_threads: usize) {
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
+
+/// Serializes start / stop / network_changed end-to-end. Without it, a start
+/// can run while a previous engine is still tearing down (the `ENGINE` slot
+/// is already empty mid-stop) and race the old node for `[::1]:5354` — the
+/// new node then starts DEGRADED with no `.fips` responder (observed
+/// on-device: `Address already in use` → every `.fips` lookup SERVFAILs).
+/// Never held by status/query reads, so UI polls stay responsive.
+static LIFECYCLE: Mutex<()> = Mutex::new(());
 /// Guards the (lock-free) startup window so `status()`/`stop()` from the UI
 /// thread never block behind a slow `start()` holding the `ENGINE` mutex.
 static STARTING: AtomicBool = AtomicBool::new(false);
@@ -100,6 +108,16 @@ pub fn is_running() -> bool {
 /// The `ENGINE` mutex is held only for the final install, not for the whole
 /// (possibly slow) node startup — `status()` polls stay responsive.
 pub fn start(
+    config_json: &str,
+    tun_fd: RawFd,
+    protect: Option<fips::SocketProtect>,
+) -> Result<StartInfo, String> {
+    let _lifecycle = LIFECYCLE.lock().unwrap();
+    start_locked(config_json, tun_fd, protect)
+}
+
+/// [`start`] body; caller must hold [`LIFECYCLE`].
+fn start_locked(
     config_json: &str,
     tun_fd: RawFd,
     protect: Option<fips::SocketProtect>,
@@ -180,6 +198,12 @@ fn start_inner(
                 }
                 node.finish_shutdown().await;
             });
+            // A plain `drop(runtime)` waits for ALL blocking-pool tasks
+            // (nostr-sdk / DNS lookups use spawn_blocking, and a stray one
+            // can sit in a long syscall timeout) — which hangs this thread,
+            // and with it `stop()`'s join and the app's disconnect. Bound
+            // the wait; stragglers are abandoned as detached threads.
+            runtime.shutdown_timeout(Duration::from_secs(2));
             tracing::info!("node thread exited");
         })
         .map_err(|e| format!("spawn node thread: {e}"))?;
@@ -271,6 +295,12 @@ fn start_inner(
 
 /// Stop the engine: drain the node, stop the pump, close our fd. Idempotent.
 pub fn stop() {
+    let _lifecycle = LIFECYCLE.lock().unwrap();
+    stop_locked();
+}
+
+/// [`stop`] body; caller must hold [`LIFECYCLE`].
+fn stop_locked() {
     let engine = ENGINE.lock().unwrap().take();
     let Some(mut engine) = engine else {
         return;
@@ -281,10 +311,13 @@ pub fn stop() {
     }
     engine.running.store(false, Ordering::Relaxed);
     if let Some(pump) = engine.pump.take() {
-        pump.join(); // reader exits and drops forward_tx…
+        pump.join(); // reader exits and drops forward_tx
     }
     if let Some(forwarder) = engine.forwarder.take() {
-        forwarder.join(); // …which closes the forwarder's device → it ends
+        // join() signals the forwarder's shutdown Notify: accept() can pend
+        // indefinitely while ipstack drains old flows, so the closed device
+        // alone must not be relied on to end the loop.
+        forwarder.join();
     }
     if let Some(handle) = engine.node_thread.take() {
         let _ = handle.join();
@@ -301,29 +334,36 @@ static REBINDING: AtomicBool = AtomicBool::new(false);
 ///
 /// The node has no runtime socket-rebind hook and, as observed on-device, does
 /// not recover on its own: its UDP socket keeps a stale source/NAT binding and
-/// the mesh silently black-holes. So we restart the node on the SAME TUN fd —
-/// the tunnel (owned by the Kotlin `ParcelFileDescriptor`) stays up, while the
-/// node gets a fresh socket, re-protected on the new default network, and
-/// re-dials its peers / re-STUNs. `tun_fd` is the same VpnService fd passed to
-/// [`start`] (Kotlin still owns it). No-op when not running.
+/// the mesh silently black-holes. So we restart the node on the given TUN fd:
+/// usually the same fd passed to [`start`], but Kotlin may pass a replacement
+/// when it re-established the tunnel with different routes (e.g. dropping or
+/// adding `::/0` as underlay IPv6 comes and goes) — we dup whatever we get.
+/// The fd is owned by the Kotlin `ParcelFileDescriptor` either way. No-op when
+/// not running.
 pub fn network_changed(tun_fd: RawFd) -> Result<(), String> {
-    // Snapshot what we need to rebuild; bail if not running.
-    let rebuild = {
-        let slot = ENGINE.lock().unwrap();
-        slot.as_ref()
-            .map(|e| (e.config_json.clone(), e.protect.clone()))
-    };
-    let Some((config_json, protect)) = rebuild else {
-        return Ok(());
-    };
     if REBINDING.swap(true, Ordering::SeqCst) {
         // A rebuild is already running; the network state it reads will be the
         // latest, so coalescing this callback into it is correct.
         return Ok(());
     }
-    tracing::info!("underlying network changed; restarting node on the same tun fd");
-    stop();
-    let result = start(&config_json, tun_fd, protect).map(|_| ());
+    let result = {
+        let _lifecycle = LIFECYCLE.lock().unwrap();
+        // Snapshot what we need to rebuild; bail if not running (e.g. a
+        // disconnect won the lock first).
+        let rebuild = {
+            let slot = ENGINE.lock().unwrap();
+            slot.as_ref()
+                .map(|e| (e.config_json.clone(), e.protect.clone()))
+        };
+        match rebuild {
+            None => Ok(()),
+            Some((config_json, protect)) => {
+                tracing::info!("underlying network changed; restarting node on the tun fd");
+                stop_locked();
+                start_locked(&config_json, tun_fd, protect).map(|_| ())
+            }
+        }
+    };
     REBINDING.store(false, Ordering::SeqCst);
     if let Err(e) = &result {
         tracing::error!(error = %e, "node rebuild after network change failed");
