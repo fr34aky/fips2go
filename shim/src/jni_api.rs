@@ -123,9 +123,11 @@ pub extern "system" fn Java_org_fips_android_FipsNative_isRunning(
     crate::engine::is_running() as jboolean
 }
 
-/// `onNetworkChanged(tunFd)` — rebuild the node on the same TUN fd after the
-/// underlying network switched (Wi-Fi ↔ cellular). Blocking; call off the
-/// main thread. No-op when not running.
+/// `onNetworkChanged(tunFd)` — rebuild the node on the given TUN fd after the
+/// underlying network switched (Wi-Fi ↔ cellular). `tunFd` is usually the fd
+/// from `start`, but may be a replacement when the tunnel was re-established
+/// with different routes. Blocking; call off the main thread. No-op when not
+/// running.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_onNetworkChanged(
     _env: JNIEnv,
