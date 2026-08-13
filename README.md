@@ -119,10 +119,16 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   resolve, and the log viewer; the battery profile (relaxed timers). Also
   unit-tested on the host (engine lifecycle, DNS proxy, packet codecs) and
   cross-compiled for arm64.
-- **Not yet measured**: actual battery/wakeup savings over a long Doze cycle
-  (the profile is applied and doesn't break the mesh, but the saving isn't
-  quantified). The forwarder was validated on a few flows, not under broad
-  real-app load.
+- **Battery profile measured** (Pixel 9 Pro, 10-min screen-off idle windows,
+  per-thread `/proc` deltas): `battery_saver` cuts the shim's idle CPU ~40%
+  (5.5 vs 9.2 ms CPU/s) and process wakeups ~19% (19.3 vs 23.9 wake/s) —
+  mostly via the relaxed maintenance tick and halved heartbeats (encrypt
+  wakeups 0.6 vs 2.0/s). The dominant remaining idle cost is the pump's own
+  250 ms stop-flag tick: 3 threads × 4 wake/s = 12 wake/s (~62% of all
+  process wakeups with saver on), untouched by the profile — eliminating it
+  (eventfd in the reader's poll, sentinel instead of recv timeouts) is the
+  next battery win. Not yet measured: a full multi-hour Doze cycle. The
+  forwarder was validated on a few flows, not under broad real-app load.
 - mDNS (`lan-mdns`) LAN discovery: Android needs `MulticastLock` handling
   first. BLE/Ethernet transports are not available on Android. ICMP to
   clearnet is not forwarded (TCP/UDP are).

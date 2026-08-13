@@ -257,8 +257,11 @@ each confirmed on-device.
 
 ## Not done / next
 
-- Measure actual battery/wakeup savings over a real Doze cycle (profile is
-  applied and doesn't break the mesh, but the saving isn't quantified).
+- ~~Measure actual battery/wakeup savings~~ **Done 2026-08-13** (screen-off
+  A/B, per-thread `/proc` deltas — results in README): saver cuts idle CPU
+  ~40%, wakeups ~19%; the pump's 250 ms stop-flag tick (12 wake/s across 3
+  threads) is the dominant remaining idle cost and the next optimization.
+  Still open: a full multi-hour Doze-cycle measurement.
 - Broaden forwarder testing under real-app load (QUIC/video, large downloads,
   IPv4+IPv6 mix); no clearnet ICMP forwarding.
 - Multi-ABI (`armeabi-v7a`, `x86_64`) + a signed release build.
