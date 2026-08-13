@@ -42,6 +42,13 @@ pub struct ShimConfig {
     /// kill the service.
     #[serde(default = "default_true")]
     pub battery_saver: bool,
+    /// mDNS LAN peer discovery. Off by default: the required MulticastLock
+    /// disables the Wi-Fi chip's hardware multicast filtering, so every LAN
+    /// multicast frame (Chromecast, SSDP, …) then wakes the CPU — a real
+    /// battery cost on chatty networks. The Kotlin side only holds the lock
+    /// while this is enabled AND the underlying network is Wi-Fi.
+    #[serde(default)]
+    pub enable_lan_mdns: bool,
     /// tracing filter, e.g. "info" or "fips=debug".
     #[serde(default)]
     pub log_level: Option<String>,
@@ -190,6 +197,20 @@ impl ShimConfig {
         config.dns.enabled = self.enable_fips_dns; // in-process responder, [::1]:5354
         config.node.control.enabled = false;
         config.node.rendezvous.nostr.enabled = self.enable_nostr;
+        config.node.rendezvous.lan.enabled = self.enable_lan_mdns;
+        if self.enable_lan_mdns {
+            // Keep the tunnel's own addresses out of the mDNS adverts:
+            // the node's mesh ULA is an identity disclosure on the LAN, and
+            // the clearnet-source IPv4 (TUN_IPV4 in FipsVpnService.kt — keep
+            // in sync) is unreachable from other hosts anyway.
+            let own_addr: std::net::IpAddr = derive_identity(&self.nsec)?
+                .address
+                .parse()
+                .map_err(|e| format!("own address unparseable: {e}"))?;
+            config.node.rendezvous.lan.exclude_addrs =
+                vec![own_addr, "10.111.222.1".parse().unwrap()];
+            tracing::info!("LAN mDNS discovery enabled (tunnel addrs excluded)");
+        }
         if !self.nostr_relays.is_empty() {
             config.node.rendezvous.nostr.advert_relays = self.nostr_relays.clone();
             config.node.rendezvous.nostr.dm_relays = self.nostr_relays.clone();
@@ -272,6 +293,25 @@ mod tests {
         assert_eq!(config.peers.len(), 1);
         assert_eq!(shim.upstream_addrs().len(), 2, "default upstreams parse");
         assert_eq!(shim.worker_threads, 1, "mobile worker cap defaults to 1");
+        assert!(!config.node.rendezvous.lan.enabled, "mDNS defaults off");
+    }
+
+    /// `enable_lan_mdns` flips the fips knob and excludes both tunnel
+    /// addresses (the node's own mesh ULA and the clearnet-source IPv4)
+    /// from the mDNS adverts.
+    #[test]
+    fn lan_mdns_knob_excludes_tunnel_addrs() {
+        let id = derive_identity("").unwrap();
+        let json = format!(r#"{{ "nsec": "{}", "enable_lan_mdns": true }}"#, id.nsec);
+        let config = ShimConfig::from_json(&json)
+            .unwrap()
+            .to_fips_config()
+            .unwrap();
+        assert!(config.node.rendezvous.lan.enabled);
+        let excl = &config.node.rendezvous.lan.exclude_addrs;
+        assert_eq!(excl.len(), 2);
+        assert!(excl.contains(&id.address.parse().unwrap()), "own mesh ULA");
+        assert!(excl.contains(&"10.111.222.1".parse().unwrap()), "TUN_IPV4");
     }
 
     #[test]

@@ -35,7 +35,7 @@ There is no Kotlin test suite; the app was verified on-device (Pixel 9 Pro). Rus
 
 ## The fips dependency
 
-`shim/` and `smoke/` depend on fips as a **pinned git dependency**: `fr34aky/fips` @ branch `android-hooks` (rev in both `Cargo.toml`s must stay in sync). That fork carries the embedder hooks the shim needs: `Node::enable_app_owned_tun()`, `Node::set_socket_protect()`, `Node::tun_packet_processor()`, and public `ControlReadHandle::query`.
+`shim/` and `smoke/` depend on fips as a **pinned git dependency**: `fr34aky/fips` @ branch `android-hooks` (rev in both `Cargo.toml`s must stay in sync). That fork carries the embedder hooks the shim needs: `Node::enable_app_owned_tun()`, `Node::set_socket_protect()`, `Node::tun_packet_processor()`, public `ControlReadHandle::query`, and `LanRendezvousConfig.exclude_addrs` (keeps tunnel addresses out of mDNS adverts). mDNS is compiled in unconditionally and gated at runtime by `node.rendezvous.lan.enabled` (shim knob `enable_lan_mdns`, default off; the Kotlin side pairs it with a `MulticastLock` held only on Wi-Fi).
 
 The local `fips/` directory is a **git worktree of `~/fips` on `android-hooks`**, ignored by this repo — it is NOT what builds use. To develop against it, add to `shim/Cargo.toml` (and `smoke/Cargo.toml`):
 

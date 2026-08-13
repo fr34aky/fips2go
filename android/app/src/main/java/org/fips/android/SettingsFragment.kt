@@ -47,6 +47,7 @@ class SettingsFragment : Fragment() {
         sw(view, R.id.enable_fips_dns).isChecked = p.getBoolean(CS.ENABLE_FIPS_DNS, true)
         edit(view, R.id.dns_upstreams).setText(p.getString(CS.DNS_UPSTREAMS, ""))
         sw(view, R.id.battery_saver).isChecked = p.getBoolean(CS.BATTERY_SAVER, true)
+        sw(view, R.id.lan_mdns).isChecked = p.getBoolean(CS.LAN_MDNS, false)
         sw(view, R.id.forward_clearnet).isChecked = p.getBoolean(CS.FORWARD_CLEARNET, true)
         edit(view, R.id.worker_threads).setText(p.getInt(CS.WORKER_THREADS, 1).toString())
         edit(view, R.id.log_level).setText(p.getString(CS.LOG_LEVEL, "info"))
@@ -70,6 +71,7 @@ class SettingsFragment : Fragment() {
             .putBoolean(CS.ENABLE_FIPS_DNS, sw(view, R.id.enable_fips_dns).isChecked)
             .putString(CS.DNS_UPSTREAMS, edit(view, R.id.dns_upstreams).text.toString().trim())
             .putBoolean(CS.BATTERY_SAVER, sw(view, R.id.battery_saver).isChecked)
+            .putBoolean(CS.LAN_MDNS, sw(view, R.id.lan_mdns).isChecked)
             .putBoolean(CS.FORWARD_CLEARNET, sw(view, R.id.forward_clearnet).isChecked)
             .putInt(CS.WORKER_THREADS, workers.coerceIn(0, 16))
             .putString(

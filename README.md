@@ -131,9 +131,15 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   the fix, same saver-on conditions). Not yet measured: a full multi-hour
   Doze cycle. The forwarder was validated on a few flows, not under broad
   real-app load.
-- mDNS (`lan-mdns`) LAN discovery: Android needs `MulticastLock` handling
-  first. BLE/Ethernet transports are not available on Android. ICMP to
-  clearnet is not forwarded (TCP/UDP are).
+- mDNS LAN discovery is available behind a default-off Settings toggle:
+  it acquires a `MulticastLock` (held only while the underlay is Wi-Fi;
+  the lock disables the chip's multicast filtering, so chatty LANs cost
+  battery) and excludes the tunnel's own addresses from the adverts so the
+  mesh ULA is not broadcast on the LAN. mDNS sockets cannot be
+  socket-protected (no fd access) — fine for the per-app split tunnel,
+  non-functional under "Block connections without VPN". BLE/Ethernet
+  transports are not available on Android. ICMP to clearnet is not
+  forwarded (TCP/UDP are).
 - Multi-ABI: `arm64-v8a`, `armeabi-v7a`, and `x86_64` are built and packaged;
   only `arm64-v8a` has been exercised on real hardware. Debug build only; no
   signed release yet.

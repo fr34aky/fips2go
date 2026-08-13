@@ -27,6 +27,7 @@ object ConfigStore {
     const val WORKER_THREADS = "worker_threads"
     const val FORWARD_CLEARNET = "forward_clearnet"
     const val BATTERY_SAVER = "battery_saver"
+    const val LAN_MDNS = "enable_lan_mdns"
     const val LOG_LEVEL = "log_level"
     const val FIPS_YAML = "fips_yaml"
 
@@ -95,6 +96,7 @@ peers: []
             .put("worker_threads", p.getInt(WORKER_THREADS, 1))
             .put("forward_clearnet", p.getBoolean(FORWARD_CLEARNET, true))
             .put("battery_saver", p.getBoolean(BATTERY_SAVER, true))
+            .put("enable_lan_mdns", p.getBoolean(LAN_MDNS, false))
             .put("log_level", p.getString(LOG_LEVEL, "info"))
 
         val upstreams = toList(p.getString(DNS_UPSTREAMS, ""))
