@@ -2,32 +2,48 @@
 //! channels, with the node's own `TunPacketProcessor` deciding each outbound
 //! packet (system-TUN parity) and the DNS proxy intercepting queries.
 //!
-//! Threads (all owned here, all stop via the shared `running` flag):
-//! - **reader** — `poll()`+`read()` the fd; DNS intercept → processor →
-//!   forward / write-back / drop.
-//! - **writer** — single writer of the fd; drains `writer_rx`.
+//! Threads (all owned here). Idle threads make ZERO wakeups — measured
+//! on-device, the previous 250 ms stop-flag ticks were 12 wake/s across the
+//! three threads, ~62% of the whole process's idle wakeups. Each thread has
+//! an explicit wake for shutdown instead:
+//! - **reader** — `poll()`+`read()` the fd (infinite timeout); DNS intercept
+//!   → processor → forward / write-back / drop. Woken by an eventfd that
+//!   [`Pump::join`] writes.
+//! - **writer** — single writer of the fd; blocking-drains `writer_rx`.
+//!   Woken by an empty-`Vec` sentinel (no real packet is empty: DNS replies,
+//!   forwarder output, and mesh packets are all ≥ 40 bytes).
 //! - **bridge** — forwards mesh→app packets from the node's inbound receiver
-//!   into `writer_rx`, so the writer is the fd's only writer.
+//!   into `writer_rx`, so the writer is the fd's only writer. Ends when the
+//!   node drops its inbound sender during drain.
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fips::{TunPacketAction, TunPacketProcessor};
 
 use crate::dns::DnsProxy;
 
-const POLL_INTERVAL_MS: i32 = 250;
-const RECV_TICK: Duration = Duration::from_millis(250);
 /// Max IPv6 packet we accept from the fd (jumbo-safe; VpnService MTU is
 /// far below this).
 const READ_BUF: usize = 65536;
+/// How long [`Pump::join`] waits for the threads before abandoning them.
+/// Must cover the node's drain (2 s), which is what releases the bridge.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Pump {
     threads: Vec<JoinHandle<()>>,
+    /// eventfd the reader polls alongside the TUN fd; `join()` writes it to
+    /// break the reader out of its otherwise-unbounded `poll()`.
+    wake_fd: OwnedFd,
+    /// Kept to send the writer its empty-`Vec` stop sentinel.
+    writer_tx: Sender<Vec<u8>>,
+    /// Each thread sends one marker as its last statement.
+    done_rx: Receiver<()>,
 }
 
 pub struct PumpConfig {
@@ -69,18 +85,31 @@ impl Pump {
             writer_rx,
         } = config;
 
+        // Shutdown wake for the reader's unbounded poll().
+        let wake_fd = unsafe {
+            let fd = libc::eventfd(0, libc::EFD_CLOEXEC);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            OwnedFd::from_raw_fd(fd)
+        };
+        let wake_raw = wake_fd.as_raw_fd();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
         let mut threads = Vec::new();
 
         // Reader: fd → (dns | mesh | clearnet-forward | write-back)
         {
             let running = running.clone();
             let writer_tx = writer_tx.clone();
+            let done_tx = done_tx.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name("fips-tun-reader".into())
                     .spawn(move || {
                         run_reader(
                             tun_fd,
+                            wake_raw,
                             &running,
                             &processor,
                             &outbound_tx,
@@ -90,34 +119,39 @@ impl Pump {
                             forward_tx.as_ref(),
                         );
                         tracing::info!("TUN reader stopped");
+                        let _ = done_tx.send(());
                     })?,
             );
         }
 
-        // Bridge: node inbound → writer channel
+        // Bridge: node inbound → writer channel. No tick: recv() blocks until
+        // the node drops its inbound sender (end of drain) or the writer dies.
         {
             let running = running.clone();
+            let writer_tx = writer_tx.clone();
+            let done_tx = done_tx.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name("fips-tun-bridge".into())
                     .spawn(move || {
                         while running.load(Ordering::Relaxed) {
-                            match inbound_rx.recv_timeout(RECV_TICK) {
+                            match inbound_rx.recv() {
                                 Ok(pkt) => {
                                     if writer_tx.send(pkt).is_err() {
                                         break;
                                     }
                                 }
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                                Err(_) => break, // node dropped its sender
                             }
                         }
                         tracing::info!("TUN bridge stopped");
+                        let _ = done_tx.send(());
                     })?,
             );
         }
 
-        // Writer: writer channel → fd
+        // Writer: writer channel → fd. No tick: recv() blocks until the
+        // empty-Vec stop sentinel from join() (or all senders drop).
         {
             let running = running.clone();
             threads.push(
@@ -125,7 +159,8 @@ impl Pump {
                     .name("fips-tun-writer".into())
                     .spawn(move || {
                         while running.load(Ordering::Relaxed) {
-                            match writer_rx.recv_timeout(RECV_TICK) {
+                            match writer_rx.recv() {
+                                Ok(pkt) if pkt.is_empty() => break, // stop sentinel
                                 Ok(pkt) => {
                                     let n = unsafe {
                                         libc::write(
@@ -140,21 +175,65 @@ impl Pump {
                                         break;
                                     }
                                 }
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                                Err(_) => break,
                             }
                         }
                         tracing::info!("TUN writer stopped");
+                        let _ = done_tx.send(());
                     })?,
             );
         }
 
-        Ok(Self { threads })
+        Ok(Self {
+            threads,
+            wake_fd,
+            writer_tx,
+            done_rx,
+        })
     }
 
-    /// Join all pump threads (call after clearing the `running` flag).
+    /// Wake all pump threads and join them, bounded (call after clearing the
+    /// `running` flag). On timeout the stragglers are abandoned — the engine
+    /// is tearing down anyway, and a leaked parked thread beats a disconnect
+    /// that never completes.
     pub fn join(self) {
-        for handle in self.threads {
+        let Pump {
+            threads,
+            wake_fd,
+            writer_tx,
+            done_rx,
+        } = self;
+
+        // Reader: eventfd wake out of poll(). Writer: empty-Vec sentinel
+        // (queued behind any real packets, which still get written). Bridge:
+        // released by the node dropping its inbound sender during drain.
+        let one: u64 = 1;
+        let _ = unsafe {
+            libc::write(
+                wake_fd.as_raw_fd(),
+                (&raw const one).cast::<libc::c_void>(),
+                8,
+            )
+        };
+        let _ = writer_tx.send(Vec::new());
+
+        let deadline = Instant::now() + JOIN_TIMEOUT;
+        let mut done = 0;
+        while done < threads.len() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || done_rx.recv_timeout(left).is_err() {
+                break;
+            }
+            done += 1;
+        }
+        if done < threads.len() {
+            tracing::warn!(
+                stuck = threads.len() - done,
+                "pump thread(s) did not stop in time; abandoning"
+            );
+            return; // drop handles → detach; wake_fd closes on drop
+        }
+        for handle in threads {
             let _ = handle.join();
         }
     }
@@ -180,6 +259,7 @@ fn is_mesh_bound(packet: &[u8]) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn run_reader(
     fd: RawFd,
+    wake_fd: RawFd,
     running: &AtomicBool,
     processor: &TunPacketProcessor,
     outbound_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -190,14 +270,21 @@ fn run_reader(
 ) {
     let mut buf = vec![0u8; READ_BUF];
     while running.load(Ordering::Relaxed) {
-        // poll() with a timeout so the `running` flag is honored even when
-        // the fd is quiet; blocking read() alone would pin the thread.
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut pfd, 1, POLL_INTERVAL_MS) };
+        // Infinite poll — zero wakeups while the tunnel is idle. Shutdown
+        // arrives on `wake_fd` (an eventfd written by `Pump::join`).
+        let mut pfds = [
+            libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let ready = unsafe { libc::poll(pfds.as_mut_ptr(), 2, -1) };
         if ready < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
@@ -206,12 +293,16 @@ fn run_reader(
             tracing::warn!(error = %err, "TUN poll failed; stopping reader");
             break;
         }
-        if ready == 0 {
-            continue;
+        if pfds[1].revents != 0 {
+            break; // shutdown wake
         }
+        let pfd = pfds[0];
         if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
             tracing::info!("TUN fd closed; stopping reader");
             break;
+        }
+        if pfd.revents & libc::POLLIN == 0 {
+            continue;
         }
 
         let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
