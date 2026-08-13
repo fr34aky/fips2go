@@ -150,3 +150,9 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
 - Multi-ABI: `arm64-v8a`, `armeabi-v7a`, and `x86_64` are built and packaged;
   only `arm64-v8a` has been exercised on real hardware. Debug build only; no
   signed release yet.
+
+## License
+
+MIT (see `LICENSE`). The bundled native library statically links
+[fips](https://github.com/jmcorgan/fips) (MIT, © Johnathan Corgan) and other
+MIT/Apache-2.0 Rust crates — binary releases should ship their notices.
