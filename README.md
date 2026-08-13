@@ -89,8 +89,11 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
 - **Identity**: generated in Rust (`deriveIdentity`); the nsec is encrypted
   with a non-exportable Android Keystore key (`SecureStore`/`IdentityStore`).
   The node's fips address is the tunnel address.
-- **Tunnel**: routes `fd00::/8` plus full clearnet (`::/0`, `0.0.0.0/0`) for
-  the captured apps only, MTU 1280. The TUN fd is dup'd by the shim; a reader
+- **Tunnel**: routes `fd00::/8` plus full clearnet (`0.0.0.0/0`, and `::/0`
+  only while the underlay has IPv6 internet; on v4-only underlays two probe
+  host-routes — `2000::/128` for netd, `2001:4860:4860::8888/128` for
+  Chromium's 60 s-cached reachability probe — keep AAAA queries and thus
+  `.fips` names resolving) for the captured apps only, MTU 1280. The TUN fd is dup'd by the shim; a reader
   thread classifies each outbound packet — `fd00::/8` goes through the node's
   own `TunPacketProcessor` (destination filter, MSS clamp, hairpin, ICMPv6;
   byte-identical to the daemon's system-TUN path), everything else to the
