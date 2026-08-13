@@ -14,6 +14,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -62,6 +63,32 @@ class FipsVpnService : VpnService() {
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
     @Volatile private var tunnelHasIpv6Clearnet = false
 
+    /**
+     * Held only while LAN mDNS is enabled AND the underlay is Wi-Fi. The lock
+     * disables the Wi-Fi chip's hardware multicast filtering, so every LAN
+     * multicast frame (Chromecast, SSDP, …) wakes the CPU — don't pay that
+     * when discovery is off or can't work (cellular). Null when mDNS is off.
+     */
+    private var multicastLock: WifiManager.MulticastLock? = null
+
+    private fun updateMulticastLock(network: Network?) {
+        val lock = multicastLock ?: return
+        val onWifi = network != null && connectivity?.getNetworkCapabilities(network)
+            ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        if (onWifi && !lock.isHeld) {
+            lock.acquire()
+            Log.i(TAG, "multicast lock acquired (mDNS on Wi-Fi)")
+        } else if (!onWifi && lock.isHeld) {
+            lock.release()
+            Log.i(TAG, "multicast lock released (underlay not Wi-Fi)")
+        }
+    }
+
+    private fun releaseMulticastLock() {
+        multicastLock?.takeIf { it.isHeld }?.release()
+        multicastLock = null
+    }
+
     private fun prefs() = getSharedPreferences("fips", Context.MODE_PRIVATE)
 
     /** Called from Rust (JNI) for every underlay socket the node creates. */
@@ -99,6 +126,12 @@ class FipsVpnService : VpnService() {
         }
         connectivity = getSystemService(ConnectivityManager::class.java)
         meshAddress = address
+        if (prefs().getBoolean(ConfigStore.LAN_MDNS, false)) {
+            val wifi = applicationContext.getSystemService(WifiManager::class.java)
+            multicastLock = wifi?.createMulticastLock("fips-mdns")
+                ?.apply { setReferenceCounted(false) }
+            updateMulticastLock(connectivity?.activeNetwork)
+        }
         // Initial guess from the current default network; the first network
         // callback corrects the routes if this was wrong (or changes later).
         val wantIpv6 = hasIpv6Internet(connectivity?.activeNetwork)
@@ -267,6 +300,7 @@ class FipsVpnService : VpnService() {
 
         val previous = currentUnderlying
         currentUnderlying = network
+        updateMulticastLock(network)
         val wantIpv6 = hasIpv6Internet(network)
         when {
             previous == null -> {
@@ -335,6 +369,7 @@ class FipsVpnService : VpnService() {
 
     private fun shutdown() {
         unregisterNetworkMonitoring()
+        releaseMulticastLock()
         thread(name = "fips-disconnect") {
             FipsNative.stop()
             tunFd?.close()
@@ -346,6 +381,7 @@ class FipsVpnService : VpnService() {
 
     override fun onDestroy() {
         unregisterNetworkMonitoring()
+        releaseMulticastLock()
         FipsNative.stop()
         tunFd?.close()
         tunFd = null

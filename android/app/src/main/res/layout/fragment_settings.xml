@@ -151,6 +151,21 @@
             android:text="Battery saver (relaxed timers)" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/lan_mdns"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="LAN discovery (mDNS)" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="6dp"
+            android:text="Finds nearby fips peers on your Wi-Fi for instant local connections. While on, your Wi-Fi chip stops filtering broadcast chatter from other devices (TVs, speakers, printers), and each message briefly wakes the phone — on a busy home network this costs noticeably more battery. No effect when off or on mobile data."
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/forward_clearnet"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
