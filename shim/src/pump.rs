@@ -163,6 +163,15 @@ impl Pump {
 /// IPv6 mesh prefix (`fd00::/8`); anything else is clearnet.
 const MESH_PREFIX: u8 = fips::identity::FIPS_ADDRESS_PREFIX;
 
+/// Destination address of an IPv6 packet, for log lines (`::` if too short).
+fn dst_of(packet: &[u8]) -> std::net::Ipv6Addr {
+    let mut dst = [0u8; 16];
+    if let Some(bytes) = packet.get(24..40) {
+        dst.copy_from_slice(bytes);
+    }
+    std::net::Ipv6Addr::from(dst)
+}
+
 /// True if this is an IPv6 packet destined for the mesh (`fd00::/8`).
 fn is_mesh_bound(packet: &[u8]) -> bool {
     packet.len() >= 40 && packet[0] >> 4 == 6 && packet[24] == MESH_PREFIX
@@ -250,12 +259,18 @@ fn run_reader(
                     break;
                 }
             }
+            // Respond/Drop are the node refusing an outbound packet (no
+            // route, filtered) — rare, and exactly what a "mesh site won't
+            // load" report needs visible, so log at info.
             TunPacketAction::Respond(response) => {
+                tracing::info!(dst = %dst_of(packet), "mesh outbound refused: ICMPv6 sent back");
                 if writer_tx.send(response).is_err() {
                     break;
                 }
             }
-            TunPacketAction::Drop => {}
+            TunPacketAction::Drop => {
+                tracing::info!(dst = %dst_of(packet), "mesh outbound dropped by node processor");
+            }
         }
     }
 }

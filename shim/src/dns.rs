@@ -60,7 +60,24 @@ impl DnsProxy {
         let is_fips = qname == "fips" || qname.ends_with(".fips");
 
         let response_payload = if is_fips {
-            self.forward(query.payload, self.local_responder, false)
+            let resp = self.forward(query.payload, self.local_responder, false);
+            // `.fips` lookups are rare and load-bearing — log the outcome at
+            // info so "mesh site won't load" reports show whether resolution
+            // happened and what the responder said.
+            match &resp {
+                Some(r) => tracing::info!(
+                    qname = %qname,
+                    qtype = qtype_of(query.payload),
+                    rcode = r.get(3).map_or(0xff, |b| b & 0x0f),
+                    answers = u16::from_be_bytes([
+                        r.get(6).copied().unwrap_or(0),
+                        r.get(7).copied().unwrap_or(0),
+                    ]),
+                    ".fips query answered"
+                ),
+                None => tracing::warn!(qname = %qname, ".fips responder unreachable"),
+            }
+            resp
         } else {
             self.upstreams
                 .iter()
@@ -142,6 +159,23 @@ pub fn parse_qname(message: &[u8]) -> Option<String> {
         pos += 1 + len;
     }
     Some(name)
+}
+
+/// QTYPE of the first question (0 when malformed) — for log lines.
+fn qtype_of(message: &[u8]) -> u16 {
+    let mut pos = 12usize;
+    loop {
+        match message.get(pos) {
+            None => return 0,
+            Some(0) => break,
+            Some(&len) if len & 0xc0 == 0 => pos += 1 + len as usize,
+            Some(_) => return 0, // compression pointer — not in queries
+        }
+    }
+    match (message.get(pos + 1), message.get(pos + 2)) {
+        (Some(&hi), Some(&lo)) => u16::from_be_bytes([hi, lo]),
+        _ => 0,
+    }
 }
 
 /// Turn a query into a minimal SERVFAIL response (QR=1, RCODE=2, counts
