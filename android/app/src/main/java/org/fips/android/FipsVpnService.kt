@@ -50,6 +50,10 @@ class FipsVpnService : VpnService() {
         // private range not on the LAN; forwarded flows are re-sourced to the
         // real egress IP anyway).
         private const val TUN_IPV4 = "10.111.222.1"
+        // A Wi-Fi ↔ cellular hand-over emits a burst of network callbacks over
+        // several seconds; wait this long before rebinding so one node restart
+        // serves the whole burst.
+        private const val REBIND_SETTLE_MS = 1500L
     }
 
     private var tunFd: ParcelFileDescriptor? = null
@@ -58,6 +62,8 @@ class FipsVpnService : VpnService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var currentUnderlying: Network? = null
     private val rebinding = AtomicBoolean(false)
+    /** Set by every rebind request; cleared by the worker as it serves them. */
+    private val rebindRequested = AtomicBoolean(false)
     /** The mesh address the current tunnel was established with. */
     @Volatile private var meshAddress: String? = null
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
@@ -257,6 +263,13 @@ class FipsVpnService : VpnService() {
                 // the same network — re-evaluate the `::/0` decision.
                 updateUnderlying()
             }
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                // Validation (NET_CAPABILITY_VALIDATED) arrives here — the
+                // moment the system actually moves its default network during
+                // a hand-over. Cheap when nothing relevant changed:
+                // onUnderlyingNetwork only rebinds on a real decision flip.
+                updateUnderlying()
+            }
         }
         networkCallback = cb
         val req = NetworkRequest.Builder()
@@ -269,19 +282,27 @@ class FipsVpnService : VpnService() {
         }
     }
 
-    /** The non-VPN network we should egress on: Wi-Fi > Ethernet > cellular. */
+    /**
+     * The non-VPN network we should egress on. Validated networks beat
+     * unvalidated ones (a dying Wi-Fi keeps its transport for 10–30 s after it
+     * stops passing traffic, while the OS default has already moved to the
+     * validated cellular network — follow the OS), then Wi-Fi > Ethernet >
+     * cellular.
+     */
     private fun preferredUnderlying(): Network? {
         val cm = connectivity ?: return null
         val snapshot = synchronized(availableNetworks) { availableNetworks.toList() }
         return snapshot.maxByOrNull { net ->
-            val caps = cm.getNetworkCapabilities(net)
-            when {
-                caps == null -> 0
+            val caps = cm.getNetworkCapabilities(net) ?: return@maxByOrNull 0
+            val transport = when {
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 3
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 2
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1
                 else -> 0
             }
+            val validated =
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            if (validated) transport + 4 else transport
         }
     }
 
@@ -291,14 +312,16 @@ class FipsVpnService : VpnService() {
     }
 
     private fun onUnderlyingNetwork(network: Network) {
-        // Point the tunnel's accounting/routing at the new underlying network.
-        try {
-            setUnderlyingNetworks(arrayOf(network))
-        } catch (e: Exception) {
-            Log.w(TAG, "setUnderlyingNetworks failed", e)
-        }
-
         val previous = currentUnderlying
+        // Point the tunnel's accounting/routing at the new underlying network
+        // (skip the binder call on the frequent no-change capability ticks).
+        if (previous != network) {
+            try {
+                setUnderlyingNetworks(arrayOf(network))
+            } catch (e: Exception) {
+                Log.w(TAG, "setUnderlyingNetworks failed", e)
+            }
+        }
         currentUnderlying = network
         updateMulticastLock(network)
         val wantIpv6 = hasIpv6Internet(network)
@@ -321,36 +344,68 @@ class FipsVpnService : VpnService() {
     }
 
     /**
-     * Restart the node so its underlay sockets rebind on the current network.
-     * When the IPv6-clearnet decision no longer matches the tunnel's routes,
-     * establish a replacement tunnel first (Android tears the old session down
-     * when the new one comes up) and move the engine onto the fresh fd.
+     * Request a node restart so its underlay sockets rebind on the current
+     * network. A restart takes seconds while a hand-over emits callbacks for
+     * many more, so requests are queued on [rebindRequested] and served by a
+     * single worker that re-checks after every pass — the last callback in a
+     * burst always results in a rebind against final network state (the old
+     * drop-when-busy guard lost it, leaving the node bound to a dead network
+     * until a manual reconnect).
      */
     private fun rebindNode() {
-        if (!rebinding.compareAndSet(false, true)) return
+        rebindRequested.set(true)
+        if (!rebinding.compareAndSet(false, true)) {
+            Log.i(TAG, "rebind in flight; request queued")
+            return
+        }
         thread(name = "fips-rebind") {
             try {
-                val wantIpv6 = hasIpv6Internet(currentUnderlying)
-                if (wantIpv6 != tunnelHasIpv6Clearnet) {
-                    val address = meshAddress ?: return@thread
-                    Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6")
-                    val fresh = establishTunnel(address, wantIpv6)
-                    if (fresh == null) {
-                        Log.e(TAG, "re-establish for route change failed; keeping old tunnel")
-                        return@thread
+                while (true) {
+                    if (rebindRequested.get()) {
+                        // Let the callback burst settle; everything that
+                        // arrived up to here is covered by this pass.
+                        Thread.sleep(REBIND_SETTLE_MS)
+                        rebindRequested.set(false)
+                        rebindOnce()
+                        continue
                     }
-                    val old = tunFd
-                    tunFd = fresh
-                    tunnelHasIpv6Clearnet = wantIpv6
-                    FipsNative.onNetworkChanged(fresh.fd)
-                    old?.close()
-                } else {
-                    val fd = tunFd?.fd ?: return@thread
-                    FipsNative.onNetworkChanged(fd)
+                    rebinding.set(false)
+                    // Close the race with a request that arrived after the
+                    // check above but before we released the worker slot.
+                    if (rebindRequested.get() && rebinding.compareAndSet(false, true)) continue
+                    return@thread
                 }
-            } finally {
+            } catch (t: Throwable) {
+                Log.e(TAG, "rebind worker died", t)
                 rebinding.set(false)
             }
+        }
+    }
+
+    /**
+     * One rebind pass. When the IPv6-clearnet decision no longer matches the
+     * tunnel's routes, establish a replacement tunnel first (Android tears the
+     * old session down when the new one comes up) and move the engine onto the
+     * fresh fd.
+     */
+    private fun rebindOnce() {
+        val wantIpv6 = hasIpv6Internet(currentUnderlying)
+        if (wantIpv6 != tunnelHasIpv6Clearnet) {
+            val address = meshAddress ?: return
+            Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6")
+            val fresh = establishTunnel(address, wantIpv6)
+            if (fresh == null) {
+                Log.e(TAG, "re-establish for route change failed; keeping old tunnel")
+                return
+            }
+            val old = tunFd
+            tunFd = fresh
+            tunnelHasIpv6Clearnet = wantIpv6
+            FipsNative.onNetworkChanged(fresh.fd)
+            old?.close()
+        } else {
+            val fd = tunFd?.fd ?: return
+            FipsNative.onNetworkChanged(fd)
         }
     }
 
