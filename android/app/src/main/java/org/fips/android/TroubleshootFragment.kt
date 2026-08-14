@@ -3,6 +3,7 @@ package org.fips.android
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -13,10 +14,14 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.snackbar.Snackbar
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.concurrent.thread
 
 /** Diagnostics page: resolve/ping an npub, and view the node's logs. */
 class TroubleshootFragment : Fragment() {
@@ -71,6 +76,92 @@ class TroubleshootFragment : Fragment() {
         }
         view.findViewById<TextView>(R.id.app_version).text =
             "fips-android ${pkg.versionName} (build $code, ${Build.SUPPORTED_ABIS.firstOrNull()})"
+        view.findViewById<MaterialButton>(R.id.check_update).setOnClickListener {
+            checkForUpdate(view, pkg.versionName ?: "0")
+        }
+    }
+
+    /**
+     * Manual update check against GitHub Releases. Downloading is fine while
+     * connected (the app itself is not routed through the tunnel), but the
+     * install is only launched with the VPN down — replacing the app kills
+     * the service mid-tunnel and can leak netd routing state otherwise.
+     */
+    private fun checkForUpdate(root: View, current: String) {
+        val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return
+        Snackbar.make(root, "Checking for updates…", Snackbar.LENGTH_SHORT).show()
+        thread {
+            val result = runCatching { Updater.check(current, abi) }
+            activity?.runOnUiThread {
+                result.fold(
+                    onSuccess = { update ->
+                        if (update == null) {
+                            Snackbar.make(root, "Up to date (v$current)", Snackbar.LENGTH_SHORT)
+                                .show()
+                        } else {
+                            offerUpdate(root, update)
+                        }
+                    },
+                    onFailure = {
+                        Snackbar.make(root, "Update check failed: ${it.message}", Snackbar.LENGTH_LONG)
+                            .show()
+                    },
+                )
+            }
+        }
+    }
+
+    private fun offerUpdate(root: View, update: Updater.Update) {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Update available: v${update.version}")
+            .setMessage(
+                update.notes.lineSequence().take(12).joinToString("\n").trim() +
+                    "\n\nThe download is verified against the release checksum. " +
+                    "Installing keeps your identity and settings, but the VPN " +
+                    "must be disconnected first."
+            )
+            .setPositiveButton("Download & install") { _, _ -> downloadAndInstall(root, update) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun downloadAndInstall(root: View, update: Updater.Update) {
+        Snackbar.make(root, "Downloading v${update.version}…", Snackbar.LENGTH_SHORT).show()
+        thread {
+            val result = runCatching { Updater.fetch(requireContext(), update) }
+            activity?.runOnUiThread {
+                result.fold(
+                    onSuccess = { apk -> launchInstall(root, update, apk) },
+                    onFailure = {
+                        Snackbar.make(root, "Download failed: ${it.message}", Snackbar.LENGTH_LONG)
+                            .show()
+                    },
+                )
+            }
+        }
+    }
+
+    private fun launchInstall(root: View, update: Updater.Update, apk: java.io.File) {
+        if (FipsNative.isRunning()) {
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle("Disconnect first")
+                .setMessage(
+                    "v${update.version} is downloaded and verified. Disconnect " +
+                        "the VPN, then tap Check for updates again to install " +
+                        "(the download is kept)."
+                )
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        val uri = FileProvider.getUriForFile(
+            requireContext(), "org.fips.android.fileprovider", apk
+        )
+        startActivity(
+            Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        )
     }
 
     /**
