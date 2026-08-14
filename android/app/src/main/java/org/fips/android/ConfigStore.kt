@@ -33,6 +33,30 @@ object ConfigStore {
 
     fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    /**
+     * Public test-mesh bootstrap servers, operated by the FIPS project as
+     * new-user on-ramps (they accept inbound peering from arbitrary npubs).
+     * Mirrors the project's /etc/fips/hosts; hostnames are publicly
+     * resolvable under .fips.network, all on the default fips UDP port.
+     */
+    data class BootstrapPeer(val name: String, val npub: String) {
+        val endpoint get() = "$name.fips.network:2121"
+    }
+
+    val BOOTSTRAP_PEERS = listOf(
+        BootstrapPeer("test-us01", "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"),
+        BootstrapPeer("test-us02", "npub10yffd020a4ag8zcy75f9pruq3rnghvvhd5hphl9s62zgp35s560qrksp9u"),
+        BootstrapPeer("test-us03", "npub136yqae6na688fs75g95ppps3lxe07fvxefj77938zf47uhm6074sxw8ctm"),
+        BootstrapPeer("test-us03-next", "npub15m6c4ghuegx4pcde6tra8f7smn8vfv2wundyxwhkjynuerkrzmgsy09sh3"),
+        BootstrapPeer("test-us04", "npub1gd7ye2qp2lphhzx75fynnjzaxx4dqanddecet0wtt5ss5ek8h9ps62wdkf"),
+        BootstrapPeer("test-de01", "npub1260n42s06vzc7796w0fh3ny7zcpw6tlk4gq3940gmfrzl5c9pv2s3657q8"),
+        BootstrapPeer("test-es01", "npub17lpmzulpc98d8ff727k6e98atxn3phzupzsqqwe54ytduym747ws4tw5zm"),
+        BootstrapPeer("test-uk01", "npub1u0z26dc4qeneu5rvwvmpfhtwh3522ed6rlgxr9jarrfnjrc6ew4qxjysrs"),
+    )
+
+    /** Dropdown entry for a manually configured peer. */
+    const val BOOTSTRAP_CUSTOM = "custom"
+
     /** A commented Android-appropriate fips.yaml the Advanced editor seeds from. */
     const val DEFAULT_YAML_TEMPLATE = """# Advanced fips.yaml — edit any parameter. When non-empty this fully
 # defines the fips config; the app still forces the Keystore identity,
