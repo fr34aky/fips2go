@@ -3,6 +3,7 @@ package org.fips.android
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -59,6 +60,17 @@ class TroubleshootFragment : Fragment() {
             val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("fips logs", logView.text))
         }
+
+        val ctx = requireContext()
+        val pkg = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        @Suppress("DEPRECATION")
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pkg.longVersionCode
+        } else {
+            pkg.versionCode.toLong()
+        }
+        view.findViewById<TextView>(R.id.app_version).text =
+            "fips-android ${pkg.versionName} (build $code, ${Build.SUPPORTED_ABIS.firstOrNull()})"
     }
 
     /**

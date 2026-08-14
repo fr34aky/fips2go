@@ -5,7 +5,8 @@
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:clipToPadding="false"
-    android:padding="12dp"
+    android:paddingHorizontal="12dp"
+    android:paddingTop="12dp"
     android:paddingBottom="88dp">
 
     <!-- Resolve / reachability -->
@@ -151,4 +152,13 @@
             android:textIsSelectable="true"
             android:textSize="10sp" />
     </ScrollView>
+
+    <TextView
+        android:id="@+id/app_version"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:paddingTop="4dp"
+        android:textColor="?android:attr/textColorSecondary"
+        android:textSize="11sp" />
 </LinearLayout>
