@@ -47,7 +47,9 @@ android {
         }
         release {
             isMinifyEnabled = false
-            ndk { abiFilters += "arm64-v8a" }
+            // One ABI per release APK, selected via -PreleaseAbi=<abi>
+            // (release-build.sh builds and verifies one APK per ABI).
+            ndk { abiFilters += (findProperty("releaseAbi") as String? ?: "arm64-v8a") }
             signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }

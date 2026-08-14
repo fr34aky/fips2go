@@ -77,12 +77,14 @@ Per-ABI notes:
 ## Release build
 
 ```bash
-./release-build.sh
-# → dist/v<versionName>/: signed arm64-v8a APK + sha256 + unstripped .so
+./release-build.sh                # all ABIs
+./release-build.sh arm64-v8a      # subset
+# → dist/v<versionName>/: one signed APK per ABI + sha256 + unstripped .so
 ```
 
-Releases ship **arm64-v8a only** (the device-verified ABI; debug keeps all
-three). Signing needs `android/keystore.properties` (gitignored):
+Releases ship **one APK per ABI** (users install the one matching their
+device; `arm64-v8a` is the device-verified one — see Supported platforms).
+Signing needs `android/keystore.properties` (gitignored):
 
 ```properties
 storeFile=/path/to/release.keystore
