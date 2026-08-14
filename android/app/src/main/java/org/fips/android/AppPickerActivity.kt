@@ -2,11 +2,16 @@ package org.fips.android
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
 import android.os.Bundle
+import android.view.View
+import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.ImageView
 import android.widget.ListView
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /**
@@ -25,17 +30,14 @@ class AppPickerActivity : AppCompatActivity() {
         const val KEY_MESH_APPS = "mesh_apps"
     }
 
-    private lateinit var listView: ListView
-    private val packages = mutableListOf<String>()
+    private data class AppEntry(val pkg: String, val label: String, val icon: Drawable)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_app_picker)
-        listView = findViewById(R.id.app_list)
-        listView.choiceMode = ListView.CHOICE_MODE_MULTIPLE
 
         val pm = packageManager
-        val launchable = pm.queryIntentActivities(
+        val entries = pm.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
         )
             .map { it.activityInfo.packageName }
@@ -43,31 +45,38 @@ class AppPickerActivity : AppCompatActivity() {
             .filter { it != packageName } // never route our own app through the mesh
             .mapNotNull { pkg ->
                 runCatching {
-                    pkg to pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                    val info = pm.getApplicationInfo(pkg, 0)
+                    AppEntry(pkg, pm.getApplicationLabel(info).toString(), pm.getApplicationIcon(info))
                 }.getOrNull()
             }
-            .sortedBy { it.second.lowercase() }
+            .sortedBy { it.label.lowercase() }
 
-        packages.clear()
-        packages.addAll(launchable.map { it.first })
-        val labels = launchable.map { "${it.second}\n${it.first}" }
+        val selected =
+            (prefs().getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet()).toMutableSet()
 
-        listView.adapter = ArrayAdapter(
-            this, android.R.layout.simple_list_item_multiple_choice, labels
-        )
-
-        val selected = prefs().getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet()
-        packages.forEachIndexed { i, pkg ->
-            listView.setItemChecked(i, pkg in selected)
-        }
+        // Custom rows (icon + label + package + checkbox); selection is kept
+        // in `selected` directly rather than ListView's choice mode.
+        findViewById<ListView>(R.id.app_list).adapter =
+            object : ArrayAdapter<AppEntry>(this, 0, entries) {
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                    val row = convertView
+                        ?: layoutInflater.inflate(R.layout.item_app, parent, false)
+                    val e = entries[position]
+                    row.findViewById<ImageView>(R.id.app_icon).setImageDrawable(e.icon)
+                    row.findViewById<TextView>(R.id.app_label).text = e.label
+                    row.findViewById<TextView>(R.id.app_pkg).text = e.pkg
+                    val check = row.findViewById<CheckBox>(R.id.app_check)
+                    check.isChecked = e.pkg in selected
+                    row.setOnClickListener {
+                        if (!selected.remove(e.pkg)) selected.add(e.pkg)
+                        check.isChecked = e.pkg in selected
+                    }
+                    return row
+                }
+            }
 
         findViewById<Button>(R.id.save).setOnClickListener {
-            val chosen = mutableSetOf<String>()
-            val checked = listView.checkedItemPositions
-            for (i in packages.indices) {
-                if (checked[i]) chosen.add(packages[i])
-            }
-            prefs().edit().putStringSet(KEY_MESH_APPS, chosen).apply()
+            prefs().edit().putStringSet(KEY_MESH_APPS, selected.toSet()).apply()
             finish()
         }
     }
