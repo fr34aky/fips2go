@@ -10,6 +10,7 @@ import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.snackbar.Snackbar
 import org.fips.android.ConfigStore as CS
 
@@ -99,11 +100,15 @@ class SettingsFragment : Fragment() {
     private fun edit(view: View, id: Int) = view.findViewById<EditText>(id)
     private fun sw(view: View, id: Int) = view.findViewById<MaterialSwitch>(id)
 
+    // Dropdown fields need setText(value, false) — plain setText would run the
+    // autocomplete filter and shrink the dropdown to the current value.
+    private fun drop(view: View, id: Int) = view.findViewById<MaterialAutoCompleteTextView>(id)
+
     private fun load(view: View) {
         val p = CS.prefs(requireContext())
         edit(view, R.id.peer_npub).setText(p.getString(CS.PEER_NPUB, ""))
         edit(view, R.id.peer_endpoint).setText(p.getString(CS.PEER_ENDPOINT, ""))
-        edit(view, R.id.peer_transport).setText(p.getString(CS.PEER_TRANSPORT, "udp"))
+        drop(view, R.id.peer_transport).setText(p.getString(CS.PEER_TRANSPORT, "udp"), false)
         sw(view, R.id.nostr).isChecked = p.getBoolean(CS.NOSTR, false)
         edit(view, R.id.nostr_relays).setText(p.getString(CS.NOSTR_RELAYS, ""))
         edit(view, R.id.stun_servers).setText(p.getString(CS.STUN_SERVERS, ""))
@@ -115,7 +120,7 @@ class SettingsFragment : Fragment() {
         sw(view, R.id.lan_mdns).isChecked = p.getBoolean(CS.LAN_MDNS, false)
         sw(view, R.id.forward_clearnet).isChecked = p.getBoolean(CS.FORWARD_CLEARNET, true)
         edit(view, R.id.worker_threads).setText(p.getInt(CS.WORKER_THREADS, 1).toString())
-        edit(view, R.id.log_level).setText(p.getString(CS.LOG_LEVEL, "info"))
+        drop(view, R.id.log_level).setText(p.getString(CS.LOG_LEVEL, "info"), false)
         edit(view, R.id.fips_yaml).setText(p.getString(CS.FIPS_YAML, ""))
     }
 
