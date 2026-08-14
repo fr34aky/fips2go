@@ -5,8 +5,10 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import androidx.activity.OnBackPressedCallback
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.snackbar.Snackbar
 import org.fips.android.ConfigStore as CS
@@ -29,6 +31,69 @@ class SettingsFragment : Fragment() {
             save(view)
             Snackbar.make(view, "Saved — reconnect to apply", Snackbar.LENGTH_SHORT).show()
         }
+        // Backing out of the activity destroys unsaved edits too.
+        requireActivity().onBackPressedDispatcher.addCallback(
+            viewLifecycleOwner,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    val leave = {
+                        isEnabled = false
+                        requireActivity().onBackPressedDispatcher.onBackPressed()
+                    }
+                    if (!interceptUnsaved(leave)) leave()
+                }
+            }
+        )
+    }
+
+    /**
+     * If the widgets differ from the persisted settings, ask Save / Discard /
+     * Cancel and return true; [proceed] runs unless cancelled (Discard reverts
+     * the widgets first, so a re-entered check comes up clean). Returns false
+     * when there is nothing unsaved — the caller just proceeds itself.
+     */
+    fun interceptUnsaved(proceed: () -> Unit): Boolean {
+        val v = view ?: return false
+        if (!hasUnsavedChanges(v)) return false
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Unsaved settings")
+            .setMessage("Edits only take effect once saved (and applied on the next connect).")
+            .setPositiveButton("Save") { _, _ ->
+                save(v)
+                Snackbar.make(v, "Saved — reconnect to apply", Snackbar.LENGTH_SHORT).show()
+                proceed()
+            }
+            .setNegativeButton("Discard") { _, _ ->
+                load(v)
+                proceed()
+            }
+            .setNeutralButton("Cancel", null)
+            .show()
+        return true
+    }
+
+    /** Compare widgets against prefs, mirroring save()'s normalization. */
+    private fun hasUnsavedChanges(view: View): Boolean {
+        val p = CS.prefs(requireContext())
+        fun e(id: Int) = edit(view, id).text.toString().trim()
+        return e(R.id.peer_npub) != p.getString(CS.PEER_NPUB, "") ||
+            e(R.id.peer_endpoint) != p.getString(CS.PEER_ENDPOINT, "") ||
+            e(R.id.peer_transport).ifEmpty { "udp" } != p.getString(CS.PEER_TRANSPORT, "udp") ||
+            sw(view, R.id.nostr).isChecked != p.getBoolean(CS.NOSTR, false) ||
+            e(R.id.nostr_relays) != p.getString(CS.NOSTR_RELAYS, "") ||
+            e(R.id.stun_servers) != p.getString(CS.STUN_SERVERS, "") ||
+            e(R.id.udp_bind) != p.getString(CS.UDP_BIND, "") ||
+            e(R.id.tcp_bind) != p.getString(CS.TCP_BIND, "") ||
+            sw(view, R.id.enable_fips_dns).isChecked != p.getBoolean(CS.ENABLE_FIPS_DNS, true) ||
+            e(R.id.dns_upstreams) != p.getString(CS.DNS_UPSTREAMS, "") ||
+            sw(view, R.id.battery_saver).isChecked != p.getBoolean(CS.BATTERY_SAVER, true) ||
+            sw(view, R.id.lan_mdns).isChecked != p.getBoolean(CS.LAN_MDNS, false) ||
+            sw(view, R.id.forward_clearnet).isChecked !=
+            p.getBoolean(CS.FORWARD_CLEARNET, true) ||
+            (e(R.id.worker_threads).toIntOrNull() ?: 1).coerceIn(0, 16) !=
+            p.getInt(CS.WORKER_THREADS, 1) ||
+            e(R.id.log_level).ifEmpty { "info" } != p.getString(CS.LOG_LEVEL, "info") ||
+            e(R.id.fips_yaml) != p.getString(CS.FIPS_YAML, "")
     }
 
     private fun edit(view: View, id: Int) = view.findViewById<EditText>(id)
