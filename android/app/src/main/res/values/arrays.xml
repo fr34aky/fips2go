@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="peer_transports">
+        <item>udp</item>
+        <item>tcp</item>
+    </string-array>
+    <string-array name="log_levels">
+        <item>error</item>
+        <item>warn</item>
+        <item>info</item>
+        <item>debug</item>
+        <item>trace</item>
+    </string-array>
+</resources>

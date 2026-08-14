@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:clipToPadding="false"
@@ -40,15 +41,16 @@
         </com.google.android.material.textfield.TextInputLayout>
 
         <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Transport (udp / tcp)">
-            <com.google.android.material.textfield.TextInputEditText
+            android:hint="Transport">
+            <com.google.android.material.textfield.MaterialAutoCompleteTextView
                 android:id="@+id/peer_transport"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="text" />
+                android:inputType="none"
+                app:simpleItems="@array/peer_transports" />
         </com.google.android.material.textfield.TextInputLayout>
 
         <!-- Discovery -->
@@ -188,15 +190,16 @@
         <TextView style="@style/SettingsHeader" android:text="Logging" />
 
         <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Log level (error/warn/info/debug/trace)">
-            <com.google.android.material.textfield.TextInputEditText
+            android:hint="Log level">
+            <com.google.android.material.textfield.MaterialAutoCompleteTextView
                 android:id="@+id/log_level"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="text" />
+                android:inputType="none"
+                app:simpleItems="@array/log_levels" />
         </com.google.android.material.textfield.TextInputLayout>
 
         <!-- Advanced -->
