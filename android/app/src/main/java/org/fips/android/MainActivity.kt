@@ -31,6 +31,15 @@ class MainActivity : AppCompatActivity() {
 
         val nav = findViewById<BottomNavigationView>(R.id.bottom_nav)
         nav.setOnItemSelectedListener { item ->
+            // Leaving Settings replaces the fragment, dropping unsaved edits;
+            // let it confirm first. On Save/Discard it re-selects the target
+            // tab, which re-enters this listener with a clean state.
+            val current = supportFragmentManager.findFragmentById(R.id.fragment_container)
+            if (current is SettingsFragment && item.itemId != R.id.nav_settings &&
+                current.interceptUnsaved { nav.selectedItemId = item.itemId }
+            ) {
+                return@setOnItemSelectedListener false
+            }
             val fragment: Fragment = when (item.itemId) {
                 R.id.nav_settings -> SettingsFragment()
                 R.id.nav_troubleshoot -> TroubleshootFragment()
