@@ -1,6 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// Release signing lives outside the repo: android/keystore.properties
+// (gitignored) points at the keystore. Absent → release builds unsigned,
+// so clones without the key still compile.
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -13,14 +23,32 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
-        // The Rust shim is built per-ABI by ../build-native.sh into
-        // src/main/jniLibs/<abi>/libfips_android.so.
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+    }
+
+    signingConfigs {
+        if (keystoreProps.isNotEmpty()) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
+        // The Rust shim is built per-ABI by ../build-native.sh into
+        // src/main/jniLibs/<abi>/libfips_android.so. abiFilters are set
+        // per build type (defaultConfig would union with them): debug
+        // packages everything in jniLibs, release ships only the
+        // device-verified arm64-v8a.
+        debug {
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+        }
         release {
             isMinifyEnabled = false
+            ndk { abiFilters += "arm64-v8a" }
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
     compileOptions {

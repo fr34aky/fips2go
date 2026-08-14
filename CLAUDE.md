@@ -23,6 +23,9 @@ source ./android-env.sh && (cd smoke && cargo run)
 # APK (debug; toolchain paths are machine-specific — see android/local.properties)
 cd android && JAVA_HOME=~/.local/jdk-17 ~/.local/gradle-8.7/bin/gradle assembleDebug
 # → app/build/outputs/apk/debug/app-debug.apk; install with adb install
+
+# Release: signed arm64-v8a-only APK + sha256 + unstripped .so → dist/v<versionName>/
+./release-build.sh
 ```
 
 `source ./android-env.sh` is required before any cargo command:
@@ -65,7 +68,8 @@ Kotlin side: `MainActivity` hosts bottom-nav fragments (Overview / Settings / Di
 ## Constraints & gotchas
 
 - `shim/.cargo/config.toml` forces 16 KB page alignment (`max-page-size=16384`) on `aarch64` and `x86_64` — required on Android 15+/Pixel 9-class devices; don't remove it. `armeabi-v7a` stays 4 KB (32-bit Android never uses 16 KB pages).
-- Three ABIs are built and packaged (`arm64-v8a`, `armeabi-v7a`, `x86_64`); only `arm64-v8a` is device-verified. The ABI list lives in three places that must stay in sync: `build-native.sh`, `rust-toolchain.toml`, and `abiFilters` in `android/app/build.gradle.kts`. 32-bit `armeabi-v7a` is the build most likely to break on a fips pin bump (pointer-width casts — e.g. bionic's 32-bit `msghdr.msg_namelen` is `i32`); build it before bumping the pin. Debug build only; no signed release.
+- Three ABIs are built and packaged in the **debug** APK (`arm64-v8a`, `armeabi-v7a`, `x86_64`); only `arm64-v8a` is device-verified, and **release builds ship arm64-v8a only** (per-buildType `abiFilters`). The ABI list lives in three places that must stay in sync: `build-native.sh`, `rust-toolchain.toml`, and the debug `abiFilters` in `android/app/build.gradle.kts`. 32-bit `armeabi-v7a` is the build most likely to break on a fips pin bump (pointer-width casts — e.g. bionic's 32-bit `msghdr.msg_namelen` is `i32`); build it before bumping the pin.
+- Releases: `./release-build.sh` (signs via gitignored `android/keystore.properties` → keystore at `~/.android-keys/fips-android-release.keystore`; unsigned fallback when absent). It archives an unstripped `.so` per release for symbolication and verifies ABI contents, 16 KB alignment, and the signature. Bump `versionCode` + `versionName` together. `THIRD-PARTY-NOTICES.md` is generated from the arm64 `cargo tree` (no GPL links into the Android build — `rustables` is host-only) and must be regenerated on a fips pin bump. Installing a release over the debug build requires an uninstall (different signing key), which **irrecoverably destroys the device's mesh identity** (nsec is sealed by a non-exportable Keystore key).
 - min SDK 26, target/compile SDK 34.
 - Don't reinstall or force-kill the app while the VPN is connected — it can leak netd routing rules that block other apps' connectivity until reboot. Disconnect first.
 - Launcher icon assets (`android/.../res/mipmap-*`) are generated from the fips repo's `docs/logos/fips_logo.png` (mesh graphic cropped, luminance→alpha, adaptive icon + monochrome layer).

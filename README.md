@@ -74,6 +74,30 @@ Per-ABI notes:
   the app's peer endpoint to `10.0.2.2:<port>` — the emulator's alias for
   the host loopback.
 
+## Release build
+
+```bash
+./release-build.sh
+# → dist/v<versionName>/: signed arm64-v8a APK + sha256 + unstripped .so
+```
+
+Releases ship **arm64-v8a only** (the device-verified ABI; debug keeps all
+three). Signing needs `android/keystore.properties` (gitignored):
+
+```properties
+storeFile=/path/to/release.keystore
+storePassword=...
+keyAlias=fips-android
+keyPassword=...
+```
+
+Without it the release APK comes out unsigned. The script archives an
+unstripped copy of the shim next to the APK for symbolizing native crash
+dumps — keep it (and the keystore!) with the release, not in the repo.
+`THIRD-PARTY-NOTICES.md` lists everything statically linked into the
+binary and is attached to each GitHub release. Bump `versionCode` and
+`versionName` together in `android/app/build.gradle.kts` for every release.
+
 ## Local fips development
 
 To hack on the fips hooks against a local checkout instead of the pinned
