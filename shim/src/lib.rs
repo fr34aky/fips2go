@@ -15,20 +15,40 @@ pub mod logbuf;
 pub mod packet;
 pub mod pump;
 
-/// Initialize tracing once. Lines fan out to the in-app ring buffer plus the
+/// Initialize tracing. Lines fan out to the in-app ring buffer plus the
 /// platform sink (logcat tag "fips" on Android, stderr elsewhere). Level from
 /// `level` ("error".."trace"), default info.
+///
+/// The subscriber is installed once per process, but the level filter sits
+/// behind a reload handle: calling this again (every engine start, i.e. every
+/// reconnect) swaps the filter in place, so a log-level settings change takes
+/// effect on the next connect without killing the app process.
 pub fn init_logging(level: Option<&str>) {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    let level = level.unwrap_or("info").to_string();
-    ONCE.call_once(move || {
-        let filter = tracing_subscriber::EnvFilter::try_new(&level)
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .with_writer(logbuf::MakeFanout)
-            .try_init();
-    });
+    use std::sync::OnceLock;
+    use tracing_subscriber::{
+        layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter, Registry,
+    };
+    static FILTER: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+
+    let filter = EnvFilter::try_new(level.unwrap_or("info"))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    if let Some(handle) = FILTER.get() {
+        let _ = handle.reload(filter);
+        return;
+    }
+    let (filter_layer, handle) = reload::Layer::new(filter);
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(logbuf::MakeFanout);
+    if tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
+        .try_init()
+        .is_ok()
+    {
+        let _ = FILTER.set(handle);
+    }
+    // try_init failing means another subscriber owns the process (host
+    // tests); leave the handle unset and stay a no-op there.
 }
