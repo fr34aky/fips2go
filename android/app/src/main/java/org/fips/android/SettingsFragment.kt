@@ -6,6 +6,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import androidx.activity.OnBackPressedCallback
+import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -25,6 +26,7 @@ class SettingsFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         load(view)
+        setupBootstrapDropdown(view)
         view.findViewById<MaterialButton>(R.id.load_template).setOnClickListener {
             view.findViewById<EditText>(R.id.fips_yaml).setText(CS.DEFAULT_YAML_TEMPLATE)
         }
@@ -103,6 +105,36 @@ class SettingsFragment : Fragment() {
     // Dropdown fields need setText(value, false) — plain setText would run the
     // autocomplete filter and shrink the dropdown to the current value.
     private fun drop(view: View, id: Int) = view.findViewById<MaterialAutoCompleteTextView>(id)
+
+    /**
+     * Bootstrap dropdown: picking a public test-mesh server fills the npub and
+     * endpoint fields; "custom" leaves them to manual entry. Hand-editing
+     * either field flips the selection back to whatever now matches.
+     */
+    private fun setupBootstrapDropdown(view: View) {
+        val dd = drop(view, R.id.bootstrap_server)
+        dd.setSimpleItems(
+            (CS.BOOTSTRAP_PEERS.map { it.name } + CS.BOOTSTRAP_CUSTOM).toTypedArray()
+        )
+        val npubField = edit(view, R.id.peer_npub)
+        val endpointField = edit(view, R.id.peer_endpoint)
+        val syncSelection = {
+            val match = CS.BOOTSTRAP_PEERS.firstOrNull {
+                it.npub == npubField.text.toString().trim() &&
+                    it.endpoint == endpointField.text.toString().trim()
+            }
+            dd.setText(match?.name ?: CS.BOOTSTRAP_CUSTOM, false)
+        }
+        syncSelection()
+        dd.setOnItemClickListener { _, _, pos, _ ->
+            CS.BOOTSTRAP_PEERS.getOrNull(pos)?.let {
+                npubField.setText(it.npub)
+                endpointField.setText(it.endpoint)
+            }
+        }
+        npubField.doAfterTextChanged { syncSelection() }
+        endpointField.doAfterTextChanged { syncSelection() }
+    }
 
     private fun load(view: View) {
         val p = CS.prefs(requireContext())
