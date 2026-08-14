@@ -138,8 +138,12 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   the fix, same saver-on conditions). Not yet measured: a full multi-hour
   Doze cycle. The forwarder was validated on a few flows, not under broad
   real-app load.
-- mDNS LAN discovery is available behind a default-off Settings toggle:
-  it acquires a `MulticastLock` (held only while the underlay is Wi-Fi;
+- mDNS LAN discovery is available behind a default-off Settings toggle,
+  and is live-verified against a fips daemon on the same Wi-Fi: the phone
+  discovered the host via `_fips._udp` within ~1.5 min, dialed its LAN
+  address directly (no relay/mesh hop), and the advert carried only the
+  Wi-Fi address — the tunnel ULA stays off the LAN. The toggle
+  acquires a `MulticastLock` (held only while the underlay is Wi-Fi;
   the lock disables the chip's multicast filtering, so chatty LANs cost
   battery) and excludes the tunnel's own addresses from the adverts so the
   mesh ULA is not broadcast on the LAN. mDNS sockets cannot be
