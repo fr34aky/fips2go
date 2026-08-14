@@ -177,9 +177,13 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   non-functional under "Block connections without VPN". BLE/Ethernet
   transports are not available on Android. ICMP to clearnet is not
   forwarded (TCP/UDP are).
-- Multi-ABI: `arm64-v8a`, `armeabi-v7a`, and `x86_64` are built and packaged;
-  only `arm64-v8a` has been exercised on real hardware. Debug build only; no
-  signed release yet.
+- Signed per-ABI releases are published on GitHub Releases, and the app can
+  update itself: *Check for updates* (Diagnostics) downloads the ABI-matching
+  APK, verifies it against the release's sha256, and hands it to the system
+  installer — which only proceeds with the VPN disconnected and enforces the
+  release signing key (identity and settings survive; verified live by
+  updating v0.1.2 → v0.1.3 from within the app). Only `arm64-v8a` has been
+  exercised on real hardware.
 
 ## License
 
