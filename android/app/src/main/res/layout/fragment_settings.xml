@@ -213,6 +213,24 @@
                 android:inputType="number" />
         </com.google.android.material.textfield.TextInputLayout>
 
+        <!-- Updates -->
+        <TextView style="@style/SettingsHeader" android:text="Updates" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/auto_update"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="Check for updates on start" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="6dp"
+            android:text="Looks for a new release on GitHub each time the app opens and offers to install it (or postpone). Downloads are verified against the release checksum, and installing keeps your identity and settings. When off, updates are still available manually via Diagnostics → Check for updates."
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
         <!-- Logging -->
         <TextView style="@style/SettingsHeader" android:text="Logging" />
 

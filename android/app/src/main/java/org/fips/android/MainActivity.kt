@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.fragment.app.Fragment
 import com.google.android.material.bottomnavigation.BottomNavigationView
+import kotlin.concurrent.thread
 
 /**
  * Host activity: a Material toolbar + bottom navigation over three pages
@@ -50,7 +51,36 @@ class MainActivity : AppCompatActivity() {
                 .commit()
             true
         }
-        if (savedInstanceState == null) nav.selectedItemId = R.id.nav_overview
+        if (savedInstanceState == null) {
+            nav.selectedItemId = R.id.nav_overview
+            autoUpdateCheck()
+        }
+    }
+
+    /**
+     * Silent update check on app start (not on rotation/recreation), gated by
+     * the Settings toggle. A found release gets the shared install-or-later
+     * dialog; failures stay in the log — this is a background convenience,
+     * and Diagnostics' manual "Check for updates" keeps working either way.
+     */
+    private fun autoUpdateCheck() {
+        if (!ConfigStore.prefs(this).getBoolean(ConfigStore.AUTO_UPDATE, true)) return
+        val current = packageManager.getPackageInfo(packageName, 0).versionName ?: return
+        val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return
+        thread(name = "fips-update-check") {
+            val result = runCatching { Updater.check(current, abi) }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { update ->
+                        if (update != null) {
+                            UpdateUi.offer(this, findViewById(R.id.fragment_container), update)
+                        }
+                    },
+                    onFailure = { Log.i("MainActivity", "auto update check failed: ${it.message}") },
+                )
+            }
+        }
     }
 
     private val vpnPermission =
