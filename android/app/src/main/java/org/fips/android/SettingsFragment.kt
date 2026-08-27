@@ -91,6 +91,7 @@ class SettingsFragment : Fragment() {
             e(R.id.dns_upstreams) != p.getString(CS.DNS_UPSTREAMS, "") ||
             sw(view, R.id.battery_saver).isChecked != p.getBoolean(CS.BATTERY_SAVER, true) ||
             sw(view, R.id.lan_mdns).isChecked != p.getBoolean(CS.LAN_MDNS, false) ||
+            sw(view, R.id.hotspot).isChecked != p.getBoolean(CS.HOTSPOT, false) ||
             sw(view, R.id.forward_clearnet).isChecked !=
             p.getBoolean(CS.FORWARD_CLEARNET, true) ||
             (e(R.id.worker_threads).toIntOrNull() ?: 1).coerceIn(0, 16) !=
@@ -150,6 +151,10 @@ class SettingsFragment : Fragment() {
         edit(view, R.id.dns_upstreams).setText(p.getString(CS.DNS_UPSTREAMS, ""))
         sw(view, R.id.battery_saver).isChecked = p.getBoolean(CS.BATTERY_SAVER, true)
         sw(view, R.id.lan_mdns).isChecked = p.getBoolean(CS.LAN_MDNS, false)
+        sw(view, R.id.hotspot).isChecked = p.getBoolean(CS.HOTSPOT, false)
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+            sw(view, R.id.hotspot).isEnabled = false
+        }
         sw(view, R.id.forward_clearnet).isChecked = p.getBoolean(CS.FORWARD_CLEARNET, true)
         edit(view, R.id.worker_threads).setText(p.getInt(CS.WORKER_THREADS, 1).toString())
         drop(view, R.id.log_level).setText(p.getString(CS.LOG_LEVEL, "info"), false)
@@ -174,6 +179,7 @@ class SettingsFragment : Fragment() {
             .putString(CS.DNS_UPSTREAMS, edit(view, R.id.dns_upstreams).text.toString().trim())
             .putBoolean(CS.BATTERY_SAVER, sw(view, R.id.battery_saver).isChecked)
             .putBoolean(CS.LAN_MDNS, sw(view, R.id.lan_mdns).isChecked)
+            .putBoolean(CS.HOTSPOT, sw(view, R.id.hotspot).isChecked)
             .putBoolean(CS.FORWARD_CLEARNET, sw(view, R.id.forward_clearnet).isChecked)
             .putInt(CS.WORKER_THREADS, workers.coerceIn(0, 16))
             .putString(

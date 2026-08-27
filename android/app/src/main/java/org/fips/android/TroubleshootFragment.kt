@@ -12,6 +12,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.FileProvider
@@ -22,6 +23,7 @@ import com.google.android.material.snackbar.Snackbar
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.concurrent.thread
+import org.fips.android.ConfigStore as CS
 
 /** Diagnostics page: resolve/ping an npub, and view the node's logs. */
 class TroubleshootFragment : Fragment() {
@@ -30,6 +32,12 @@ class TroubleshootFragment : Fragment() {
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var sessionsView: TextView
+    private lateinit var lanList: LinearLayout
+    private lateinit var lanEmpty: TextView
+    private lateinit var hotspotStatus: TextView
+
+    /** Structural fingerprint of the rendered LAN rows (see [refreshLanPeers]). */
+    private var lastLanKey = ""
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -41,6 +49,9 @@ class TroubleshootFragment : Fragment() {
         logView = view.findViewById(R.id.log_view)
         logScroll = view.findViewById(R.id.log_scroll)
         sessionsView = view.findViewById(R.id.sessions_view)
+        lanList = view.findViewById(R.id.lan_list)
+        lanEmpty = view.findViewById(R.id.lan_empty)
+        hotspotStatus = view.findViewById(R.id.hotspot_status)
         val result = view.findViewById<TextView>(R.id.probe_result)
         val npubField = view.findViewById<EditText>(R.id.probe_npub)
 
@@ -200,9 +211,126 @@ class TroubleshootFragment : Fragment() {
         override fun run() {
             refreshLogs()
             refreshSessions()
+            refreshLanPeers()
             poller.postDelayed(this, 2000)
         }
     }
+
+    private data class LanPeer(
+        val npub: String,
+        val addr: String,
+        val lastSeenMs: Long,
+        val connected: Boolean,
+    )
+
+    /**
+     * "Nearby (mDNS)" card: peers whose LAN advert the node has seen since it
+     * started (`show_lan_peers`), joined against `show_peers` for connection
+     * state. The node auto-dials discoveries, so most rows show connected; the
+     * Connect button is the manual retry for the ones that aren't. Rows are
+     * rebuilt only when the structural fingerprint changes — the per-row age
+     * line is updated in place so an in-flight tap isn't cancelled by a
+     * removeAllViews under the finger.
+     */
+    private fun refreshLanPeers() {
+        val running = FipsNative.isRunning()
+        val rows = ArrayList<LanPeer>()
+        if (running) {
+            try {
+                val connected = HashSet<String>()
+                val peers = queryData("show_peers").optJSONArray("peers") ?: JSONArray()
+                for (i in 0 until peers.length()) {
+                    connected.add(peers.getJSONObject(i).optString("npub"))
+                }
+                val lan = queryData("show_lan_peers").optJSONArray("lan_peers") ?: JSONArray()
+                for (i in 0 until lan.length()) {
+                    val o = lan.getJSONObject(i)
+                    val npub = o.optString("npub")
+                    rows.add(
+                        LanPeer(npub, o.optString("addr"), o.optLong("last_seen_ms"), npub in connected)
+                    )
+                }
+            } catch (_: Exception) {
+                // Engine mid-restart (network change) — keep the last render.
+                return
+            }
+        }
+
+        // FIPS Hotspot line: joined state while the service reports one,
+        // otherwise a hint that the armed toggle is waiting for the SSID.
+        val hotspotJoined = FipsVpnService.hotspotStatus
+        val hotspotArmed = CS.prefs(requireContext()).getBoolean(CS.HOTSPOT, false)
+        hotspotStatus.visibility =
+            if (running && (hotspotJoined != null || hotspotArmed)) View.VISIBLE else View.GONE
+        hotspotStatus.text = when {
+            hotspotJoined != null -> "FIPS Hotspot: connected ($hotspotJoined)"
+            else -> "FIPS Hotspot: waiting for \"!FIPS\" to come in range"
+        }
+
+        lanEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        if (rows.isEmpty()) {
+            lanEmpty.text = when {
+                !running -> "(node not running)"
+                !CS.prefs(requireContext()).getBoolean(CS.LAN_MDNS, false) &&
+                    hotspotJoined == null ->
+                    "LAN discovery is off — enable \"LAN discovery (mDNS)\" in Settings " +
+                        "and reconnect."
+                else -> "Nothing discovered yet — fips peers on this Wi-Fi appear here " +
+                    "(can take a minute or two)."
+            }
+        }
+
+        val key = rows.joinToString("|") { "${it.npub},${it.addr},${it.connected}" }
+        if (key != lastLanKey) {
+            lastLanKey = key
+            lanList.removeAllViews()
+            for (peer in rows) {
+                val row = layoutInflater.inflate(R.layout.item_lan_peer, lanList, false)
+                row.findViewById<TextView>(R.id.lan_npub).text = shortNpub(peer.npub)
+                row.findViewById<TextView>(R.id.lan_status).visibility =
+                    if (peer.connected) View.VISIBLE else View.GONE
+                val connect = row.findViewById<MaterialButton>(R.id.lan_connect)
+                connect.visibility = if (peer.connected) View.GONE else View.VISIBLE
+                connect.setOnClickListener { connectLanPeer(peer) }
+                // Tapping the row drops the full npub into the probe field
+                // (resolve / reachability) and the clipboard.
+                row.setOnClickListener {
+                    view?.findViewById<EditText>(R.id.probe_npub)?.setText(peer.npub)
+                    val cm = requireContext()
+                        .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("npub", peer.npub))
+                    Snackbar.make(requireView(), "npub copied", Snackbar.LENGTH_SHORT).show()
+                }
+                lanList.addView(row)
+            }
+        }
+        for (i in 0 until lanList.childCount) {
+            val peer = rows.getOrNull(i) ?: break
+            lanList.getChildAt(i).findViewById<TextView>(R.id.lan_detail).text =
+                "${peer.addr} · seen ${age(peer.lastSeenMs).trim().ifEmpty { "just now" }}"
+        }
+    }
+
+    private fun connectLanPeer(peer: LanPeer) {
+        val root = requireView()
+        Snackbar.make(root, "Connecting to ${shortNpub(peer.npub)}…", Snackbar.LENGTH_SHORT).show()
+        thread {
+            val resp = runCatching { JSONObject(FipsNative.connectPeer(peer.npub, peer.addr)) }
+                .getOrNull()
+            activity?.runOnUiThread {
+                val msg = when {
+                    resp == null -> "Connect failed (engine not responding)"
+                    resp.optString("status") == "ok" ->
+                        "Handshake initiated — watch Sessions above"
+                    else -> "Connect failed: ${resp.optString("message", "unknown error")}"
+                }
+                Snackbar.make(root, msg, Snackbar.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun shortNpub(npub: String): String =
+        if (npub.length > 20) "${npub.take(10)}…${npub.takeLast(6)}" else npub
 
     /**
      * Live FMP (network/routing links to direct peers) and FSP (end-to-end
@@ -290,8 +418,7 @@ class TroubleshootFragment : Fragment() {
     private fun peerName(o: JSONObject): String {
         val dn = o.optString("display_name")
         if (dn.isNotEmpty() && dn != "null") return dn
-        val npub = o.optString("npub")
-        return if (npub.length > 20) "${npub.take(10)}…${npub.takeLast(6)}" else npub
+        return shortNpub(o.optString("npub"))
     }
 
     private fun fmtBytes(b: Long): String = when {

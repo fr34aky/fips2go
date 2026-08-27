@@ -123,19 +123,28 @@ pub extern "system" fn Java_org_fips_android_FipsNative_isRunning(
     crate::engine::is_running() as jboolean
 }
 
-/// `onNetworkChanged(tunFd)` — rebuild the node on the given TUN fd after the
-/// underlying network switched (Wi-Fi ↔ cellular). `tunFd` is usually the fd
-/// from `start`, but may be a replacement when the tunnel was re-established
-/// with different routes. Blocking; call off the main thread. No-op when not
-/// running.
+/// `onNetworkChanged(tunFd, configJson)` — rebuild the node on the given TUN
+/// fd after the underlying network switched (Wi-Fi ↔ cellular) or the FIPS
+/// Hotspot came/went. `tunFd` is usually the fd from `start`, but may be a
+/// replacement when the tunnel was re-established with different routes.
+/// `configJson` is the freshly regenerated shim config for the rebuilt node
+/// (empty/null keeps the previous one). Blocking; call off the main thread.
+/// No-op when not running.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_onNetworkChanged(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     tun_fd: jint,
+    config_json: JString,
 ) {
+    let config = if config_json.is_null() {
+        String::new()
+    } else {
+        from_jstring(&mut env, &config_json)
+    };
     let _ = std::panic::catch_unwind(|| {
-        if let Err(e) = crate::engine::network_changed(tun_fd) {
+        let config = (!config.trim().is_empty()).then_some(config.as_str());
+        if let Err(e) = crate::engine::network_changed(tun_fd, config) {
             tracing::warn!(error = %e, "onNetworkChanged failed");
         }
     });
@@ -175,6 +184,25 @@ pub extern "system" fn Java_org_fips_android_FipsNative_recentLogs(
 ) -> jstring {
     let max = max_lines.max(0) as usize;
     to_jstring(&env, &crate::logbuf::recent(max))
+}
+
+/// `connectPeer(npub, address)` → the node's `connect` command response
+/// (`{"status":"ok"|"error", ...}`). Manual UDP dial of an mDNS-seen peer;
+/// blocking, call off the main thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_fips_android_FipsNative_connectPeer(
+    mut env: JNIEnv,
+    _class: JClass,
+    npub: JString,
+    address: JString,
+) -> jstring {
+    let npub = from_jstring(&mut env, &npub);
+    let address = from_jstring(&mut env, &address);
+    let json = std::panic::catch_unwind(|| crate::engine::connect_peer_json(&npub, &address))
+        .unwrap_or_else(|_| {
+            serde_json::json!({ "status": "error", "message": "panic in connect" }).to_string()
+        });
+    to_jstring(&env, &json)
 }
 
 /// `query(command, paramsJson)` → any snapshot-served `show_*` result.

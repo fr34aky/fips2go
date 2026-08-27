@@ -11,6 +11,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use fips::control::ControlCommandHandle;
 use fips::control::read_handle::ControlReadHandle;
 
 use crate::config::ShimConfig;
@@ -80,6 +81,9 @@ struct Engine {
     pump: Option<Pump>,
     forwarder: Option<Forwarder>,
     read_handle: ControlReadHandle,
+    /// Mutating twin of `read_handle`: routes `connect` / `disconnect` onto
+    /// the node's rx_loop (Diagnostics' manual dial of mDNS-seen peers).
+    cmd_handle: ControlCommandHandle,
     npub: String,
     address: String,
     /// Our dup of the VpnService TUN fd; closed after the pump joins.
@@ -164,6 +168,7 @@ fn start_inner(
         node.set_socket_protect(hook);
     }
     let read_handle = node.control_read_handle();
+    let cmd_handle = node.control_command_handle();
 
     // Node thread: current-thread runtime, same shape as the fips binary.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -284,6 +289,7 @@ fn start_inner(
         pump: Some(pump),
         forwarder,
         read_handle,
+        cmd_handle,
         npub: npub.clone(),
         address: address.clone(),
         tun_fd: owned_fd,
@@ -340,7 +346,12 @@ static REBINDING: AtomicBool = AtomicBool::new(false);
 /// adding `::/0` as underlay IPv6 comes and goes) — we dup whatever we get.
 /// The fd is owned by the Kotlin `ParcelFileDescriptor` either way. No-op when
 /// not running.
-pub fn network_changed(tun_fd: RawFd) -> Result<(), String> {
+///
+/// `config_json`: when `Some`, replaces the stored config for the rebuilt
+/// node — Kotlin regenerates it on every rebind so per-network state (the
+/// FIPS Hotspot transport overlay) rides the same coalesced path; `None`
+/// keeps the config from the previous start.
+pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), String> {
     if REBINDING.swap(true, Ordering::SeqCst) {
         // A rebuild is already running; the network state it reads will be the
         // latest, so coalescing this callback into it is correct.
@@ -357,10 +368,11 @@ pub fn network_changed(tun_fd: RawFd) -> Result<(), String> {
         };
         match rebuild {
             None => Ok(()),
-            Some((config_json, protect)) => {
+            Some((stored_config, protect)) => {
+                let config_json = config_json.unwrap_or(&stored_config);
                 tracing::info!("underlying network changed; restarting node on the tun fd");
                 stop_locked();
-                start_locked(&config_json, tun_fd, protect).map(|_| ())
+                start_locked(config_json, tun_fd, protect).map(|_| ())
             }
         }
     };
@@ -414,6 +426,26 @@ pub fn query_json(command: &str, params_json: &str) -> String {
             "message": format!("unknown or non-snapshot command: {command}"),
         })
         .to_string(),
+    }
+}
+
+/// Manual dial (Diagnostics "Connect" on an mDNS-seen peer): round-trip a
+/// `connect` command through the node's rx_loop. Blocking — call off the UI
+/// thread. The `ENGINE` lock is dropped before the round-trip so status
+/// polls never queue behind a slow handshake initiation.
+pub fn connect_peer_json(npub: &str, address: &str) -> String {
+    let handle = ENGINE.lock().unwrap().as_ref().map(|e| e.cmd_handle.clone());
+    let Some(handle) = handle else {
+        return r#"{"status":"error","message":"not running"}"#.to_string();
+    };
+    let params = serde_json::json!({
+        "npub": npub,
+        "address": address,
+        "transport": "udp",
+    });
+    match handle.command_blocking("connect", Some(params)) {
+        Ok(response) => response.to_string(),
+        Err(e) => serde_json::json!({ "status": "error", "message": e }).to_string(),
     }
 }
 
@@ -472,6 +504,20 @@ mod tests {
             let peers = query_json("show_stats_list", "");
             let peers: serde_json::Value = serde_json::from_str(&peers).unwrap();
             assert_eq!(peers["status"], "ok");
+
+            // The mDNS-sightings query is snapshot-served (empty registry on
+            // the host — no LAN discovery in this test, only the shape).
+            let lan = query_json("show_lan_peers", "");
+            let lan: serde_json::Value = serde_json::from_str(&lan).unwrap();
+            assert_eq!(lan["status"], "ok");
+            assert!(lan["data"]["lan_peers"].is_array(), "lan_peers array: {lan}");
+
+            // Command round-trip through the rx_loop: a bad npub must come
+            // back as a structured error — proves the embedder command
+            // channel is served, not just that the JSON was well-formed.
+            let bad = connect_peer_json("npub1notvalid", "127.0.0.1:1");
+            let bad: serde_json::Value = serde_json::from_str(&bad).unwrap();
+            assert_eq!(bad["status"], "error", "bad npub rejected: {bad}");
 
             stop();
             assert!(!is_running());

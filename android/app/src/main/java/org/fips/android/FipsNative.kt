@@ -37,17 +37,27 @@ object FipsNative {
 
     /**
      * Rebuild the node on the given TUN fd after the underlying network
-     * changed (Wi-Fi ↔ cellular). Usually the fd from `start`; pass the new
-     * fd instead when the tunnel was re-established with different routes.
-     * Blocking — call off the main thread. No-op if the engine isn't running.
+     * changed (Wi-Fi ↔ cellular) or the FIPS Hotspot came/went. Usually the
+     * fd from `start`; pass the new fd instead when the tunnel was
+     * re-established with different routes. [configJson] is the freshly
+     * regenerated shim config for the rebuilt node (empty keeps the previous
+     * one). Blocking — call off the main thread. No-op if the engine isn't
+     * running.
      */
-    external fun onNetworkChanged(tunFd: Int)
+    external fun onNetworkChanged(tunFd: Int, configJson: String)
 
     /** Compact status JSON: `{running, npub, address, status: {...}}`. */
     external fun status(): String
 
     /** Any snapshot-served `show_*` query, e.g. `query("show_peers", "")`. */
     external fun query(command: String, paramsJson: String): String
+
+    /**
+     * Manually dial a peer over UDP (Diagnostics "Connect" on an mDNS-seen
+     * peer). Returns the node's command response
+     * (`{"status":"ok"|"error", ...}`). Blocking — call off the main thread.
+     */
+    external fun connectPeer(npub: String, address: String): String
 
     /** Resolve an npub to its `.fips` address. JSON `{npub,address}` or `{error}`. */
     external fun resolveNpub(npub: String): String

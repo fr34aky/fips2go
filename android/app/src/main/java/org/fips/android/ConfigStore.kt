@@ -28,6 +28,7 @@ object ConfigStore {
     const val FORWARD_CLEARNET = "forward_clearnet"
     const val BATTERY_SAVER = "battery_saver"
     const val LAN_MDNS = "enable_lan_mdns"
+    const val HOTSPOT = "hotspot_enabled"
     const val LOG_LEVEL = "log_level"
     const val FIPS_YAML = "fips_yaml"
 
@@ -95,9 +96,17 @@ peers: []
 
     /**
      * Build the shim config JSON from prefs + the (decrypted) nsec. Mirrors
-     * the shim's `ShimConfig`.
+     * the shim's `ShimConfig`. [hotspotAddr]/[hotspotPrefixLen] describe our
+     * interface address on a joined FIPS Hotspot ("!FIPS") network; the
+     * service passes them while that local-only network is up, and the shim
+     * then runs a second dial-scoped UDP transport bound to it.
      */
-    fun buildConfigJson(context: Context, nsec: String): String {
+    fun buildConfigJson(
+        context: Context,
+        nsec: String,
+        hotspotAddr: String? = null,
+        hotspotPrefixLen: Int = 0,
+    ): String {
         val p = prefs(context)
 
         val peers = JSONArray()
@@ -133,6 +142,13 @@ peers: []
             ?.let { config.put("udp_bind", it) }
         p.getString(TCP_BIND, "")?.trim()?.takeIf { it.isNotEmpty() }
             ?.let { config.put("tcp_bind", it) }
+
+        if (hotspotAddr != null) {
+            config.put(
+                "hotspot",
+                JSONObject().put("addr", hotspotAddr).put("prefix_len", hotspotPrefixLen)
+            )
+        }
 
         val yaml = p.getString(FIPS_YAML, "")?.trim() ?: ""
         if (yaml.isNotEmpty()) config.put("fips_yaml", yaml)

@@ -15,12 +15,16 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.net.wifi.WifiManager
+import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.system.Os
 import android.util.Log
+import java.net.Inet4Address
 import java.net.Inet6Address
+import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import org.json.JSONObject
@@ -54,6 +58,17 @@ class FipsVpnService : VpnService() {
         // several seconds; wait this long before rebinding so one node restart
         // serves the whole burst.
         private const val REBIND_SETTLE_MS = 1500L
+        // FIPS Hotspot: an open AP other fips nodes run (e.g. an offline mesh
+        // island). Joined as a local-only secondary connection via
+        // WifiNetworkSpecifier while the toggle is armed.
+        private const val HOTSPOT_SSID = "!FIPS"
+
+        /**
+         * UI-visible hotspot state: "addr on !FIPS" while joined, null
+         * otherwise. Written only by the service.
+         */
+        @Volatile var hotspotStatus: String? = null
+            private set
     }
 
     private var tunFd: ParcelFileDescriptor? = null
@@ -69,6 +84,15 @@ class FipsVpnService : VpnService() {
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
     @Volatile private var tunnelHasIpv6Clearnet = false
 
+    // FIPS Hotspot ("!FIPS") state. The standing WifiNetworkSpecifier request
+    // lives for the whole session; the network is local-only (no INTERNET
+    // capability), so it never enters [availableNetworks] or competes with
+    // the real underlay.
+    private var hotspotCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var hotspotNetwork: Network? = null
+    @Volatile private var hotspotAddr: String? = null
+    @Volatile private var hotspotPrefixLen: Int = 0
+
     /**
      * Held only while LAN mDNS is enabled AND the underlay is Wi-Fi. The lock
      * disables the Wi-Fi chip's hardware multicast filtering, so every LAN
@@ -81,12 +105,17 @@ class FipsVpnService : VpnService() {
         val lock = multicastLock ?: return
         val onWifi = network != null && connectivity?.getNetworkCapabilities(network)
             ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        if (onWifi && !lock.isHeld) {
+        // mDNS runs when the user enabled it (and the underlay is Wi-Fi) OR
+        // while a FIPS Hotspot is joined (the shim forces LAN discovery on
+        // for the hotspot link — that's the point of joining).
+        val want = (onWifi && prefs().getBoolean(ConfigStore.LAN_MDNS, false)) ||
+            hotspotNetwork != null
+        if (want && !lock.isHeld) {
             lock.acquire()
-            Log.i(TAG, "multicast lock acquired (mDNS on Wi-Fi)")
-        } else if (!onWifi && lock.isHeld) {
+            Log.i(TAG, "multicast lock acquired (mDNS active)")
+        } else if (!want && lock.isHeld) {
             lock.release()
-            Log.i(TAG, "multicast lock released (underlay not Wi-Fi)")
+            Log.i(TAG, "multicast lock released (mDNS idle)")
         }
     }
 
@@ -98,7 +127,30 @@ class FipsVpnService : VpnService() {
     private fun prefs() = getSharedPreferences("fips", Context.MODE_PRIVATE)
 
     /** Called from Rust (JNI) for every underlay socket the node creates. */
-    fun protectFd(fd: Int): Boolean = protect(fd)
+    fun protectFd(fd: Int): Boolean {
+        val ok = protect(fd)
+        // The shim's hotspot transport binds our address on the "!FIPS"
+        // link; Android routes wildcard/protected sockets via the default
+        // network only, so that socket must be explicitly moved onto the
+        // local-only hotspot network or its packets egress the wrong
+        // interface. Identify it by its bound source address.
+        val network = hotspotNetwork
+        val want = hotspotAddr
+        if (ok && network != null && want != null) {
+            try {
+                ParcelFileDescriptor.fromFd(fd).use { dup ->
+                    val local = Os.getsockname(dup.fileDescriptor) as? InetSocketAddress
+                    if (local?.address?.hostAddress == want) {
+                        network.bindSocket(dup.fileDescriptor)
+                        Log.i(TAG, "hotspot socket bound to $network ($want)")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "hotspot bindSocket failed", e)
+            }
+        }
+        return ok
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -132,7 +184,9 @@ class FipsVpnService : VpnService() {
         }
         connectivity = getSystemService(ConnectivityManager::class.java)
         meshAddress = address
-        if (prefs().getBoolean(ConfigStore.LAN_MDNS, false)) {
+        if (prefs().getBoolean(ConfigStore.LAN_MDNS, false) ||
+            prefs().getBoolean(ConfigStore.HOTSPOT, false)
+        ) {
             val wifi = applicationContext.getSystemService(WifiManager::class.java)
             multicastLock = wifi?.createMulticastLock("fips-mdns")
                 ?.apply { setReferenceCounted(false) }
@@ -158,7 +212,96 @@ class FipsVpnService : VpnService() {
         } else {
             Log.i(TAG, "fips engine running, address $address, ipv6Clearnet=$wantIpv6")
             registerNetworkMonitoring()
+            registerHotspotRequest()
         }
+    }
+
+    /**
+     * File a standing request for the FIPS Hotspot (SSID "!FIPS", open
+     * network) as a local-only secondary connection. The OS joins whenever
+     * the SSID is in range (one-time system approval dialog on the first
+     * join) and drops it when it disappears; each transition rides the
+     * coalesced rebind path so the node gains/loses its hotspot-bound
+     * transport. On devices without STA+STA concurrency the OS drops the
+     * primary Wi-Fi while joined — internet then falls back to cellular.
+     */
+    private fun registerHotspotRequest() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        if (!prefs().getBoolean(ConfigStore.HOTSPOT, false)) return
+        val cm = connectivity ?: return
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .setNetworkSpecifier(
+                WifiNetworkSpecifier.Builder().setSsid(HOTSPOT_SSID).build()
+            )
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                // LinkProperties may lag onAvailable; onLinkPropertiesChanged
+                // fills in the DHCP address when it does.
+                updateHotspot(network, cm.getLinkProperties(network))
+            }
+            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                updateHotspot(network, lp)
+            }
+            override fun onLost(network: Network) {
+                clearHotspot("lost")
+            }
+            override fun onUnavailable() {
+                // The user dismissed the approval dialog or the OS gave up.
+                clearHotspot("unavailable")
+            }
+        }
+        hotspotCallback = cb
+        try {
+            cm.requestNetwork(request, cb, Handler(Looper.getMainLooper()))
+            Log.i(TAG, "FIPS hotspot request filed (SSID $HOTSPOT_SSID)")
+        } catch (e: Exception) {
+            Log.w(TAG, "hotspot requestNetwork failed", e)
+            hotspotCallback = null
+        }
+    }
+
+    private fun updateHotspot(network: Network, lp: LinkProperties?) {
+        val la = lp?.linkAddresses?.firstOrNull { it.address is Inet4Address } ?: return
+        val addr = la.address.hostAddress ?: return
+        if (hotspotNetwork == network && hotspotAddr == addr &&
+            hotspotPrefixLen == la.prefixLength
+        ) return
+        hotspotNetwork = network
+        hotspotAddr = addr
+        hotspotPrefixLen = la.prefixLength
+        hotspotStatus = "$addr on $HOTSPOT_SSID"
+        Log.i(TAG, "FIPS hotspot joined: $addr/${la.prefixLength}; rebinding node")
+        updateMulticastLock(currentUnderlying)
+        rebindNode()
+    }
+
+    private fun clearHotspot(why: String) {
+        if (hotspotNetwork == null) return
+        hotspotNetwork = null
+        hotspotAddr = null
+        hotspotPrefixLen = 0
+        hotspotStatus = null
+        Log.i(TAG, "FIPS hotspot $why; rebinding node")
+        updateMulticastLock(currentUnderlying)
+        rebindNode()
+    }
+
+    private fun unregisterHotspotRequest() {
+        hotspotCallback?.let { cb ->
+            try {
+                connectivity?.unregisterNetworkCallback(cb)
+            } catch (e: Exception) {
+                Log.w(TAG, "hotspot unregister failed", e)
+            }
+        }
+        hotspotCallback = null
+        hotspotNetwork = null
+        hotspotAddr = null
+        hotspotPrefixLen = 0
+        hotspotStatus = null
     }
 
     /** Build and establish the TUN. `ipv6Clearnet` decides whether `::/0` is claimed. */
@@ -397,6 +540,17 @@ class FipsVpnService : VpnService() {
      * fresh fd.
      */
     private fun rebindOnce() {
+        // Regenerate the config so the rebuilt node reflects current
+        // per-network state (the FIPS Hotspot transport overlay). The nsec
+        // is re-decrypted from the Keystore — it must not linger in a field.
+        val config = try {
+            ConfigStore.buildConfigJson(
+                this, IdentityStore.getOrCreate(this), hotspotAddr, hotspotPrefixLen
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "config rebuild failed; rebinding with previous config", e)
+            ""
+        }
         val wantIpv6 = hasIpv6Internet(currentUnderlying)
         if (wantIpv6 != tunnelHasIpv6Clearnet) {
             val address = meshAddress ?: return
@@ -409,11 +563,11 @@ class FipsVpnService : VpnService() {
             val old = tunFd
             tunFd = fresh
             tunnelHasIpv6Clearnet = wantIpv6
-            FipsNative.onNetworkChanged(fresh.fd)
+            FipsNative.onNetworkChanged(fresh.fd, config)
             old?.close()
         } else {
             val fd = tunFd?.fd ?: return
-            FipsNative.onNetworkChanged(fd)
+            FipsNative.onNetworkChanged(fd, config)
         }
     }
 
@@ -431,6 +585,7 @@ class FipsVpnService : VpnService() {
     }
 
     private fun shutdown() {
+        unregisterHotspotRequest()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
         thread(name = "fips-disconnect") {
@@ -443,6 +598,7 @@ class FipsVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        unregisterHotspotRequest()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
         FipsNative.stop()
