@@ -8,6 +8,15 @@
     <!-- requestNetwork for the FIPS Hotspot ("!FIPS") local-only secondary
          connection (normal permission, no prompt) -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- FIPS Hotspot auto-join: addNetworkSuggestions + reading scan results
+         (normal permissions) ... -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- ... plus fine location (runtime grant, requested when the hotspot
+         toggle is enabled): Android gates SSIDs/scan results behind it, and
+         the service needs the matching foreground type to see them. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -61,7 +70,7 @@
         <service
             android:name=".FipsVpnService"
             android:exported="false"
-            android:foregroundServiceType="specialUse"
+            android:foregroundServiceType="specialUse|location"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
