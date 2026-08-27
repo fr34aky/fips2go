@@ -7,8 +7,10 @@ tunnel with a userspace forwarder).
 
 Standalone repo — it depends on fips as a pinned **git dependency**
 (`fr34aky/fips` @ `android-hooks`, which carries the small embedder hooks:
-socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`), so
-it clones and builds without a sibling fips checkout.
+socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`,
+`ControlCommandHandle` for socket-less connect/disconnect, and the
+`show_lan_peers` mDNS-sightings query), so it clones and builds without a
+sibling fips checkout.
 
 ## Layout
 

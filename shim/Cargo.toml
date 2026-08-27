@@ -15,11 +15,12 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 # fips with the Android embedder hooks (app-owned TUN seam, socket-protect,
-# TunPacketProcessor, ControlReadHandle::query) — the `android-hooks` branch
-# of the fr34aky/fips fork, pinned. For local fips development, override with:
+# TunPacketProcessor, ControlReadHandle::query, ControlCommandHandle,
+# show_lan_peers) — the `android-hooks` branch of the fr34aky/fips fork,
+# pinned. For local fips development, override with:
 #   [patch."https://github.com/fr34aky/fips"]
 #   fips = { path = "../fips" }
-fips = { git = "https://github.com/fr34aky/fips", rev = "d187c07", default-features = false }
+fips = { git = "https://github.com/fr34aky/fips", rev = "9298237", default-features = false }
 ipstack = "1"
 jni = "0.21"
 libc = "0.2"

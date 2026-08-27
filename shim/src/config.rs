@@ -67,6 +67,18 @@ pub struct ShimConfig {
     /// transport.
     #[serde(default)]
     pub tcp_bind: Option<String>,
+    /// FIPS Hotspot: the device joined a local-only secondary Wi-Fi network
+    /// (SSID "!FIPS") and this is our interface address on it. Adds a second,
+    /// dial-scoped UDP transport bound to that address on the SAME port as
+    /// the main transport (fips sets SO_REUSEADDR/SO_REUSEPORT before bind,
+    /// and Linux delivers unicast to the most-specific bound socket), so the
+    /// single mDNS-advertised port works on every interface, and forces LAN
+    /// mDNS on. The Kotlin side sets this while the hotspot network is up and
+    /// `Network.bindSocket`s the matching fd in `protectFd`. Ignored (with a
+    /// warning) in `fips_yaml` advanced mode — declare the instance in the
+    /// YAML instead.
+    #[serde(default)]
+    pub hotspot: Option<HotspotConfig>,
     /// Advanced: a full `fips.yaml`. When non-empty it becomes the base
     /// `fips::Config` (all fips parameters — transports, node.*, rendezvous,
     /// dns, lookup, …); the shim then forces the non-negotiable Android bits
@@ -75,6 +87,54 @@ pub struct ShimConfig {
     /// config programmatically.
     #[serde(default)]
     pub fips_yaml: Option<String>,
+}
+
+/// Resolve the main and hotspot bind addresses to a shared concrete port.
+///
+/// The main transport keeps its configured host; the hotspot instance binds
+/// the interface address on the SAME port so the single mDNS-advertised port
+/// is valid on every interface. When the configured port is 0 (the default
+/// pure-client posture), a throwaway wildcard bind picks a free port — the
+/// tiny claim/rebind race is harmless because fips sets SO_REUSEADDR before
+/// its own bind. Returns `(main_bind, hotspot_bind, dial_prefix)`.
+fn hotspot_binds(
+    udp_bind: &str,
+    hs: &HotspotConfig,
+) -> Result<(String, String, String), String> {
+    let addr: std::net::IpAddr = hs
+        .addr
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad hotspot addr {:?}: {e}", hs.addr))?;
+    let max_len: u8 = if addr.is_ipv4() { 32 } else { 128 };
+    if hs.prefix_len > max_len {
+        return Err(format!("bad hotspot prefix_len {}", hs.prefix_len));
+    }
+    let main: std::net::SocketAddr = udp_bind
+        .parse()
+        .map_err(|e| format!("bad udp_bind {udp_bind:?}: {e}"))?;
+    let port = if main.port() != 0 {
+        main.port()
+    } else {
+        std::net::UdpSocket::bind((main.ip(), 0))
+            .and_then(|s| s.local_addr())
+            .map(|a| a.port())
+            .map_err(|e| format!("port probe: {e}"))?
+    };
+    let hotspot_bind = std::net::SocketAddr::new(addr, port).to_string();
+    let main_bind = std::net::SocketAddr::new(main.ip(), port).to_string();
+    let dial_prefix = format!("{}/{}", addr, hs.prefix_len);
+    Ok((main_bind, hotspot_bind, dial_prefix))
+}
+
+/// Interface address on the joined FIPS Hotspot network (see
+/// [`ShimConfig::hotspot`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct HotspotConfig {
+    /// Our address on the hotspot link, e.g. "192.168.49.23".
+    pub addr: String,
+    /// On-link prefix length from `LinkProperties`, e.g. 24.
+    pub prefix_len: u8,
 }
 
 /// Resolve an npub to its `.fips` mesh address (pure computation). Returns
@@ -169,6 +229,12 @@ impl ShimConfig {
                         ..Default::default()
                     });
             }
+            if self.hotspot.is_some() {
+                tracing::warn!(
+                    "hotspot overlay is ignored in fips_yaml mode — declare a dial-scoped \
+                     UDP instance in the YAML instead"
+                );
+            }
             config
                 .validate()
                 .map_err(|e| format!("config validate: {e}"))?;
@@ -182,10 +248,39 @@ impl ShimConfig {
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "0.0.0.0:0".to_string());
-        config.transports.udp = fips::config::TransportInstances::Single(fips::config::UdpConfig {
-            bind_addr: Some(udp_bind),
-            ..Default::default()
-        });
+        config.transports.udp = match &self.hotspot {
+            None => fips::config::TransportInstances::Single(fips::config::UdpConfig {
+                bind_addr: Some(udp_bind),
+                ..Default::default()
+            }),
+            Some(hs) => {
+                let (main_bind, hotspot_bind, dial_prefix) =
+                    hotspot_binds(&udp_bind, hs).map_err(|e| format!("hotspot config: {e}"))?;
+                tracing::info!(
+                    main = %main_bind,
+                    hotspot = %hotspot_bind,
+                    prefix = %dial_prefix,
+                    "FIPS Hotspot: second dial-scoped UDP transport"
+                );
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "main".to_string(),
+                    fips::config::UdpConfig {
+                        bind_addr: Some(main_bind),
+                        ..Default::default()
+                    },
+                );
+                map.insert(
+                    "hotspot".to_string(),
+                    fips::config::UdpConfig {
+                        bind_addr: Some(hotspot_bind),
+                        dial_prefixes: Some(vec![dial_prefix]),
+                        ..Default::default()
+                    },
+                );
+                fips::config::TransportInstances::Named(map)
+            }
+        };
         if let Some(tcp) = self.tcp_bind.clone().filter(|s| !s.trim().is_empty()) {
             config.transports.tcp =
                 fips::config::TransportInstances::Single(fips::config::TcpConfig {
@@ -197,8 +292,12 @@ impl ShimConfig {
         config.dns.enabled = self.enable_fips_dns; // in-process responder, [::1]:5354
         config.node.control.enabled = false;
         config.node.rendezvous.nostr.enabled = self.enable_nostr;
-        config.node.rendezvous.lan.enabled = self.enable_lan_mdns;
-        if self.enable_lan_mdns {
+        // Joining a FIPS Hotspot without LAN discovery would be pointless, so
+        // the hotspot overlay forces mDNS on for the duration of the join
+        // (the Kotlin side holds the MulticastLock accordingly).
+        let lan_mdns = self.enable_lan_mdns || self.hotspot.is_some();
+        config.node.rendezvous.lan.enabled = lan_mdns;
+        if lan_mdns {
             // Keep the tunnel's own addresses out of the mDNS adverts:
             // the node's mesh ULA is an identity disclosure on the LAN, and
             // the clearnet-source IPv4 (TUN_IPV4 in FipsVpnService.kt — keep
@@ -318,5 +417,75 @@ mod tests {
     fn worker_threads_override_parses() {
         let shim = ShimConfig::from_json(r#"{"nsec": "", "worker_threads": 3}"#).unwrap();
         assert_eq!(shim.worker_threads, 3);
+    }
+
+    /// The hotspot overlay yields two named UDP instances sharing one
+    /// concrete port — "main" on the configured wildcard host, "hotspot"
+    /// dial-scoped to the link prefix — and forces LAN mDNS on.
+    #[test]
+    fn hotspot_overlay_builds_two_instances_on_shared_port() {
+        let id = derive_identity("").unwrap();
+        let json = format!(
+            r#"{{ "nsec": "{}", "hotspot": {{ "addr": "192.168.49.23", "prefix_len": 24 }} }}"#,
+            id.nsec
+        );
+        let config = ShimConfig::from_json(&json)
+            .unwrap()
+            .to_fips_config()
+            .unwrap();
+
+        let instances: std::collections::HashMap<_, _> = config
+            .transports
+            .udp
+            .iter()
+            .map(|(name, cfg)| (name.unwrap_or("").to_string(), cfg.clone()))
+            .collect();
+        assert_eq!(instances.len(), 2);
+
+        let main: std::net::SocketAddr = instances["main"].bind_addr().parse().unwrap();
+        let hotspot: std::net::SocketAddr = instances["hotspot"].bind_addr().parse().unwrap();
+        assert!(main.ip().is_unspecified(), "main stays wildcard");
+        assert_eq!(hotspot.ip(), "192.168.49.23".parse::<std::net::IpAddr>().unwrap());
+        assert_ne!(main.port(), 0, "shared port must be concrete");
+        assert_eq!(main.port(), hotspot.port(), "one mDNS-advertised port for all interfaces");
+
+        assert_eq!(instances["hotspot"].dial_prefixes(), ["192.168.49.23/24"]);
+        assert!(instances["main"].dial_prefixes().is_empty());
+        assert!(config.node.rendezvous.lan.enabled, "hotspot forces LAN mDNS");
+    }
+
+    /// An explicit udp_bind port is adopted verbatim by both instances.
+    #[test]
+    fn hotspot_overlay_respects_explicit_port() {
+        let id = derive_identity("").unwrap();
+        let json = format!(
+            r#"{{ "nsec": "{}", "udp_bind": "0.0.0.0:21299",
+                 "hotspot": {{ "addr": "10.20.30.40", "prefix_len": 16 }} }}"#,
+            id.nsec
+        );
+        let config = ShimConfig::from_json(&json)
+            .unwrap()
+            .to_fips_config()
+            .unwrap();
+        for (_, cfg) in config.transports.udp.iter() {
+            let addr: std::net::SocketAddr = cfg.bind_addr().parse().unwrap();
+            assert_eq!(addr.port(), 21299);
+        }
+    }
+
+    /// Malformed hotspot input errors out instead of silently dropping the
+    /// second transport.
+    #[test]
+    fn hotspot_overlay_rejects_bad_addr() {
+        let id = derive_identity("").unwrap();
+        let json = format!(
+            r#"{{ "nsec": "{}", "hotspot": {{ "addr": "not-an-ip", "prefix_len": 24 }} }}"#,
+            id.nsec
+        );
+        let err = ShimConfig::from_json(&json)
+            .unwrap()
+            .to_fips_config()
+            .unwrap_err();
+        assert!(err.contains("hotspot"), "unexpected error: {err}");
     }
 }
