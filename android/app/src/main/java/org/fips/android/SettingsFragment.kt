@@ -131,6 +131,7 @@ class SettingsFragment : Fragment() {
             sw(view, R.id.battery_saver).isChecked != p.getBoolean(CS.BATTERY_SAVER, true) ||
             sw(view, R.id.lan_mdns).isChecked != p.getBoolean(CS.LAN_MDNS, false) ||
             sw(view, R.id.hotspot).isChecked != p.getBoolean(CS.HOTSPOT, false) ||
+            sw(view, R.id.auto_update).isChecked != p.getBoolean(CS.AUTO_UPDATE, true) ||
             sw(view, R.id.forward_clearnet).isChecked !=
             p.getBoolean(CS.FORWARD_CLEARNET, true) ||
             (e(R.id.worker_threads).toIntOrNull() ?: 1).coerceIn(0, 16) !=
@@ -191,6 +192,7 @@ class SettingsFragment : Fragment() {
         sw(view, R.id.battery_saver).isChecked = p.getBoolean(CS.BATTERY_SAVER, true)
         sw(view, R.id.lan_mdns).isChecked = p.getBoolean(CS.LAN_MDNS, false)
         sw(view, R.id.hotspot).isChecked = p.getBoolean(CS.HOTSPOT, false)
+        sw(view, R.id.auto_update).isChecked = p.getBoolean(CS.AUTO_UPDATE, true)
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
             sw(view, R.id.hotspot).isEnabled = false
         }
@@ -219,6 +221,7 @@ class SettingsFragment : Fragment() {
             .putBoolean(CS.BATTERY_SAVER, sw(view, R.id.battery_saver).isChecked)
             .putBoolean(CS.LAN_MDNS, sw(view, R.id.lan_mdns).isChecked)
             .putBoolean(CS.HOTSPOT, sw(view, R.id.hotspot).isChecked)
+            .putBoolean(CS.AUTO_UPDATE, sw(view, R.id.auto_update).isChecked)
             .putBoolean(CS.FORWARD_CLEARNET, sw(view, R.id.forward_clearnet).isChecked)
             .putInt(CS.WORKER_THREADS, workers.coerceIn(0, 16))
             .putString(

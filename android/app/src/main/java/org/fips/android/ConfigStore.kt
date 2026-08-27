@@ -30,6 +30,8 @@ object ConfigStore {
     const val LAN_MDNS = "enable_lan_mdns"
     const val HOTSPOT = "hotspot_enabled"
     const val LOG_LEVEL = "log_level"
+    /** App-side only (not part of the shim config JSON). */
+    const val AUTO_UPDATE = "auto_update_check"
     const val FIPS_YAML = "fips_yaml"
 
     fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
