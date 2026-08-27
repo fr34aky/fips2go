@@ -14,8 +14,12 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
+import android.Manifest
+import android.content.pm.PackageManager as PM
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
+import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -59,9 +63,17 @@ class FipsVpnService : VpnService() {
         // serves the whole burst.
         private const val REBIND_SETTLE_MS = 1500L
         // FIPS Hotspot: an open AP other fips nodes run (e.g. an offline mesh
-        // island). Joined as a local-only secondary connection via
-        // WifiNetworkSpecifier while the toggle is armed.
+        // island). Auto-joined while the toggle is armed — via suggestion
+        // and/or local-only specifier, see startHotspot().
         private const val HOTSPOT_SSID = "!FIPS"
+        // After the user dismissed the specifier approval dialog, don't
+        // re-file (and re-prompt) on every scan sighting for this long.
+        private const val SPECIFIER_BACKOFF_MS = 15 * 60_000L
+        // While armed and not joined, actively kick a Wi-Fi scan this often:
+        // the system barely scans on its own when connected with the screen
+        // off, which would leave "!FIPS" unseen for many minutes. Android
+        // allows a foreground app ~4 scans per 2 minutes.
+        private const val SCAN_KICK_MS = 60_000L
 
         /**
          * UI-visible hotspot state: "addr on !FIPS" while joined, null
@@ -84,14 +96,25 @@ class FipsVpnService : VpnService() {
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
     @Volatile private var tunnelHasIpv6Clearnet = false
 
-    // FIPS Hotspot ("!FIPS") state. The standing WifiNetworkSpecifier request
-    // lives for the whole session; the network is local-only (no INTERNET
-    // capability), so it never enters [availableNetworks] or competes with
-    // the real underlay.
+    // FIPS Hotspot ("!FIPS") state — see [startHotspot] for the two join
+    // paths. A specifier-joined network is local-only (no INTERNET
+    // capability) and never enters [availableNetworks]; a suggestion-joined
+    // one is a regular Wi-Fi network that claims INTERNET until validation
+    // fails, so [preferredUnderlying] excludes [hotspotNetwork] explicitly.
     private var hotspotCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var hotspotNetwork: Network? = null
     @Volatile private var hotspotAddr: String? = null
     @Volatile private var hotspotPrefixLen: Int = 0
+    /** The Wi-Fi suggestion filed for city-scale auto-join (null = none). */
+    private var hotspotSuggestions: List<WifiNetworkSuggestion>? = null
+    /** Watches all Wi-Fi networks to spot a suggestion-joined "!FIPS". */
+    private var wifiWatcher: ConnectivityManager.NetworkCallback? = null
+    /** Re-files the specifier when a scan actually sees "!FIPS". */
+    private var scanWatcher: WifiManager.ScanResultsCallback? = null
+    /** Until when specifier re-filing is suppressed (user dismissed dialog). */
+    @Volatile private var specifierBackoffUntil = 0L
+    /** Periodic scan kick while armed & unjoined (null = stopped). */
+    private var scanKick: Runnable? = null
 
     /**
      * Held only while LAN mDNS is enabled AND the underlay is Wi-Fi. The lock
@@ -212,29 +235,227 @@ class FipsVpnService : VpnService() {
         } else {
             Log.i(TAG, "fips engine running, address $address, ipv6Clearnet=$wantIpv6")
             registerNetworkMonitoring()
-            registerHotspotRequest()
+            startHotspot()
+        }
+    }
+
+    private fun hasFineLocation(): Boolean =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PM.PERMISSION_GRANTED
+
+    /**
+     * Arm the FIPS Hotspot machinery (SSID "!FIPS", open network). Two
+     * complementary join paths feed the same [updateHotspot]/[clearHotspot]
+     * overlay, each transition riding the coalesced rebind path so the node
+     * gains/loses its hotspot-bound transport:
+     *
+     * - **Suggestion** (API 31+, fine location): `WifiNetworkSuggestion` lets
+     *   the platform auto-join ANY "!FIPS" AP anywhere — silently, in the
+     *   background, re-joining after loss and roaming like a saved network —
+     *   whenever the primary Wi-Fi slot is free (it never steals a working
+     *   Wi-Fi, and an internet-less "!FIPS" never becomes the default
+     *   network, so internet stays on cellular). The [wifiWatcher] spots the
+     *   join by SSID (needs fine location to read it).
+     * - **Specifier** (API 29+): a local-only secondary connection that works
+     *   IN ADDITION to a connected Wi-Fi on dual-STA devices. Its system
+     *   dialog blocks the app while "searching", so it is only filed when a
+     *   scan actually shows "!FIPS" in range ([scanWatcher]) — and a session
+     *   is one-shot: after a loss [clearHotspot] tears it down and the scan
+     *   watcher re-files on the next beacon sighting. Approval is remembered
+     *   per AP (SSID+BSSID), so known APs re-join silently; a NEW AP shows
+     *   the one-time dialog. Without fine location, scans are unreadable and
+     *   this degrades to filing once at connect (dialog lingers if out of
+     *   range — the Settings subtitle asks for the permission instead).
+     */
+    private fun startHotspot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        if (!prefs().getBoolean(ConfigStore.HOTSPOT, false)) return
+        addHotspotSuggestion()
+        registerWifiWatcher()
+        if (hasFineLocation() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            registerScanWatcher()
+            startScanKick()
+            maybeFileSpecifier() // covers "!FIPS already in the last scan"
+        } else {
+            fileSpecifierRequest() // legacy path: no scans to gate on
+        }
+    }
+
+    /** Suggest "!FIPS" to the platform for background auto-join (API 31+). */
+    private fun addHotspotSuggestion() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !hasFineLocation()) return
+        val wifi = applicationContext.getSystemService(WifiManager::class.java) ?: return
+        val suggestions = listOf(
+            WifiNetworkSuggestion.Builder().setSsid(HOTSPOT_SSID).build()
+        )
+        val status = try {
+            wifi.addNetworkSuggestions(suggestions)
+        } catch (e: Exception) {
+            Log.w(TAG, "addNetworkSuggestions failed", e)
+            return
+        }
+        when (status) {
+            WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS,
+            WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE -> {
+                hotspotSuggestions = suggestions
+                Log.i(TAG, "FIPS hotspot suggestion active (auto-join)")
+            }
+            else -> Log.w(TAG, "hotspot suggestion rejected, status=$status")
+        }
+    }
+
+    private fun removeHotspotSuggestion() {
+        val suggestions = hotspotSuggestions ?: return
+        hotspotSuggestions = null
+        val wifi = applicationContext.getSystemService(WifiManager::class.java) ?: return
+        try {
+            wifi.removeNetworkSuggestions(suggestions)
+        } catch (e: Exception) {
+            Log.w(TAG, "removeNetworkSuggestions failed", e)
         }
     }
 
     /**
-     * File a standing request for the FIPS Hotspot (SSID "!FIPS", open
-     * network) as a local-only secondary connection. The OS joins whenever
-     * the SSID is in range (one-time system approval dialog on the first
-     * join) and drops it when it disappears; each transition rides the
-     * coalesced rebind path so the node gains/loses its hotspot-bound
-     * transport. On devices without STA+STA concurrency the OS drops the
-     * primary Wi-Fi while joined — internet then falls back to cellular.
+     * Watch all Wi-Fi networks for a suggestion-joined "!FIPS" (identified by
+     * SSID via `WifiInfo`, which needs `FLAG_INCLUDE_LOCATION_INFO` + fine
+     * location + the service's `location` foreground type).
      */
-    private fun registerHotspotRequest() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
-        if (!prefs().getBoolean(ConfigStore.HOTSPOT, false)) return
+    private fun registerWifiWatcher() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !hasFineLocation()) return
         val cm = connectivity ?: return
+        val cb = object : ConnectivityManager.NetworkCallback(
+            FLAG_INCLUDE_LOCATION_INFO
+        ) {
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                val ssid = (caps.transportInfo as? WifiInfo)?.ssid?.removeSurrounding("\"")
+                if (ssid == HOTSPOT_SSID) {
+                    updateHotspot(network, cm.getLinkProperties(network))
+                }
+            }
+            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                if (network == hotspotNetwork) updateHotspot(network, lp)
+            }
+            override fun onLost(network: Network) {
+                if (network == hotspotNetwork) clearHotspot("lost")
+            }
+        }
+        wifiWatcher = cb
+        val req = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .build()
+        try {
+            cm.registerNetworkCallback(req, cb, Handler(Looper.getMainLooper()))
+        } catch (e: Exception) {
+            Log.w(TAG, "wifi watcher registration failed", e)
+            wifiWatcher = null
+        }
+    }
+
+    /**
+     * Keep scans coming while armed and not joined. `startScan()` is
+     * deprecated-but-functional and throttled by the platform; failures are
+     * fine — the watcher also rides every scan any other requester triggers.
+     * Stops itself once joined; [clearHotspot] restarts it.
+     */
+    private fun startScanKick() {
+        if (scanKick != null) return
+        val handler = Handler(Looper.getMainLooper())
+        val task = object : Runnable {
+            override fun run() {
+                if (scanKick !== this) return
+                if (hotspotNetwork != null || !FipsNative.isRunning()) {
+                    scanKick = null
+                    return
+                }
+                try {
+                    @Suppress("DEPRECATION")
+                    applicationContext.getSystemService(WifiManager::class.java)?.startScan()
+                } catch (e: Exception) {
+                    Log.w(TAG, "scan kick failed", e)
+                }
+                handler.postDelayed(this, SCAN_KICK_MS)
+            }
+        }
+        scanKick = task
+        handler.post(task)
+    }
+
+    private fun stopScanKick() {
+        scanKick = null
+    }
+
+    /** Piggy-back on every completed system scan to gate specifier filing. */
+    private fun registerScanWatcher() {
+        val wifi = applicationContext.getSystemService(WifiManager::class.java) ?: return
+        val cb = object : WifiManager.ScanResultsCallback() {
+            override fun onScanResultsAvailable() {
+                maybeFileSpecifier()
+            }
+        }
+        scanWatcher = cb
+        try {
+            wifi.registerScanResultsCallback(mainExecutor, cb)
+        } catch (e: Exception) {
+            Log.w(TAG, "scan watcher registration failed", e)
+            scanWatcher = null
+        }
+    }
+
+    /**
+     * File the specifier request iff it would actually connect right away:
+     * "!FIPS" visible in the latest scan, nothing joined yet, no request in
+     * flight, not inside the post-dismissal backoff — and only while another
+     * Wi-Fi is the underlay (the dual-STA case; on cellular the suggestion
+     * path owns the free Wi-Fi slot and joins without any dialog).
+     */
+    private fun maybeFileSpecifier() {
+        if (hotspotCallback != null || hotspotNetwork != null) return
+        if (System.currentTimeMillis() < specifierBackoffUntil) return
+        if (!prefs().getBoolean(ConfigStore.HOTSPOT, false)) return
+        val underlayWifi = currentUnderlying?.let { net ->
+            connectivity?.getNetworkCapabilities(net)
+                ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        } ?: false
+        if (!underlayWifi) return
+        val wifi = applicationContext.getSystemService(WifiManager::class.java) ?: return
+        val best = try {
+            wifi.scanResults.filter { it.SSID == HOTSPOT_SSID }.maxByOrNull { it.level }
+        } catch (e: SecurityException) {
+            null
+        }
+        if (best != null) {
+            Log.i(TAG, "\"$HOTSPOT_SSID\" seen in scan (${best.BSSID}); filing specifier request")
+            fileSpecifierRequest(best.BSSID)
+        }
+    }
+
+    /**
+     * The raw local-only specifier request (see [startHotspot] for policy).
+     *
+     * When the target AP's BSSID is known (from the gating scan result), it
+     * is pinned into the specifier: the platform's silent-reconnect bypass
+     * for previously approved APs only fires reliably for single-access-
+     * point requests — an SSID-only request re-prompts even for an approved
+     * BSSID (observed on Android 17: "No approved access point found"). A
+     * pinned request means: known AP → silent join; new AP → one dialog,
+     * remembered per BSSID. Re-filing after a loss re-picks the strongest
+     * beacon, which stands in for roaming between "!FIPS" APs.
+     */
+    private fun fileSpecifierRequest(bssid: String? = null) {
+        if (hotspotCallback != null) return
+        val cm = connectivity ?: return
+        val specifier = WifiNetworkSpecifier.Builder().setSsid(HOTSPOT_SSID).apply {
+            bssid?.let {
+                try {
+                    setBssid(android.net.MacAddress.fromString(it))
+                } catch (e: IllegalArgumentException) {
+                    Log.w(TAG, "bad BSSID $it; filing SSID-only", e)
+                }
+            }
+        }.build()
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .setNetworkSpecifier(
-                WifiNetworkSpecifier.Builder().setSsid(HOTSPOT_SSID).build()
-            )
+            .setNetworkSpecifier(specifier)
             .build()
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -250,13 +471,17 @@ class FipsVpnService : VpnService() {
             }
             override fun onUnavailable() {
                 // The user dismissed the approval dialog or the OS gave up.
+                // Back off so the scan watcher doesn't re-prompt on every
+                // scan while the (declined) SSID stays in range.
+                specifierBackoffUntil = System.currentTimeMillis() + SPECIFIER_BACKOFF_MS
                 clearHotspot("unavailable")
+                teardownSpecifierRequest()
             }
         }
         hotspotCallback = cb
         try {
             cm.requestNetwork(request, cb, Handler(Looper.getMainLooper()))
-            Log.i(TAG, "FIPS hotspot request filed (SSID $HOTSPOT_SSID)")
+            Log.i(TAG, "FIPS hotspot specifier request filed (SSID $HOTSPOT_SSID)")
         } catch (e: Exception) {
             Log.w(TAG, "hotspot requestNetwork failed", e)
             hotspotCallback = null
@@ -274,6 +499,7 @@ class FipsVpnService : VpnService() {
         hotspotPrefixLen = la.prefixLength
         hotspotStatus = "$addr on $HOTSPOT_SSID"
         Log.i(TAG, "FIPS hotspot joined: $addr/${la.prefixLength}; rebinding node")
+        stopScanKick()
         updateMulticastLock(currentUnderlying)
         rebindNode()
     }
@@ -287,17 +513,55 @@ class FipsVpnService : VpnService() {
         Log.i(TAG, "FIPS hotspot $why; rebinding node")
         updateMulticastLock(currentUnderlying)
         rebindNode()
+        // A specifier session is one-shot: the platform never retries it, and
+        // re-filing while the SSID is out of range pops the system picker
+        // dialog over the app ("searching…") — so tear the dead request down
+        // and let the scan watcher file a fresh one the next time a "!FIPS"
+        // beacon is actually visible (kicking scans, since the system barely
+        // scans on its own while connected). The suggestion path needs
+        // nothing: the platform auto-rejoins suggestions on its own.
+        teardownSpecifierRequest()
+        if (hasFineLocation() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            startScanKick()
+        }
     }
 
-    private fun unregisterHotspotRequest() {
+    /** Unregister the specifier request/callback (not the suggestion). */
+    private fun teardownSpecifierRequest() {
         hotspotCallback?.let { cb ->
             try {
                 connectivity?.unregisterNetworkCallback(cb)
             } catch (e: Exception) {
-                Log.w(TAG, "hotspot unregister failed", e)
+                Log.w(TAG, "hotspot specifier unregister failed", e)
             }
         }
         hotspotCallback = null
+    }
+
+    /** Full hotspot teardown: specifier, watchers, suggestion, state. */
+    private fun stopHotspot() {
+        teardownSpecifierRequest()
+        wifiWatcher?.let { cb ->
+            try {
+                connectivity?.unregisterNetworkCallback(cb)
+            } catch (e: Exception) {
+                Log.w(TAG, "wifi watcher unregister failed", e)
+            }
+        }
+        wifiWatcher = null
+        scanWatcher?.let { cb ->
+            try {
+                applicationContext.getSystemService(WifiManager::class.java)
+                    ?.unregisterScanResultsCallback(cb)
+            } catch (e: Exception) {
+                Log.w(TAG, "scan watcher unregister failed", e)
+            }
+        }
+        scanWatcher = null
+        // Withdraw the suggestion so the phone doesn't keep auto-joining an
+        // internet-less network while the mesh isn't even running.
+        removeHotspotSuggestion()
+        stopScanKick()
         hotspotNetwork = null
         hotspotAddr = null
         hotspotPrefixLen = 0
@@ -443,6 +707,7 @@ class FipsVpnService : VpnService() {
     private fun preferredUnderlying(): Network? {
         val cm = connectivity ?: return null
         val snapshot = synchronized(availableNetworks) { availableNetworks.toList() }
+            .filter { it != hotspotNetwork } // never egress internet via "!FIPS"
         return snapshot.maxByOrNull { net ->
             val caps = cm.getNetworkCapabilities(net) ?: return@maxByOrNull 0
             val transport = when {
@@ -585,7 +850,7 @@ class FipsVpnService : VpnService() {
     }
 
     private fun shutdown() {
-        unregisterHotspotRequest()
+        stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
         thread(name = "fips-disconnect") {
@@ -598,7 +863,7 @@ class FipsVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        unregisterHotspotRequest()
+        stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
         FipsNative.stop()
@@ -631,10 +896,14 @@ class FipsVpnService : VpnService() {
             .setOngoing(true)
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
+            // The `location` type lets the hotspot Wi-Fi watcher read SSIDs
+            // (location-gated) while we run as a service; only legal to
+            // declare at startForeground when the permission is granted.
+            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            if (hasFineLocation()) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            }
+            startForeground(NOTIFICATION_ID, notification, types)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }

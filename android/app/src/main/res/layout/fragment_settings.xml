@@ -190,7 +190,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingBottom="6dp"
-            android:text="While connected, automatically joins a nearby open hotspot named “!FIPS” as a second, local-only connection and looks for fips peers there (Android asks once for approval; internet stays on your normal network — phones without dual Wi-Fi fall back to mobile data while joined). Requires Android 10+."
+            android:text="While connected, automatically joins nearby open hotspots named “!FIPS” — anywhere — and looks for fips peers there. Internet stays on your normal network. Needs the location permission (asked when enabling): Android hides Wi-Fi names without it. When you are already on another Wi-Fi, dual-Wi-Fi phones additionally join “!FIPS” as a second, local-only connection (one-time approval per hotspot). Requires Android 10+, full auto-join Android 12+."
             android:textAppearance="?attr/textAppearanceBodySmall"
             android:textColor="?attr/colorOnSurfaceVariant" />
 

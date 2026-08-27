@@ -1,7 +1,10 @@
 package org.fips.android
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.LayoutInflater
+import androidx.activity.result.contract.ActivityResultContracts
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
@@ -18,6 +21,35 @@ import org.fips.android.ConfigStore as CS
 /** Settings page: structured common parameters + a raw fips.yaml override. */
 class SettingsFragment : Fragment() {
 
+    /**
+     * Fine location, requested when the FIPS Hotspot toggle is switched on:
+     * Android gates Wi-Fi scan results and SSIDs behind it, and without them
+     * the hotspot feature can neither auto-join "!FIPS" via suggestions nor
+     * safely re-file its direct request. Denial keeps the toggle usable in a
+     * degraded join-once mode.
+     */
+    private val locationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            view?.let {
+                Snackbar.make(
+                    it,
+                    "Without location, !FIPS hotspots are only joined once per connect",
+                    Snackbar.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun ensureLocationPermission() {
+        if (requireContext().checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            locationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -27,6 +59,13 @@ class SettingsFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         load(view)
         setupBootstrapDropdown(view)
+        sw(view, R.id.hotspot).setOnCheckedChangeListener { _, checked ->
+            if (checked) ensureLocationPermission()
+        }
+        // Users who armed the toggle before the permission existed (or had
+        // the grant revoked) get the prompt on opening Settings, not only on
+        // a fresh toggle flip.
+        if (sw(view, R.id.hotspot).isChecked) ensureLocationPermission()
         view.findViewById<MaterialButton>(R.id.load_template).setOnClickListener {
             view.findViewById<EditText>(R.id.fips_yaml).setText(CS.DEFAULT_YAML_TEMPLATE)
         }
