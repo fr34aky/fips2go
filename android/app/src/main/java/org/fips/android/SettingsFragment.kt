@@ -126,6 +126,8 @@ class SettingsFragment : Fragment() {
             e(R.id.stun_servers) != p.getString(CS.STUN_SERVERS, "") ||
             e(R.id.udp_bind) != p.getString(CS.UDP_BIND, "") ||
             e(R.id.tcp_bind) != p.getString(CS.TCP_BIND, "") ||
+            sw(view, R.id.inbound_filter).isChecked != p.getBoolean(CS.INBOUND_FILTER, true) ||
+            e(R.id.inbound_ports) != p.getString(CS.INBOUND_PORTS, "") ||
             sw(view, R.id.enable_fips_dns).isChecked != p.getBoolean(CS.ENABLE_FIPS_DNS, true) ||
             e(R.id.dns_upstreams) != p.getString(CS.DNS_UPSTREAMS, "") ||
             sw(view, R.id.battery_saver).isChecked != p.getBoolean(CS.BATTERY_SAVER, true) ||
@@ -187,6 +189,8 @@ class SettingsFragment : Fragment() {
         edit(view, R.id.stun_servers).setText(p.getString(CS.STUN_SERVERS, ""))
         edit(view, R.id.udp_bind).setText(p.getString(CS.UDP_BIND, ""))
         edit(view, R.id.tcp_bind).setText(p.getString(CS.TCP_BIND, ""))
+        sw(view, R.id.inbound_filter).isChecked = p.getBoolean(CS.INBOUND_FILTER, true)
+        edit(view, R.id.inbound_ports).setText(p.getString(CS.INBOUND_PORTS, ""))
         sw(view, R.id.enable_fips_dns).isChecked = p.getBoolean(CS.ENABLE_FIPS_DNS, true)
         edit(view, R.id.dns_upstreams).setText(p.getString(CS.DNS_UPSTREAMS, ""))
         sw(view, R.id.battery_saver).isChecked = p.getBoolean(CS.BATTERY_SAVER, true)
@@ -216,6 +220,8 @@ class SettingsFragment : Fragment() {
             .putString(CS.STUN_SERVERS, edit(view, R.id.stun_servers).text.toString().trim())
             .putString(CS.UDP_BIND, edit(view, R.id.udp_bind).text.toString().trim())
             .putString(CS.TCP_BIND, edit(view, R.id.tcp_bind).text.toString().trim())
+            .putBoolean(CS.INBOUND_FILTER, sw(view, R.id.inbound_filter).isChecked)
+            .putString(CS.INBOUND_PORTS, edit(view, R.id.inbound_ports).text.toString().trim())
             .putBoolean(CS.ENABLE_FIPS_DNS, sw(view, R.id.enable_fips_dns).isChecked)
             .putString(CS.DNS_UPSTREAMS, edit(view, R.id.dns_upstreams).text.toString().trim())
             .putBoolean(CS.BATTERY_SAVER, sw(view, R.id.battery_saver).isChecked)

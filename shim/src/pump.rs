@@ -56,6 +56,9 @@ pub struct PumpConfig {
     pub outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// mesh → app (fed by the node).
     pub inbound_rx: Receiver<Vec<u8>>,
+    /// Stateful inbound firewall for the mesh→app direction (`None` = off).
+    /// The reader feeds it outbound flows; the bridge asks it for verdicts.
+    pub filter: Option<Arc<crate::filter::InboundFilter>>,
     /// The in-tunnel DNS server address (the `fd00::/8` sentinel we advertise
     /// to Android, NOT the node's own tun address). Packets to `dns_addr:53`
     /// are peeled off to the DNS proxy.
@@ -78,6 +81,7 @@ impl Pump {
             processor,
             outbound_tx,
             inbound_rx,
+            filter,
             dns_addr,
             dns,
             forward_tx,
@@ -103,6 +107,7 @@ impl Pump {
             let running = running.clone();
             let writer_tx = writer_tx.clone();
             let done_tx = done_tx.clone();
+            let filter = filter.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name("fips-tun-reader".into())
@@ -117,6 +122,7 @@ impl Pump {
                             &dns_addr,
                             &dns,
                             forward_tx.as_ref(),
+                            filter.as_deref(),
                         );
                         tracing::info!("TUN reader stopped");
                         let _ = done_tx.send(());
@@ -134,9 +140,25 @@ impl Pump {
                 std::thread::Builder::new()
                     .name("fips-tun-bridge".into())
                     .spawn(move || {
+                        // First-drop-per-port logging so a blocked service
+                        // is visible in Diagnostics without log flooding.
+                        let mut logged_ports = std::collections::HashSet::new();
                         while running.load(Ordering::Relaxed) {
                             match inbound_rx.recv() {
                                 Ok(pkt) => {
+                                    if let Some(f) = filter.as_deref()
+                                        && !f.allow_inbound(&pkt)
+                                    {
+                                        let (proto, port, src) =
+                                            crate::filter::InboundFilter::describe(&pkt);
+                                        if logged_ports.len() < 64 && logged_ports.insert(port) {
+                                            tracing::info!(
+                                                proto, port, src = %src,
+                                                "inbound firewall: denied unsolicited mesh packet (allow the port in Settings if this is a service you run)"
+                                            );
+                                        }
+                                        continue;
+                                    }
                                     if writer_tx.send(pkt).is_err() {
                                         break;
                                     }
@@ -267,6 +289,7 @@ fn run_reader(
     dns_addr: &[u8; 16],
     dns: &Arc<DnsProxy>,
     forward_tx: Option<&tokio::sync::mpsc::Sender<Vec<u8>>>,
+    filter: Option<&crate::filter::InboundFilter>,
 ) {
     let mut buf = vec![0u8; READ_BUF];
     while running.load(Ordering::Relaxed) {
@@ -341,6 +364,12 @@ fn run_reader(
         // Mesh-bound: run the node's outbound pipeline (filter/clamp/hairpin).
         match processor.process(packet) {
             TunPacketAction::Forward => {
+                // Track the flow so the peer's replies pass the inbound
+                // firewall (packet is post-processor but pre-encryption:
+                // ports are still readable here).
+                if let Some(f) = filter {
+                    f.note_outbound(packet);
+                }
                 if outbound_tx.blocking_send(packet.to_vec()).is_err() {
                     break; // node gone
                 }

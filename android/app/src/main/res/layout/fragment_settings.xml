@@ -130,6 +130,36 @@
                 android:inputType="text" />
         </com.google.android.material.textfield.TextInputLayout>
 
+        <!-- Inbound firewall -->
+        <TextView style="@style/SettingsHeader" android:text="Inbound firewall" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/inbound_filter"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="Block unsolicited inbound mesh traffic" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="6dp"
+            android:text="Other mesh nodes can otherwise reach any port your selected apps listen on, like on a shared LAN. With this on, only replies to connections this phone opened, pings, and the allowed ports below get through — everything else is dropped (blocked ports show up in the Diagnostics log). fips itself needs no inbound ports."
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Allowed inbound ports (comma-separated; blank = none)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/inbound_ports"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
         <!-- DNS -->
         <TextView style="@style/SettingsHeader" android:text="DNS" />
 

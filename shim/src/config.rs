@@ -67,6 +67,17 @@ pub struct ShimConfig {
     /// transport.
     #[serde(default)]
     pub tcp_bind: Option<String>,
+    /// Stateful inbound firewall on the mesh→app TUN path (see
+    /// `filter.rs`). Default ON: new inbound flows are denied unless their
+    /// destination port is in [`Self::inbound_ports`]; replies to
+    /// outbound-initiated flows and ICMPv6 always pass. fips itself needs no
+    /// inbound TUN ports (the mesh protocol rides the UDP underlay), so the
+    /// default allowlist is empty.
+    #[serde(default = "default_true")]
+    pub inbound_filter: bool,
+    /// TCP/UDP destination ports open to unsolicited inbound mesh traffic.
+    #[serde(default)]
+    pub inbound_ports: Vec<u16>,
     /// FIPS Hotspot: the device joined a local-only secondary Wi-Fi network
     /// (SSID "!FIPS") and this is our interface address on it. Adds a second,
     /// dial-scoped UDP transport bound to that address on the SAME port as
