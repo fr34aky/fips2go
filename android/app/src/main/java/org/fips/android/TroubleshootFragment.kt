@@ -74,6 +74,9 @@ class TroubleshootFragment : Fragment() {
             val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("fips logs", logView.text))
         }
+        view.findViewById<MaterialButton>(R.id.expand_logs).setOnClickListener {
+            showLogDialog()
+        }
 
         val ctx = requireContext()
         val pkg = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
@@ -390,6 +393,54 @@ class TroubleshootFragment : Fragment() {
      * sticking to the bottom uses `scrollTo` rather than `fullScroll`, which
      * would also move focus.
      */
+    /**
+     * Fullscreen live log viewer — the inline window shares the page with
+     * three cards and gets squeezed; this one gets the whole screen, live
+     * 2 s refresh, and sticks to the bottom unless scrolled up to read.
+     */
+    private fun showLogDialog() {
+        val ctx = requireContext()
+        val text = TextView(ctx).apply {
+            typeface = android.graphics.Typeface.MONOSPACE
+            textSize = 12f
+            setTextIsSelectable(true)
+            setPadding(24, 16, 24, 16)
+        }
+        val scroll = ScrollView(ctx).apply { addView(text) }
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(ctx)
+            .setTitle("Node log")
+            .setView(scroll)
+            .setPositiveButton("Close", null)
+            .setNeutralButton("Copy") { _, _ ->
+                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("fips logs", text.text))
+            }
+            .create()
+        val updater = object : Runnable {
+            override fun run() {
+                if (!dialog.isShowing) return
+                val atBottom = !scroll.canScrollVertically(1)
+                val logs = FipsNative.recentLogs(1000)
+                if (logs != text.text.toString()) {
+                    text.text = logs
+                    if (atBottom) scroll.post { scroll.scrollTo(0, text.bottom) }
+                }
+                poller.postDelayed(this, 2000)
+            }
+        }
+        dialog.setOnShowListener {
+            dialog.window?.setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            text.text = FipsNative.recentLogs(1000)
+            scroll.post { scroll.scrollTo(0, text.bottom) }
+            poller.postDelayed(updater, 2000)
+        }
+        dialog.setOnDismissListener { poller.removeCallbacks(updater) }
+        dialog.show()
+    }
+
     private fun refreshLogs(force: Boolean = false) {
         val atBottom = !logScroll.canScrollVertically(1)
         if (!force && !atBottom) return

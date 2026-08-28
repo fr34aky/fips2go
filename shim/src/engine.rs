@@ -264,12 +264,26 @@ fn start_inner(
         (None, None)
     };
 
+    let filter = if shim_config.inbound_filter {
+        tracing::info!(
+            allowed_ports = ?shim_config.inbound_ports,
+            "inbound firewall on (default-deny; replies + ICMPv6 pass)"
+        );
+        Some(std::sync::Arc::new(crate::filter::InboundFilter::new(
+            shim_config.inbound_ports.clone(),
+        )))
+    } else {
+        tracing::warn!("inbound firewall disabled — all mesh traffic reaches local ports");
+        None
+    };
+
     let pump = Pump::spawn(PumpConfig {
         tun_fd: owned_fd,
         running: running.clone(),
         processor,
         outbound_tx,
         inbound_rx,
+        filter,
         dns_addr: DNS_SENTINEL,
         dns,
         forward_tx,

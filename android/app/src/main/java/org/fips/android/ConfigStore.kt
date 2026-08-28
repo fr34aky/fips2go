@@ -29,6 +29,8 @@ object ConfigStore {
     const val BATTERY_SAVER = "battery_saver"
     const val LAN_MDNS = "enable_lan_mdns"
     const val HOTSPOT = "hotspot_enabled"
+    const val INBOUND_FILTER = "inbound_filter"
+    const val INBOUND_PORTS = "inbound_ports"
     const val LOG_LEVEL = "log_level"
     /** App-side only (not part of the shim config JSON). */
     const val AUTO_UPDATE = "auto_update_check"
@@ -132,7 +134,15 @@ peers: []
             .put("forward_clearnet", p.getBoolean(FORWARD_CLEARNET, true))
             .put("battery_saver", p.getBoolean(BATTERY_SAVER, true))
             .put("enable_lan_mdns", p.getBoolean(LAN_MDNS, false))
+            .put("inbound_filter", p.getBoolean(INBOUND_FILTER, true))
             .put("log_level", p.getString(LOG_LEVEL, "info"))
+
+        val inboundPorts = JSONArray()
+        (p.getString(INBOUND_PORTS, "") ?: "").split('\n', ',', ' ')
+            .mapNotNull { it.trim().toIntOrNull() }
+            .filter { it in 1..65535 }
+            .forEach { inboundPorts.put(it) }
+        config.put("inbound_ports", inboundPorts)
 
         val upstreams = toList(p.getString(DNS_UPSTREAMS, ""))
         if (upstreams.length() > 0) config.put("dns_upstreams", upstreams)
