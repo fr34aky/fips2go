@@ -36,6 +36,17 @@ object ConfigStore {
     /** One-shot marker: the hotspot location rationale has been shown. */
     const val ASKED_HOTSPOT_LOCATION = "asked_hotspot_location"
 
+    /**
+     * Epoch millis before which the battery-optimisation card stays hidden.
+     * The card is dismissible but not permanently: Doze freezes the service
+     * and silently drops the mesh, so a node left unexempted is quietly
+     * unreliable and worth raising again later.
+     */
+    const val BATTERY_PROMPT_SNOOZED_UNTIL = "battery_prompt_snoozed_until"
+
+    /** How long "Not now" hides the battery-optimisation card. */
+    const val BATTERY_PROMPT_SNOOZE_MS = 7L * 24 * 60 * 60 * 1000
+
     // Defaults. Chosen so a fresh install is usable and reasonably private
     // out of the box: bootstrapped onto the public test mesh, inbound
     // firewall closed, discovery on, battery timers relaxed.
