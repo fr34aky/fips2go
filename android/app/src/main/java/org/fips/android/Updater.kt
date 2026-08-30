@@ -57,12 +57,23 @@ object Updater {
         val apk = File(dir, "fips-android-v${update.version}.apk")
         dir.listFiles()?.filter { it != apk }?.forEach { it.delete() }
 
-        val expected = update.sha256Url?.let { get(it).trim().split(Regex("\\s+")).first() }
-        if (!(apk.exists() && expected != null && sha256(apk) == expected)) {
+        // No checksum means no verification, so refuse rather than hand an
+        // unchecked APK to the installer. The installer still enforces the
+        // signing key, but that is the last line of defence, not the only one.
+        val shaUrl = update.sha256Url
+            ?: throw IllegalStateException(
+                "release v${update.version} has no .sha256 for this device — " +
+                    "refusing to install an unverified APK"
+            )
+        val expected = get(shaUrl).trim().split(Regex("\\s+")).first().lowercase()
+        if (expected.length != 64 || !expected.all { it.isDigit() || it in 'a'..'f' }) {
+            throw IllegalStateException("release v${update.version} has a malformed .sha256")
+        }
+        if (!(apk.exists() && sha256(apk) == expected)) {
             download(update.apkUrl, apk)
-            if (expected != null && sha256(apk) != expected) {
+            if (sha256(apk) != expected) {
                 apk.delete()
-                throw IllegalStateException("sha256 mismatch — download corrupted?")
+                throw IllegalStateException("checksum mismatch — refusing to install")
             }
         }
         return apk
