@@ -47,9 +47,16 @@ android {
         }
         release {
             isMinifyEnabled = false
-            // One ABI per release APK, selected via -PreleaseAbi=<abi>
-            // (release-build.sh builds and verifies one APK per ABI).
-            ndk { abiFilters += (findProperty("releaseAbi") as String? ?: "arm64-v8a") }
+            // Which ABIs land in a release APK, selected via -PreleaseAbi.
+            // release-build.sh passes one ABI per APK, then the full
+            // comma-separated list once more for the universal APK.
+            // Deliberately not `listOf(...)`: build.yml's ABI-sync check
+            // greps for that form and must keep matching only the debug
+            // filter above, which is the one that has to track build-native.sh.
+            ndk {
+                abiFilters += (findProperty("releaseAbi") as String? ?: "arm64-v8a")
+                    .split(",")
+            }
             signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
