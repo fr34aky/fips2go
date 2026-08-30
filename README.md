@@ -30,8 +30,10 @@ sibling fips checkout.
 | `armeabi-v7a` | `armv7-linux-androideabi` | Old 32-bit phones. Compiles and packages; not exercised on real 32-bit hardware. |
 | `x86_64` | `x86_64-linux-android` | Android emulator, Chromebooks. Emulator-verified: connect, VPN establish, and a live mesh link + npub resolve against a host-side fips daemon reached via `10.0.2.2`. |
 
-The debug APK packages all three; **releases ship one APK per ABI** (see
-[Release build](#release-build)). min SDK 26 (Android 8.0).
+The debug APK packages all three. Releases ship **one APK per ABI**, plus a
+universal APK containing all three for anyone who would rather not work out
+which one they need (see [Release build](#release-build)). min SDK 26
+(Android 8.0).
 
 ## Prerequisites
 
@@ -80,13 +82,31 @@ Per-ABI notes:
 ## Release build
 
 ```bash
-./release-build.sh                # all ABIs
-./release-build.sh arm64-v8a      # subset
-# → dist/v<versionName>/: one signed APK per ABI + sha256 + unstripped .so
+./release-build.sh                # all ABIs + the universal APK
+./release-build.sh arm64-v8a      # subset; no universal APK
+# → dist/v<versionName>/: one signed APK per ABI + sha256 + unstripped .so,
+#   plus fips-android-v<version>-universal.apk + sha256
 ```
 
-Releases ship **one APK per ABI** (users install the one matching their
-device; `arm64-v8a` is the device-verified one — see Supported platforms).
+Releases ship **one APK per ABI** — `arm64-v8a` is the device-verified one
+(see Supported platforms) — **plus one universal APK** carrying all three.
+Point first-time installers at the universal APK: it is ~40 MB against ~18 MB
+for arm64, but it always installs, whereas picking the wrong per-ABI APK
+fails with `INSTALL_FAILED_NO_MATCHING_ABIS`.
+
+The per-ABI APKs are not redundant: the in-app updater selects assets by the
+`-<abi>.apk` suffix, so an installed app keeps taking the ~18 MB APK matching
+its own device on every update, universal-installed or not (same package, same
+signing key, higher `versionCode` — it updates in place). The universal APK's
+`-universal` suffix matches no ABI, so the updater never picks it. **Publish
+all of them**: dropping the per-ABI assets silently breaks in-app updates for
+every already-installed user, since the updater would find no matching asset
+and just report "no update".
+
+A partial run (`./release-build.sh arm64-v8a`) skips the universal APK rather
+than building one from whatever `jniLibs/` happens to hold, which could be a
+stale `.so` from an earlier version.
+
 Signing needs `android/keystore.properties` (gitignored):
 
 ```properties
