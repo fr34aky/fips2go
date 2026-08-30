@@ -144,6 +144,9 @@ Per-ABI notes:
 #   plus fips-android-v<version>-universal.apk + sha256
 ```
 
+The full release process — version decision, build, GitHub release, Zapstore
+publish and credential handling — is in [`RELEASING.md`](RELEASING.md).
+
 Releases ship **one APK per ABI** — `arm64-v8a` is the device-verified one
 (see Supported platforms) — **plus one universal APK** carrying all three.
 Point first-time installers at the universal APK: it is ~40 MB against ~18 MB
