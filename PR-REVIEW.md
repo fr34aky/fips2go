@@ -1,6 +1,6 @@
 # PR Review Checklist
 
-The criteria maintainers apply to incoming PRs on `fips-android`. Written to
+The criteria maintainers apply to incoming PRs on `fips2go`. Written to
 be executable by a human or a coding agent, in that order: read the context,
 apply the criteria, then write prose — not a filled-in form.
 
@@ -176,7 +176,7 @@ author's attention and teaches them to skim the next review.
 Cite with full-SHA permalinks so they survive a rebase:
 
 ```
-https://github.com/fr34aky/fips-android/blob/<full-40-char-sha>/shim/src/filter.rs#L42-L58
+https://github.com/fr34aky/fips2go/blob/<full-40-char-sha>/shim/src/filter.rs#L42-L58
 ```
 
 Not branch links, and not bare line numbers — a reviewer reading the thread in

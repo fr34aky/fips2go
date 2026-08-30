@@ -17,7 +17,7 @@ import java.security.MessageDigest
  */
 object Updater {
     private const val LATEST_URL =
-        "https://api.github.com/repos/fr34aky/fips-android/releases/latest"
+        "https://api.github.com/repos/fr34aky/fips2go/releases/latest"
 
     data class Update(
         val version: String,

@@ -11,5 +11,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "fips-android"
+rootProject.name = "fips2go"
 include(":app")
