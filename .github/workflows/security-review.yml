@@ -26,8 +26,31 @@ jobs:
           fetch-depth: 2
 
       - uses: anthropics/claude-code-security-review@main
+        id: review
         with:
           claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
           comment-pr: true
           upload-results: true
           custom-security-scan-instructions: .github/security-scan-instructions.md
+
+      # The action exits 0 even when the audit never ran — a bad API key and a
+      # cache/diff skip both surface as a green check, which is the worst
+      # possible failure mode for a security gate. Both happened while setting
+      # this up. Insist on evidence that an audit actually produced a verdict.
+      - name: Confirm the audit actually ran
+        if: always() && steps.review.outcome == 'success'
+        run: |
+          set -euo pipefail
+          results="${{ steps.review.outputs.results-file }}"
+          if [ -z "$results" ] || [ ! -f "$results" ]; then
+            echo "::error::the security audit produced no results file — it did not run."
+            echo "Usual causes: an API key the action cannot authenticate with, or"
+            echo "a commit whose diff is empty (the scan is diff-aware)."
+            exit 1
+          fi
+          if python3 -c "import json,sys; sys.exit(0 if 'error' in json.load(open('$results')) else 1)"; then
+            echo "::error::the security audit reported an error instead of a verdict:"
+            python3 -c "import json; print(json.load(open('$results'))['error'][:800])"
+            exit 1
+          fi
+          echo "audit completed; findings: ${{ steps.review.outputs.findings-count }}"
