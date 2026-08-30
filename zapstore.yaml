@@ -1,0 +1,65 @@
+# Zapstore publishing manifest (https://zapstore.dev/docs/publish).
+#
+# Publish with:
+#   SIGN_WITH=<nsec1… | bunker://… | browser> zsp publish zapstore.yaml
+#
+# Validate without publishing or signing anything:
+#   zsp publish --check zapstore.yaml
+#
+# The icon is left unset deliberately: the repo only carries adaptive-icon
+# layers (transparent foreground + monochrome), not a composed square icon, so
+# zsp extracting it from the APK gives a better result than either layer.
+
+repository: https://github.com/fr34aky/fips2go
+website: https://github.com/fr34aky/fips2go
+license: MIT
+
+# zsp's default asset ranking favours arm64-v8a and deprioritises the other
+# ABIs, which would ship Zapstore users the 17.9 MB arm64 APK — correct for
+# almost every phone, but an "app not installed" for anyone else. Pin the
+# universal APK instead: one 40.8 MB artifact that installs on every device.
+# Drop this line to fall back to arm64-v8a.
+match: '.*-universal\.apk$'
+
+name: FIPS Mesh
+summary: Reach the FIPS mesh from your phone, on the apps you choose
+
+description: |
+  FIPS Mesh runs a FIPS mesh node on your phone and hands it to the apps you
+  pick, over a per-app VPN tunnel. Selected apps reach `.fips` names on the
+  mesh **and** keep normal internet; every other app on the device is
+  untouched.
+
+  - **Per-app split tunnel.** You choose which apps join the mesh. They get the
+    mesh and clearnet at once; nothing else on the phone is affected. With no
+    apps selected the tunnel does nothing.
+  - **`.fips` names just resolve.** DNS for covered apps is answered in-process
+    for `.fips`, and forwarded to your normal resolvers for everything else.
+  - **Default-deny inbound firewall.** Other mesh nodes cannot reach ports your
+    apps listen on. Only replies to connections you opened, ICMPv6, and an
+    explicit port allowlist get through.
+  - **Identity sealed by the Android Keystore**, with backup and restore so it
+    survives a reinstall.
+  - **FIPS Hotspot.** Auto-joins open Wi-Fi named `!FIPS` to reach nearby
+    peers, while your internet stays on your normal network.
+  - **LAN discovery (mDNS).** Finds peers on your Wi-Fi and dials them
+    directly, with no relay hop.
+  - **Survives network changes.** Wi-Fi to cellular hand-over recovers in about
+    20 seconds with no manual reconnect.
+  - **Diagnostics.** Resolve or ping an npub, inspect live peer sessions, and
+    read the node log.
+
+  Open source (MIT), no accounts, no telemetry. Requires Android 8.0 or later.
+
+tags:
+  - networking
+  - mesh
+  - vpn
+  - nostr
+  - privacy
+
+images:
+  - ./docs/screenshots/overview.png
+  - ./docs/screenshots/settings.png
+  - ./docs/screenshots/diagnostics.png
+  - ./docs/screenshots/app-picker.png
