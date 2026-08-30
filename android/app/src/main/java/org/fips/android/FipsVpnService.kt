@@ -275,7 +275,16 @@ class FipsVpnService : VpnService() {
         if (!ConfigStore.hotspotEnabled(this)) return
         addHotspotSuggestion()
         registerWifiWatcher()
-        if (hasFineLocation() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        if (!hasFineLocation()) {
+            // Both join paths need it: the suggestion above already bailed,
+            // and scans are unreadable. Filing the specifier blind would pop
+            // the system Wi-Fi picker on every connect and leave it spinning
+            // for an SSID we cannot confirm is in range — worse than doing
+            // nothing. Settings explains how to grant it.
+            Log.i(TAG, "hotspot armed but fine location missing; auto-join disabled")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             registerScanWatcher()
             startScanKick()
             maybeFileSpecifier() // covers "!FIPS already in the last scan"

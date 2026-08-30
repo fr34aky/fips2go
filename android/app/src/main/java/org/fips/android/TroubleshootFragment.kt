@@ -253,11 +253,32 @@ class TroubleshootFragment : Fragment() {
                 }
                 lanList.addView(row)
             }
+            capLanListHeight(rows.size)
         }
         for (i in 0 until lanList.childCount) {
             val peer = rows.getOrNull(i) ?: break
             lanList.getChildAt(i).findViewById<TextView>(R.id.lan_detail).text =
                 "${peer.addr} · seen ${age(peer.lastSeenMs).trim().ifEmpty { "just now" }}"
+        }
+    }
+
+    /**
+     * Let the peer list grow freely while it is short, then cap it and let it
+     * scroll internally. A busy LAN can advertise dozens of peers, and an
+     * uncapped list turns the rest of the page — Logs especially — into a long
+     * scroll to reach.
+     */
+    private fun capLanListHeight(count: Int) {
+        val scroll = view?.findViewById<View>(R.id.lan_scroll) ?: return
+        val capped = count > MAX_UNCAPPED_LAN_ROWS
+        val want = if (capped) {
+            (LAN_LIST_CAP_DP * resources.displayMetrics.density).toInt()
+        } else {
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        }
+        if (scroll.layoutParams.height != want) {
+            scroll.layoutParams = scroll.layoutParams.apply { height = want }
+            scroll.requestLayout()
         }
     }
 
@@ -451,5 +472,13 @@ class TroubleshootFragment : Fragment() {
         } else if (force && !atBottom) {
             logScroll.post { logScroll.scrollTo(0, logView.bottom) }
         }
+    }
+
+    private companion object {
+        /** Peer counts up to this render at full height. */
+        const val MAX_UNCAPPED_LAN_ROWS = 6
+
+        /** Height the peer list is pinned to beyond that, in dp. */
+        const val LAN_LIST_CAP_DP = 300
     }
 }

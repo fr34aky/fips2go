@@ -16,7 +16,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.fragment.app.Fragment
 import com.google.android.material.bottomnavigation.BottomNavigationView
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlin.concurrent.thread
 
 /**
@@ -130,30 +129,16 @@ class MainActivity : AppCompatActivity() {
      * the toggle's own listener in Settings covers a later change of mind.
      */
     private fun askHotspotLocationIfNeeded(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
-        val prefs = ConfigStore.prefs(this)
         if (!ConfigStore.hotspotEnabled(this)) return false
-        if (prefs.getBoolean(ConfigStore.ASKED_HOTSPOT_LOCATION, false)) return false
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            return false
-        }
-        prefs.edit().putBoolean(ConfigStore.ASKED_HOTSPOT_LOCATION, true).apply()
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Find nearby FIPS hotspots?")
-            .setMessage(
-                "FIPS can auto-join open \u201c!FIPS\u201d Wi-Fi hotspots to reach nearby " +
-                    "peers. Android requires the location permission to see Wi-Fi names.\n\n" +
-                    "Your internet stays on your normal network, and your location is never " +
-                    "stored or sent anywhere. You can turn this off in Settings."
-            )
-            .setPositiveButton("Continue") { _, _ ->
+        if (!HotspotLocation.shouldAsk(this)) return false
+        HotspotLocation.markAsked(this)
+        HotspotLocation.explain(
+            this,
+            onContinue = {
                 hotspotLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-            }
-            .setNegativeButton("Not now") { _, _ -> continueConnect() }
-            .setOnCancelListener { continueConnect() }
-            .show()
+            },
+            onDismiss = { continueConnect() },
+        )
         return true
     }
 

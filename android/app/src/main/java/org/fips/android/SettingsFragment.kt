@@ -76,13 +76,21 @@ class SettingsFragment : Fragment() {
         setupBootstrapDropdown(view)
         setupAdvancedToggle(view)
         sw(view, R.id.hotspot).setOnCheckedChangeListener { _, checked ->
-            if (checked) ensureLocationPermission()
+            // Flipping the toggle on is an explicit request for the feature,
+            // so the system prompt needs no preamble.
+            if (checked) {
+                HotspotLocation.markAsked(requireContext())
+                ensureLocationPermission()
+            }
         }
-        // Users who armed the toggle before the permission existed (or had
-        // the grant revoked) get the prompt on opening Settings, not only on
-        // a fresh toggle flip. With the toggle now defaulting to on, the
-        // connect flow asks first — this stays as the follow-up path.
-        if (sw(view, R.id.hotspot).isChecked) ensureLocationPermission()
+        // Merely opening Settings is not a request for anything. The toggle
+        // now defaults to on, so prompting off the back of "isChecked" would
+        // throw a bare system location dialog at every new user — explain
+        // first, and only once (shared one-shot with the connect flow).
+        if (sw(view, R.id.hotspot).isChecked && HotspotLocation.shouldAsk(requireContext())) {
+            HotspotLocation.markAsked(requireContext())
+            HotspotLocation.explain(requireContext(), onContinue = { ensureLocationPermission() })
+        }
         view.findViewById<MaterialButton>(R.id.save).setOnClickListener {
             save(view)
             Snackbar.make(view, "Saved — reconnect to apply", Snackbar.LENGTH_SHORT).show()
