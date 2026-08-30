@@ -1,0 +1,23 @@
+# Keeps pinned action SHAs from rotting.
+#
+# Pinning to a commit stops a compromised upstream reaching CI, but it also
+# freezes the code at that commit — including any security fix upstream ships
+# afterwards. Dependabot restores the other half: it opens a PR when an action
+# moves, so updates arrive through review instead of silently or never.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # One PR for routine bumps; the security reviewer gets its own, since it
+    # holds the API key and reads the diff, and deserves a deliberate look.
+    groups:
+      actions:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "anthropics/claude-code-security-review"
+    commit-message:
+      prefix: "CI"
