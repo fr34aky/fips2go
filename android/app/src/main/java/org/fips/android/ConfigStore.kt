@@ -6,9 +6,13 @@ import org.json.JSONObject
 
 /**
  * Single source of truth for all app/config preferences and for turning them
- * into the shim's config JSON. Structured fields cover the common parameters;
- * the "advanced" raw `fips.yaml` (when set) gives access to every fips
- * parameter and supersedes the structured fips settings.
+ * into the shim's config JSON.
+ *
+ * Every setting has a working default and [applyDefaults] seeds them on first
+ * run, so a fresh install can connect to the mesh without the user opening
+ * Settings at all. Defaults live here as `DEF_*` constants — read them through
+ * these rather than repeating a literal at each `getBoolean` call site, or the
+ * service and the UI drift apart.
  */
 object ConfigStore {
     const val PREFS = "fips"
@@ -17,13 +21,6 @@ object ConfigStore {
     const val PEER_NPUB = "peer_npub"
     const val PEER_ENDPOINT = "peer_endpoint"
     const val PEER_TRANSPORT = "peer_transport"
-    const val NOSTR = "nostr"
-    const val NOSTR_RELAYS = "nostr_relays"
-    const val STUN_SERVERS = "stun_servers"
-    const val UDP_BIND = "udp_bind"
-    const val TCP_BIND = "tcp_bind"
-    const val DNS_UPSTREAMS = "dns_upstreams"
-    const val ENABLE_FIPS_DNS = "enable_fips_dns"
     const val WORKER_THREADS = "worker_threads"
     const val FORWARD_CLEARNET = "forward_clearnet"
     const val BATTERY_SAVER = "battery_saver"
@@ -32,9 +29,40 @@ object ConfigStore {
     const val INBOUND_FILTER = "inbound_filter"
     const val INBOUND_PORTS = "inbound_ports"
     const val LOG_LEVEL = "log_level"
+
     /** App-side only (not part of the shim config JSON). */
     const val AUTO_UPDATE = "auto_update_check"
-    const val FIPS_YAML = "fips_yaml"
+
+    /** One-shot marker: the hotspot location rationale has been shown. */
+    const val ASKED_HOTSPOT_LOCATION = "asked_hotspot_location"
+
+    // Defaults. Chosen so a fresh install is usable and reasonably private
+    // out of the box: bootstrapped onto the public test mesh, inbound
+    // firewall closed, discovery on, battery timers relaxed.
+    const val DEF_PEER_TRANSPORT = "udp"
+    const val DEF_INBOUND_FILTER = true
+    const val DEF_BATTERY_SAVER = true
+    const val DEF_LAN_MDNS = true
+    const val DEF_HOTSPOT = true
+    const val DEF_AUTO_UPDATE = true
+    const val DEF_FORWARD_CLEARNET = true
+    const val DEF_WORKER_THREADS = 1
+    const val DEF_LOG_LEVEL = "info"
+
+    /**
+     * Settings the app no longer exposes. Nostr rendezvous and the in-app
+     * `.fips` resolver are now always on, transports/DNS/relays/STUN use the
+     * fips built-in defaults, and the raw-YAML escape hatch is gone. They are
+     * deleted on first run because a stale value would otherwise keep taking
+     * effect with no UI left to change it — `fips_yaml` most of all, since a
+     * non-empty one supersedes the entire structured config.
+     */
+    private val RETIRED_KEYS = listOf(
+        "nostr", "nostr_relays", "stun_servers",
+        "udp_bind", "tcp_bind",
+        "dns_upstreams", "enable_fips_dns",
+        "fips_yaml",
+    )
 
     fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -59,44 +87,46 @@ object ConfigStore {
         BootstrapPeer("test-uk01", "npub1u0z26dc4qeneu5rvwvmpfhtwh3522ed6rlgxr9jarrfnjrc6ew4qxjysrs"),
     )
 
+    /** Seeded on first run so the app connects without any configuration. */
+    const val DEFAULT_BOOTSTRAP = "test-de01"
+
     /** Dropdown entry for a manually configured peer. */
     const val BOOTSTRAP_CUSTOM = "custom"
 
-    /** A commented Android-appropriate fips.yaml the Advanced editor seeds from. */
-    const val DEFAULT_YAML_TEMPLATE = """# Advanced fips.yaml — edit any parameter. When non-empty this fully
-# defines the fips config; the app still forces the Keystore identity,
-# app-owned TUN, and disables the control socket. Structured fips settings
-# above are superseded while this is set.
-node:
-  # leaf_only: false
-  # tick_interval_secs: 5
-  # heartbeat_interval_secs: 20
-  # link_dead_timeout_secs: 60
-  # lookup:
-  #   ttl: 64
-  #   attempt_timeouts_secs: [1, 2, 4, 8]
-  rendezvous:
-    nostr:
-      enabled: false
-      advertise: true
-      advert_relays: ["wss://relay.damus.io", "wss://nos.lol"]
-      dm_relays: ["wss://relay.damus.io", "wss://nos.lol"]
-      # stun_servers: ["stun:stun.l.google.com:19302"]
-    lan:
-      enabled: false
-tun:
-  enabled: true
-  mtu: 1280
-dns:
-  enabled: true
-  port: 5354
-transports:
-  udp:
-    bind_addr: "0.0.0.0:0"
-  # tcp:
-  #   bind_addr: "0.0.0.0:8443"
-peers: []
-"""
+    /**
+     * Seed the defaults for any setting the user has never saved, and drop
+     * the retired keys. Idempotent, and safe on an existing install: a key
+     * that is present — including one the user deliberately blanked — is left
+     * exactly as it is, because [SettingsFragment] writes every key on save.
+     *
+     * Call before anything reads the prefs: both the activity and the service
+     * do, since the service can start without the UI (always-on VPN).
+     */
+    fun applyDefaults(context: Context) {
+        val p = prefs(context)
+        val e = p.edit()
+        if (!p.contains(PEER_NPUB) && !p.contains(PEER_ENDPOINT)) {
+            val boot = BOOTSTRAP_PEERS.first { it.name == DEFAULT_BOOTSTRAP }
+            e.putString(PEER_NPUB, boot.npub).putString(PEER_ENDPOINT, boot.endpoint)
+        }
+        if (!p.contains(PEER_TRANSPORT)) e.putString(PEER_TRANSPORT, DEF_PEER_TRANSPORT)
+        if (!p.contains(INBOUND_FILTER)) e.putBoolean(INBOUND_FILTER, DEF_INBOUND_FILTER)
+        if (!p.contains(BATTERY_SAVER)) e.putBoolean(BATTERY_SAVER, DEF_BATTERY_SAVER)
+        if (!p.contains(LAN_MDNS)) e.putBoolean(LAN_MDNS, DEF_LAN_MDNS)
+        if (!p.contains(HOTSPOT)) e.putBoolean(HOTSPOT, DEF_HOTSPOT)
+        if (!p.contains(AUTO_UPDATE)) e.putBoolean(AUTO_UPDATE, DEF_AUTO_UPDATE)
+        if (!p.contains(FORWARD_CLEARNET)) e.putBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET)
+        if (!p.contains(WORKER_THREADS)) e.putInt(WORKER_THREADS, DEF_WORKER_THREADS)
+        if (!p.contains(LOG_LEVEL)) e.putString(LOG_LEVEL, DEF_LOG_LEVEL)
+        RETIRED_KEYS.filter { p.contains(it) }.forEach { e.remove(it) }
+        e.apply()
+    }
+
+    /** LAN mDNS discovery, honouring the default. */
+    fun lanMdns(context: Context) = prefs(context).getBoolean(LAN_MDNS, DEF_LAN_MDNS)
+
+    /** FIPS Hotspot auto-join, honouring the default. */
+    fun hotspotEnabled(context: Context) = prefs(context).getBoolean(HOTSPOT, DEF_HOTSPOT)
 
     /**
      * Build the shim config JSON from prefs + the (decrypted) nsec. Mirrors
@@ -104,6 +134,11 @@ peers: []
      * interface address on a joined FIPS Hotspot ("!FIPS") network; the
      * service passes them while that local-only network is up, and the shim
      * then runs a second dial-scoped UDP transport bound to it.
+     *
+     * Fields the app no longer exposes are simply omitted, which leaves the
+     * shim (and fips) on their own defaults: built-in Nostr relays and STUN
+     * servers, an ephemeral UDP bind with no TCP transport, and the system
+     * upstream resolvers for non-`.fips` DNS.
      */
     fun buildConfigJson(
         context: Context,
@@ -121,21 +156,24 @@ peers: []
                 JSONObject()
                     .put("npub", npub)
                     .put("endpoint", endpoint)
-                    .put("transport", p.getString(PEER_TRANSPORT, "udp"))
+                    .put("transport", p.getString(PEER_TRANSPORT, DEF_PEER_TRANSPORT))
             )
         }
 
         val config = JSONObject()
             .put("nsec", nsec)
             .put("peers", peers)
-            .put("enable_nostr", p.getBoolean(NOSTR, false))
-            .put("enable_fips_dns", p.getBoolean(ENABLE_FIPS_DNS, true))
-            .put("worker_threads", p.getInt(WORKER_THREADS, 1))
-            .put("forward_clearnet", p.getBoolean(FORWARD_CLEARNET, true))
-            .put("battery_saver", p.getBoolean(BATTERY_SAVER, true))
-            .put("enable_lan_mdns", p.getBoolean(LAN_MDNS, false))
-            .put("inbound_filter", p.getBoolean(INBOUND_FILTER, true))
-            .put("log_level", p.getString(LOG_LEVEL, "info"))
+            // Always on: relay discovery + NAT traversal is what lets a phone
+            // behind CGNAT reach peers it has no route to, and the in-app
+            // resolver is the only thing that answers .fips names.
+            .put("enable_nostr", true)
+            .put("enable_fips_dns", true)
+            .put("worker_threads", p.getInt(WORKER_THREADS, DEF_WORKER_THREADS))
+            .put("forward_clearnet", p.getBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET))
+            .put("battery_saver", p.getBoolean(BATTERY_SAVER, DEF_BATTERY_SAVER))
+            .put("enable_lan_mdns", p.getBoolean(LAN_MDNS, DEF_LAN_MDNS))
+            .put("inbound_filter", p.getBoolean(INBOUND_FILTER, DEF_INBOUND_FILTER))
+            .put("log_level", p.getString(LOG_LEVEL, DEF_LOG_LEVEL))
 
         val inboundPorts = JSONArray()
         (p.getString(INBOUND_PORTS, "") ?: "").split('\n', ',', ' ')
@@ -144,17 +182,6 @@ peers: []
             .forEach { inboundPorts.put(it) }
         config.put("inbound_ports", inboundPorts)
 
-        val upstreams = toList(p.getString(DNS_UPSTREAMS, ""))
-        if (upstreams.length() > 0) config.put("dns_upstreams", upstreams)
-        val relays = toList(p.getString(NOSTR_RELAYS, ""))
-        if (relays.length() > 0) config.put("nostr_relays", relays)
-        val stun = toList(p.getString(STUN_SERVERS, ""))
-        if (stun.length() > 0) config.put("stun_servers", stun)
-        p.getString(UDP_BIND, "")?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { config.put("udp_bind", it) }
-        p.getString(TCP_BIND, "")?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { config.put("tcp_bind", it) }
-
         if (hotspotAddr != null) {
             config.put(
                 "hotspot",
@@ -162,17 +189,6 @@ peers: []
             )
         }
 
-        val yaml = p.getString(FIPS_YAML, "")?.trim() ?: ""
-        if (yaml.isNotEmpty()) config.put("fips_yaml", yaml)
-
         return config.toString()
-    }
-
-    /** Split newline/comma-separated text into a JSON array of trimmed entries. */
-    private fun toList(text: String?): JSONArray {
-        val arr = JSONArray()
-        (text ?: "").split('\n', ',').map { it.trim() }.filter { it.isNotEmpty() }
-            .forEach { arr.put(it) }
-        return arr
     }
 }

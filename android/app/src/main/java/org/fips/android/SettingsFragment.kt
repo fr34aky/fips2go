@@ -8,6 +8,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.LinearLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
@@ -18,8 +20,15 @@ import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.snackbar.Snackbar
 import org.fips.android.ConfigStore as CS
 
-/** Settings page: structured common parameters + a raw fips.yaml override. */
+/**
+ * Settings page. Everything here has a working default seeded by
+ * [ConfigStore.applyDefaults], so the page exists to change your mind, not to
+ * get connected. The expert knobs sit in a collapsed "Advanced" group.
+ */
 class SettingsFragment : Fragment() {
+
+    /** Survives rotation so an opened Advanced group does not snap shut. */
+    private var advancedExpanded = false
 
     /**
      * Fine location, requested when the FIPS Hotspot toggle is switched on:
@@ -56,19 +65,24 @@ class SettingsFragment : Fragment() {
         savedInstanceState: Bundle?,
     ): View = inflater.inflate(R.layout.fragment_settings, container, false)
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_ADVANCED, advancedExpanded)
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        advancedExpanded = savedInstanceState?.getBoolean(STATE_ADVANCED) ?: false
         load(view)
         setupBootstrapDropdown(view)
+        setupAdvancedToggle(view)
         sw(view, R.id.hotspot).setOnCheckedChangeListener { _, checked ->
             if (checked) ensureLocationPermission()
         }
         // Users who armed the toggle before the permission existed (or had
         // the grant revoked) get the prompt on opening Settings, not only on
-        // a fresh toggle flip.
+        // a fresh toggle flip. With the toggle now defaulting to on, the
+        // connect flow asks first — this stays as the follow-up path.
         if (sw(view, R.id.hotspot).isChecked) ensureLocationPermission()
-        view.findViewById<MaterialButton>(R.id.load_template).setOnClickListener {
-            view.findViewById<EditText>(R.id.fips_yaml).setText(CS.DEFAULT_YAML_TEMPLATE)
-        }
         view.findViewById<MaterialButton>(R.id.save).setOnClickListener {
             save(view)
             Snackbar.make(view, "Saved — reconnect to apply", Snackbar.LENGTH_SHORT).show()
@@ -120,26 +134,23 @@ class SettingsFragment : Fragment() {
         fun e(id: Int) = edit(view, id).text.toString().trim()
         return e(R.id.peer_npub) != p.getString(CS.PEER_NPUB, "") ||
             e(R.id.peer_endpoint) != p.getString(CS.PEER_ENDPOINT, "") ||
-            e(R.id.peer_transport).ifEmpty { "udp" } != p.getString(CS.PEER_TRANSPORT, "udp") ||
-            sw(view, R.id.nostr).isChecked != p.getBoolean(CS.NOSTR, false) ||
-            e(R.id.nostr_relays) != p.getString(CS.NOSTR_RELAYS, "") ||
-            e(R.id.stun_servers) != p.getString(CS.STUN_SERVERS, "") ||
-            e(R.id.udp_bind) != p.getString(CS.UDP_BIND, "") ||
-            e(R.id.tcp_bind) != p.getString(CS.TCP_BIND, "") ||
-            sw(view, R.id.inbound_filter).isChecked != p.getBoolean(CS.INBOUND_FILTER, true) ||
+            e(R.id.peer_transport).ifEmpty { CS.DEF_PEER_TRANSPORT } !=
+            p.getString(CS.PEER_TRANSPORT, CS.DEF_PEER_TRANSPORT) ||
+            sw(view, R.id.inbound_filter).isChecked !=
+            p.getBoolean(CS.INBOUND_FILTER, CS.DEF_INBOUND_FILTER) ||
             e(R.id.inbound_ports) != p.getString(CS.INBOUND_PORTS, "") ||
-            sw(view, R.id.enable_fips_dns).isChecked != p.getBoolean(CS.ENABLE_FIPS_DNS, true) ||
-            e(R.id.dns_upstreams) != p.getString(CS.DNS_UPSTREAMS, "") ||
-            sw(view, R.id.battery_saver).isChecked != p.getBoolean(CS.BATTERY_SAVER, true) ||
-            sw(view, R.id.lan_mdns).isChecked != p.getBoolean(CS.LAN_MDNS, false) ||
-            sw(view, R.id.hotspot).isChecked != p.getBoolean(CS.HOTSPOT, false) ||
-            sw(view, R.id.auto_update).isChecked != p.getBoolean(CS.AUTO_UPDATE, true) ||
+            sw(view, R.id.battery_saver).isChecked !=
+            p.getBoolean(CS.BATTERY_SAVER, CS.DEF_BATTERY_SAVER) ||
+            sw(view, R.id.lan_mdns).isChecked != CS.lanMdns(requireContext()) ||
+            sw(view, R.id.hotspot).isChecked != CS.hotspotEnabled(requireContext()) ||
+            sw(view, R.id.auto_update).isChecked !=
+            p.getBoolean(CS.AUTO_UPDATE, CS.DEF_AUTO_UPDATE) ||
             sw(view, R.id.forward_clearnet).isChecked !=
-            p.getBoolean(CS.FORWARD_CLEARNET, true) ||
-            (e(R.id.worker_threads).toIntOrNull() ?: 1).coerceIn(0, 16) !=
-            p.getInt(CS.WORKER_THREADS, 1) ||
-            e(R.id.log_level).ifEmpty { "info" } != p.getString(CS.LOG_LEVEL, "info") ||
-            e(R.id.fips_yaml) != p.getString(CS.FIPS_YAML, "")
+            p.getBoolean(CS.FORWARD_CLEARNET, CS.DEF_FORWARD_CLEARNET) ||
+            (e(R.id.worker_threads).toIntOrNull() ?: CS.DEF_WORKER_THREADS).coerceIn(0, 16) !=
+            p.getInt(CS.WORKER_THREADS, CS.DEF_WORKER_THREADS) ||
+            e(R.id.log_level).ifEmpty { CS.DEF_LOG_LEVEL } !=
+            p.getString(CS.LOG_LEVEL, CS.DEF_LOG_LEVEL)
     }
 
     private fun edit(view: View, id: Int) = view.findViewById<EditText>(id)
@@ -149,10 +160,32 @@ class SettingsFragment : Fragment() {
     // autocomplete filter and shrink the dropdown to the current value.
     private fun drop(view: View, id: Int) = view.findViewById<MaterialAutoCompleteTextView>(id)
 
+    /** Expand/collapse the Advanced group, flipping the chevron with it. */
+    private fun setupAdvancedToggle(view: View) {
+        val content = view.findViewById<LinearLayout>(R.id.advanced_content)
+        val chevron = view.findViewById<ImageView>(R.id.advanced_chevron)
+        setAdvancedExpanded(content, chevron, advancedExpanded)
+        view.findViewById<View>(R.id.advanced_header).setOnClickListener {
+            setAdvancedExpanded(content, chevron, !advancedExpanded)
+        }
+    }
+
+    private fun setAdvancedExpanded(content: View, chevron: ImageView, expanded: Boolean) {
+        advancedExpanded = expanded
+        content.visibility = if (expanded) View.VISIBLE else View.GONE
+        chevron.rotation = if (expanded) 180f else 0f
+        chevron.contentDescription =
+            if (expanded) "Collapse advanced settings" else "Expand advanced settings"
+    }
+
     /**
      * Bootstrap dropdown: picking a public test-mesh server fills the npub and
-     * endpoint fields; "custom" leaves them to manual entry. Hand-editing
+     * endpoint fields; "custom" reveals them for manual entry. Hand-editing
      * either field flips the selection back to whatever now matches.
+     *
+     * The custom fields sit directly under the dropdown rather than in
+     * Advanced: whenever they are what the node is actually peering with, they
+     * have to be visible and editable where the server is chosen.
      */
     private fun setupBootstrapDropdown(view: View) {
         val dd = drop(view, R.id.bootstrap_server)
@@ -161,18 +194,35 @@ class SettingsFragment : Fragment() {
         )
         val npubField = edit(view, R.id.peer_npub)
         val endpointField = edit(view, R.id.peer_endpoint)
+        val customGroup = view.findViewById<View>(R.id.custom_peer_group)
+        fun matchedPeer() = CS.BOOTSTRAP_PEERS.firstOrNull {
+            it.npub == npubField.text.toString().trim() &&
+                it.endpoint == endpointField.text.toString().trim()
+        }
+        // One rule drives both the label and the fields: anything that is not
+        // exactly a listed server is "custom" and must be visible. A half-typed
+        // entry matches nothing, so the fields cannot vanish mid-edit.
         val syncSelection = {
-            val match = CS.BOOTSTRAP_PEERS.firstOrNull {
-                it.npub == npubField.text.toString().trim() &&
-                    it.endpoint == endpointField.text.toString().trim()
-            }
+            val match = matchedPeer()
             dd.setText(match?.name ?: CS.BOOTSTRAP_CUSTOM, false)
+            customGroup.visibility = if (match == null) View.VISIBLE else View.GONE
         }
         syncSelection()
         dd.setOnItemClickListener { _, _, pos, _ ->
-            CS.BOOTSTRAP_PEERS.getOrNull(pos)?.let {
-                npubField.setText(it.npub)
-                endpointField.setText(it.endpoint)
+            val peer = CS.BOOTSTRAP_PEERS.getOrNull(pos)
+            if (peer != null) {
+                npubField.setText(peer.npub)
+                endpointField.setText(peer.endpoint)
+            } else {
+                // Switching a preset → custom starts from an empty pair, so the
+                // preset's values are not left looking like the user's own. An
+                // existing custom entry is left alone to be edited.
+                if (matchedPeer() != null) {
+                    npubField.setText("")
+                    endpointField.setText("")
+                }
+                syncSelection()
+                npubField.requestFocus()
             }
         }
         npubField.doAfterTextChanged { syncSelection() }
@@ -183,47 +233,39 @@ class SettingsFragment : Fragment() {
         val p = CS.prefs(requireContext())
         edit(view, R.id.peer_npub).setText(p.getString(CS.PEER_NPUB, ""))
         edit(view, R.id.peer_endpoint).setText(p.getString(CS.PEER_ENDPOINT, ""))
-        drop(view, R.id.peer_transport).setText(p.getString(CS.PEER_TRANSPORT, "udp"), false)
-        sw(view, R.id.nostr).isChecked = p.getBoolean(CS.NOSTR, false)
-        edit(view, R.id.nostr_relays).setText(p.getString(CS.NOSTR_RELAYS, ""))
-        edit(view, R.id.stun_servers).setText(p.getString(CS.STUN_SERVERS, ""))
-        edit(view, R.id.udp_bind).setText(p.getString(CS.UDP_BIND, ""))
-        edit(view, R.id.tcp_bind).setText(p.getString(CS.TCP_BIND, ""))
-        sw(view, R.id.inbound_filter).isChecked = p.getBoolean(CS.INBOUND_FILTER, true)
+        drop(view, R.id.peer_transport)
+            .setText(p.getString(CS.PEER_TRANSPORT, CS.DEF_PEER_TRANSPORT), false)
+        sw(view, R.id.inbound_filter).isChecked =
+            p.getBoolean(CS.INBOUND_FILTER, CS.DEF_INBOUND_FILTER)
         edit(view, R.id.inbound_ports).setText(p.getString(CS.INBOUND_PORTS, ""))
-        sw(view, R.id.enable_fips_dns).isChecked = p.getBoolean(CS.ENABLE_FIPS_DNS, true)
-        edit(view, R.id.dns_upstreams).setText(p.getString(CS.DNS_UPSTREAMS, ""))
-        sw(view, R.id.battery_saver).isChecked = p.getBoolean(CS.BATTERY_SAVER, true)
-        sw(view, R.id.lan_mdns).isChecked = p.getBoolean(CS.LAN_MDNS, false)
-        sw(view, R.id.hotspot).isChecked = p.getBoolean(CS.HOTSPOT, false)
-        sw(view, R.id.auto_update).isChecked = p.getBoolean(CS.AUTO_UPDATE, true)
+        sw(view, R.id.battery_saver).isChecked =
+            p.getBoolean(CS.BATTERY_SAVER, CS.DEF_BATTERY_SAVER)
+        sw(view, R.id.lan_mdns).isChecked = CS.lanMdns(requireContext())
+        sw(view, R.id.hotspot).isChecked = CS.hotspotEnabled(requireContext())
+        sw(view, R.id.auto_update).isChecked = p.getBoolean(CS.AUTO_UPDATE, CS.DEF_AUTO_UPDATE)
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
             sw(view, R.id.hotspot).isEnabled = false
         }
-        sw(view, R.id.forward_clearnet).isChecked = p.getBoolean(CS.FORWARD_CLEARNET, true)
-        edit(view, R.id.worker_threads).setText(p.getInt(CS.WORKER_THREADS, 1).toString())
-        drop(view, R.id.log_level).setText(p.getString(CS.LOG_LEVEL, "info"), false)
-        edit(view, R.id.fips_yaml).setText(p.getString(CS.FIPS_YAML, ""))
+        sw(view, R.id.forward_clearnet).isChecked =
+            p.getBoolean(CS.FORWARD_CLEARNET, CS.DEF_FORWARD_CLEARNET)
+        edit(view, R.id.worker_threads)
+            .setText(p.getInt(CS.WORKER_THREADS, CS.DEF_WORKER_THREADS).toString())
+        drop(view, R.id.log_level).setText(p.getString(CS.LOG_LEVEL, CS.DEF_LOG_LEVEL), false)
     }
 
     private fun save(view: View) {
-        val workers = edit(view, R.id.worker_threads).text.toString().trim().toIntOrNull() ?: 1
+        val workers = edit(view, R.id.worker_threads).text.toString().trim().toIntOrNull()
+            ?: CS.DEF_WORKER_THREADS
         CS.prefs(requireContext()).edit()
             .putString(CS.PEER_NPUB, edit(view, R.id.peer_npub).text.toString().trim())
             .putString(CS.PEER_ENDPOINT, edit(view, R.id.peer_endpoint).text.toString().trim())
             .putString(
                 CS.PEER_TRANSPORT,
-                edit(view, R.id.peer_transport).text.toString().trim().ifEmpty { "udp" }
+                edit(view, R.id.peer_transport).text.toString().trim()
+                    .ifEmpty { CS.DEF_PEER_TRANSPORT }
             )
-            .putBoolean(CS.NOSTR, sw(view, R.id.nostr).isChecked)
-            .putString(CS.NOSTR_RELAYS, edit(view, R.id.nostr_relays).text.toString().trim())
-            .putString(CS.STUN_SERVERS, edit(view, R.id.stun_servers).text.toString().trim())
-            .putString(CS.UDP_BIND, edit(view, R.id.udp_bind).text.toString().trim())
-            .putString(CS.TCP_BIND, edit(view, R.id.tcp_bind).text.toString().trim())
             .putBoolean(CS.INBOUND_FILTER, sw(view, R.id.inbound_filter).isChecked)
             .putString(CS.INBOUND_PORTS, edit(view, R.id.inbound_ports).text.toString().trim())
-            .putBoolean(CS.ENABLE_FIPS_DNS, sw(view, R.id.enable_fips_dns).isChecked)
-            .putString(CS.DNS_UPSTREAMS, edit(view, R.id.dns_upstreams).text.toString().trim())
             .putBoolean(CS.BATTERY_SAVER, sw(view, R.id.battery_saver).isChecked)
             .putBoolean(CS.LAN_MDNS, sw(view, R.id.lan_mdns).isChecked)
             .putBoolean(CS.HOTSPOT, sw(view, R.id.hotspot).isChecked)
@@ -232,9 +274,12 @@ class SettingsFragment : Fragment() {
             .putInt(CS.WORKER_THREADS, workers.coerceIn(0, 16))
             .putString(
                 CS.LOG_LEVEL,
-                edit(view, R.id.log_level).text.toString().trim().ifEmpty { "info" }
+                edit(view, R.id.log_level).text.toString().trim().ifEmpty { CS.DEF_LOG_LEVEL }
             )
-            .putString(CS.FIPS_YAML, edit(view, R.id.fips_yaml).text.toString().trim())
             .apply()
+    }
+
+    private companion object {
+        const val STATE_ADVANCED = "advanced_expanded"
     }
 }

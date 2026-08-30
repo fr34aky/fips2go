@@ -1,16 +1,23 @@
 package org.fips.android
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PersistableBundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.snackbar.Snackbar
 import org.json.JSONObject
 
 /** Overview page: identity, live status, connect/disconnect, mesh apps. */
@@ -38,8 +45,14 @@ class OverviewFragment : Fragment() {
         view.findViewById<MaterialButton>(R.id.disconnect).setOnClickListener {
             (activity as? MainActivity)?.disconnect()
         }
+        view.findViewById<MaterialButton>(R.id.backup_identity).setOnClickListener {
+            showBackup()
+        }
+        view.findViewById<MaterialButton>(R.id.restore_identity).setOnClickListener {
+            if (requireDisconnected()) showRestore()
+        }
         view.findViewById<MaterialButton>(R.id.regenerate).setOnClickListener {
-            confirmRegenerate()
+            if (requireDisconnected()) confirmRegenerate()
         }
         view.findViewById<MaterialButton>(R.id.pick_apps).setOnClickListener {
             startActivity(Intent(requireContext(), AppPickerActivity::class.java))
@@ -53,12 +66,132 @@ class OverviewFragment : Fragment() {
         view?.findViewById<TextView>(R.id.identity_address)?.text = info.optString("address")
     }
 
+    // ---- Identity backup / restore ----------------------------------------
+
+    /** Reveal the nsec so it can be copied somewhere safe. */
+    private fun showBackup() {
+        val nsec = IdentityStore.getOrCreate(requireContext())
+        val info = JSONObject(FipsNative.deriveIdentity(nsec))
+        val npub = info.optString("npub")
+        val body = layoutInflater.inflate(R.layout.dialog_identity_backup, null)
+        body.findViewById<TextView>(R.id.backup_nsec).text = nsec
+        body.findViewById<TextView>(R.id.backup_npub).text = "Identity: $npub"
+        AlertDialog.Builder(requireContext())
+            .setTitle("Back up identity")
+            .setView(body)
+            .setPositiveButton("Copy") { _, _ -> copySecret(nsec) }
+            .setNegativeButton("Done", null)
+            .show()
+    }
+
+    /**
+     * Copy the nsec, flagged sensitive so Android 13+ keeps it out of the
+     * clipboard preview toast and out of clipboard history.
+     */
+    private fun copySecret(nsec: String) {
+        val clip = ClipData.newPlainText("fips nsec", nsec)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            clip.description.extras = PersistableBundle().apply {
+                putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+            }
+        }
+        requireContext().getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
+        toast("Secret key copied — paste it somewhere safe, then clear the clipboard")
+    }
+
+    /** Prompt for a pasted nsec. */
+    private fun showRestore() {
+        val body = layoutInflater.inflate(R.layout.dialog_identity_restore, null)
+        val input = body.findViewById<EditText>(R.id.restore_nsec)
+        val dialog = AlertDialog.Builder(requireContext())
+            .setTitle("Restore identity")
+            .setView(body)
+            .setPositiveButton("Restore", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.show()
+        // Overridden after show() so a bad key leaves the dialog open.
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val key = input.text.toString().trim()
+            if (key.isEmpty()) {
+                input.error = "Enter a secret key"
+            } else {
+                dialog.dismiss()
+                confirmRestore(key)
+            }
+        }
+    }
+
+    /**
+     * Validate the key through the shim and show the identity it resolves to
+     * before overwriting the current one — the npub is the only way the user
+     * can tell they are restoring the backup they meant.
+     */
+    private fun confirmRestore(key: String) {
+        // Never hand deriveIdentity an empty string: it treats that as "make me
+        // a new identity" and would return a freshly generated one, which we
+        // would then present as the restored key.
+        if (key.isBlank()) {
+            toast("No key found")
+            return
+        }
+        val info = runCatching { JSONObject(FipsNative.deriveIdentity(key)) }.getOrNull()
+        if (info == null || info.has("error")) {
+            AlertDialog.Builder(requireContext())
+                .setTitle("Not a valid key")
+                .setMessage(
+                    info?.optString("error")?.takeIf { it.isNotEmpty() }
+                        ?: "That does not look like a valid nsec."
+                )
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle("Restore this identity?")
+            .setMessage(
+                "This device will become:\n\n${info.optString("npub")}\n" +
+                    "${info.optString("address")}\n\n" +
+                    "The identity currently on this device is permanently replaced. " +
+                    "Back it up first if you still need it."
+            )
+            .setPositiveButton("Restore") { _, _ ->
+                // Persist the normalized nsec deriveIdentity echoed back, not
+                // the raw input — the shim also accepts a hex secret, and this
+                // keeps what is stored identical in form to a generated one.
+                IdentityStore.store(requireContext(), info.optString("nsec").ifEmpty { key })
+                showIdentity()
+                toast("Identity restored — connect to use it")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * Changing the identity under a running node would leave the mesh talking
+     * to the old key until the next restart, so make the user disconnect.
+     */
+    private fun requireDisconnected(): Boolean {
+        if (!runCatching { FipsNative.isRunning() }.getOrDefault(false)) return true
+        AlertDialog.Builder(requireContext())
+            .setTitle("Disconnect first")
+            .setMessage("Disconnect from the mesh before changing this device's identity.")
+            .setPositiveButton("OK", null)
+            .show()
+        return false
+    }
+
+    private fun toast(message: String) {
+        view?.let { Snackbar.make(it, message, Snackbar.LENGTH_LONG).show() }
+    }
+
     private fun confirmRegenerate() {
         AlertDialog.Builder(requireContext())
             .setTitle("Regenerate identity?")
             .setMessage(
                 "This creates a new node identity (npub and .fips address). The " +
-                    "current identity is permanently replaced. Disconnect first if connected."
+                    "current identity is permanently replaced — back it up first if " +
+                    "you still need it."
             )
             .setPositiveButton("Regenerate") { _, _ ->
                 IdentityStore.regenerate(requireContext())

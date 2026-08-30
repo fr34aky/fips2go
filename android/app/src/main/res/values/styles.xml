@@ -7,4 +7,12 @@
         <item name="android:paddingBottom">6dp</item>
         <item name="android:textColor">?attr/colorPrimary</item>
     </style>
+    <!-- Sub-heading inside the Advanced group; quieter than SettingsHeader. -->
+    <style name="SettingsSubHeader" parent="TextAppearance.Material3.TitleSmall">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">4dp</item>
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+    </style>
 </resources>

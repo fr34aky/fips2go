@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.fragment.app.Fragment
 import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlin.concurrent.thread
 
 /**
@@ -29,6 +30,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         setSupportActionBar(findViewById<Toolbar>(R.id.toolbar))
+        // Before anything reads prefs: a fresh install is fully configured
+        // from here on, so the user can connect without visiting Settings.
+        ConfigStore.applyDefaults(this)
 
         val nav = findViewById<BottomNavigationView>(R.id.bottom_nav)
         nav.setOnItemSelectedListener { item ->
@@ -64,7 +68,7 @@ class MainActivity : AppCompatActivity() {
      * and Diagnostics' manual "Check for updates" keeps working either way.
      */
     private fun autoUpdateCheck() {
-        if (!ConfigStore.prefs(this).getBoolean(ConfigStore.AUTO_UPDATE, true)) return
+        if (!ConfigStore.prefs(this).getBoolean(ConfigStore.AUTO_UPDATE, ConfigStore.DEF_AUTO_UPDATE)) return
         val current = packageManager.getPackageInfo(packageName, 0).versionName ?: return
         val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return
         thread(name = "fips-update-check") {
@@ -91,12 +95,66 @@ class MainActivity : AppCompatActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    /**
+     * Fine location for FIPS Hotspot auto-join. Whatever the answer, the
+     * connect flow continues — a denial only degrades the hotspot feature to
+     * joining once per connect.
+     */
+    private val hotspotLocationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { continueConnect() }
+
     /** Begin the connect flow (consent + permissions), then start the VPN. */
     fun connect() {
+        // The hotspot rationale goes first: the two calls below raise a system
+        // permission dialog and a system settings screen, and our own dialog
+        // would end up stacked behind them on a first run.
+        if (askHotspotLocationIfNeeded()) return
+        continueConnect()
+    }
+
+    private fun continueConnect() {
         requestNotificationsIfNeeded()
         requestBatteryExemptionIfNeeded()
         val prepare = VpnService.prepare(this)
         if (prepare != null) vpnPermission.launch(prepare) else startVpn()
+    }
+
+    /**
+     * FIPS Hotspot is on by default, and Android hides Wi-Fi names (so the
+     * "!FIPS" auto-join cannot work) without fine location. Settings only asks
+     * when that page is opened, which a user who never configures anything
+     * never does — so explain and ask once, on the first connect.
+     *
+     * Returns true when it took over the flow; [continueConnect] then runs from
+     * the permission result or the "Not now" button. Asked at most once ever:
+     * the toggle's own listener in Settings covers a later change of mind.
+     */
+    private fun askHotspotLocationIfNeeded(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val prefs = ConfigStore.prefs(this)
+        if (!ConfigStore.hotspotEnabled(this)) return false
+        if (prefs.getBoolean(ConfigStore.ASKED_HOTSPOT_LOCATION, false)) return false
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+        prefs.edit().putBoolean(ConfigStore.ASKED_HOTSPOT_LOCATION, true).apply()
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Find nearby FIPS hotspots?")
+            .setMessage(
+                "FIPS can auto-join open \u201c!FIPS\u201d Wi-Fi hotspots to reach nearby " +
+                    "peers. Android requires the location permission to see Wi-Fi names.\n\n" +
+                    "Your internet stays on your normal network, and your location is never " +
+                    "stored or sent anywhere. You can turn this off in Settings."
+            )
+            .setPositiveButton("Continue") { _, _ ->
+                hotspotLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            .setNegativeButton("Not now") { _, _ -> continueConnect() }
+            .setOnCancelListener { continueConnect() }
+            .show()
+        return true
     }
 
     fun disconnect() {
