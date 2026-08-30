@@ -3,17 +3,22 @@ package org.fips.android
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.annotation.SuppressLint
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
@@ -57,6 +62,59 @@ class OverviewFragment : Fragment() {
         view.findViewById<MaterialButton>(R.id.pick_apps).setOnClickListener {
             startActivity(Intent(requireContext(), AppPickerActivity::class.java))
         }
+        view.findViewById<MaterialButton>(R.id.battery_allow).setOnClickListener {
+            requestBatteryExemption()
+        }
+        view.findViewById<MaterialButton>(R.id.battery_dismiss).setOnClickListener {
+            ConfigStore.prefs(requireContext()).edit()
+                .putLong(
+                    ConfigStore.BATTERY_PROMPT_SNOOZED_UNTIL,
+                    System.currentTimeMillis() + ConfigStore.BATTERY_PROMPT_SNOOZE_MS,
+                )
+                .apply()
+            updateBatteryCard()
+        }
+    }
+
+    // ---- Battery-optimisation exemption -----------------------------------
+
+    /**
+     * Returning from the exemption screen re-checks rather than trusting the
+     * result code: ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS reports
+     * RESULT_CANCELED even when the user granted it.
+     */
+    private val batteryExemption =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            updateBatteryCard()
+        }
+
+    @SuppressLint("BatteryLife")
+    private fun requestBatteryExemption() {
+        try {
+            batteryExemption.launch(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(Uri.parse("package:${requireContext().packageName}"))
+            )
+        } catch (e: Exception) {
+            toast("Could not open battery settings: ${e.message}")
+        }
+    }
+
+    private fun isBatteryExempt(): Boolean {
+        val pm = requireContext().getSystemService(PowerManager::class.java) ?: return true
+        return pm.isIgnoringBatteryOptimizations(requireContext().packageName)
+    }
+
+    /**
+     * Show the card only while it is actionable: the app is not exempt and the
+     * user has not snoozed it recently. Because the exemption is re-read every
+     * time, a revoked exemption brings the card back on its own.
+     */
+    private fun updateBatteryCard() {
+        val card = view?.findViewById<View>(R.id.battery_card) ?: return
+        val snoozedUntil = ConfigStore.prefs(requireContext()).getLong(ConfigStore.BATTERY_PROMPT_SNOOZED_UNTIL, 0L)
+        val show = !isBatteryExempt() && System.currentTimeMillis() >= snoozedUntil
+        card.visibility = if (show) View.VISIBLE else View.GONE
     }
 
     private fun showIdentity() {
@@ -203,6 +261,7 @@ class OverviewFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        updateBatteryCard()
         updateMeshApps()
         poller.post(pollStatus)
     }

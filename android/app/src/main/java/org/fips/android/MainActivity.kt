@@ -1,14 +1,11 @@
 package org.fips.android
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
@@ -86,60 +83,105 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Pre-flight steps for a connect, run STRICTLY ONE AT A TIME.
+     *
+     * They used to be fired back-to-back in a single call stack: none waited
+     * for the one before, so Android queued three dialogs/Activities at once
+     * and stacked them in whatever order it liked — the battery-optimisation
+     * screen could land on top of the VPN consent and swallow the tap, and the
+     * connect silently did nothing. Each step now resumes [advanceConnect] from
+     * its own result callback.
+     *
+     * Only [VPN_CONSENT] is actually required to bring the tunnel up. The
+     * notification prompt is deliberately last, after the tunnel has started —
+     * it only governs whether the foreground-service notification is visible —
+     * and the battery-optimisation exemption left this flow entirely for a
+     * dismissible card on Overview.
+     */
+    private enum class Gate { HOTSPOT_LOCATION, VPN_CONSENT, NOTIFICATIONS }
+
+    /** Gates already offered during THIS connect attempt; stops re-asking a
+     *  gate the user just declined, since a declined permission still reads as
+     *  "not granted" and would otherwise be offered forever. */
+    private val attemptedGates = mutableSetOf<Gate>()
+    private var vpnStarted = false
+
     private val vpnPermission =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == RESULT_OK) startVpn()
+            if (result.resultCode == RESULT_OK) {
+                vpnStarted = true
+                startVpn()
+                advanceConnect()
+            }
+            // Declined: the tunnel cannot come up, so the chain stops here.
         }
 
     private val notificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { advanceConnect() }
 
     /**
      * Fine location for FIPS Hotspot auto-join. Whatever the answer, the
-     * connect flow continues — a denial only degrades the hotspot feature to
-     * joining once per connect.
+     * connect flow continues — a denial only degrades the hotspot feature.
      */
     private val hotspotLocationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { continueConnect() }
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { advanceConnect() }
 
     /** Begin the connect flow (consent + permissions), then start the VPN. */
     fun connect() {
-        // The hotspot rationale goes first: the two calls below raise a system
-        // permission dialog and a system settings screen, and our own dialog
-        // would end up stacked behind them on a first run.
-        if (askHotspotLocationIfNeeded()) return
-        continueConnect()
-    }
-
-    private fun continueConnect() {
-        requestNotificationsIfNeeded()
-        requestBatteryExemptionIfNeeded()
-        val prepare = VpnService.prepare(this)
-        if (prepare != null) vpnPermission.launch(prepare) else startVpn()
+        attemptedGates.clear()
+        vpnStarted = false
+        advanceConnect()
     }
 
     /**
-     * FIPS Hotspot is on by default, and Android hides Wi-Fi names (so the
-     * "!FIPS" auto-join cannot work) without fine location. Settings only asks
-     * when that page is opened, which a user who never configures anything
-     * never does — so explain and ask once, on the first connect.
-     *
-     * Returns true when it took over the flow; [continueConnect] then runs from
-     * the permission result or the "Not now" button. Asked at most once ever:
-     * the toggle's own listener in Settings covers a later change of mind.
+     * Run the first outstanding gate and return; whatever handles it calls
+     * back here. Re-derived from scratch each time rather than tracked as a
+     * position, so returning from a system screen that destroyed this Activity
+     * resumes correctly.
      */
-    private fun askHotspotLocationIfNeeded(): Boolean {
-        if (!ConfigStore.hotspotEnabled(this)) return false
-        if (!HotspotLocation.shouldAsk(this)) return false
-        HotspotLocation.markAsked(this)
-        HotspotLocation.explain(
-            this,
-            onContinue = {
-                hotspotLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-            },
-            onDismiss = { continueConnect() },
-        )
-        return true
+    private fun advanceConnect() {
+        if (isFinishing || isDestroyed) return
+
+        // 1. Explain the hotspot location permission before Android asks.
+        if (Gate.HOTSPOT_LOCATION !in attemptedGates &&
+            ConfigStore.hotspotEnabled(this) && HotspotLocation.shouldAsk(this)
+        ) {
+            attemptedGates += Gate.HOTSPOT_LOCATION
+            HotspotLocation.markAsked(this)
+            HotspotLocation.explain(
+                this,
+                onContinue = {
+                    hotspotLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                },
+                onDismiss = { advanceConnect() },
+            )
+            return
+        }
+
+        // 2. VPN consent — the only step the tunnel genuinely needs.
+        if (!vpnStarted) {
+            val prepare = VpnService.prepare(this)
+            if (prepare != null) {
+                if (Gate.VPN_CONSENT in attemptedGates) return // declined; stop
+                attemptedGates += Gate.VPN_CONSENT
+                vpnPermission.launch(prepare)
+                return
+            }
+            vpnStarted = true
+            startVpn()
+        }
+
+        // 3. Notifications, once the tunnel is on its way up.
+        if (Gate.NOTIFICATIONS !in attemptedGates &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            attemptedGates += Gate.NOTIFICATIONS
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
     }
 
     fun disconnect() {
@@ -154,29 +196,4 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun requestNotificationsIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
-
-    /**
-     * A long-lived VPN needs a battery-optimization exemption or Doze/App
-     * Standby freezes the service and drops the mesh. No-op if already exempt.
-     */
-    private fun requestBatteryExemptionIfNeeded() {
-        val pm = getSystemService(PowerManager::class.java) ?: return
-        if (pm.isIgnoringBatteryOptimizations(packageName)) return
-        try {
-            @SuppressLint("BatteryLife")
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                .setData(Uri.parse("package:$packageName"))
-            startActivity(intent)
-        } catch (e: Exception) {
-            Log.w("MainActivity", "battery-optimization request failed", e)
-        }
-    }
 }
