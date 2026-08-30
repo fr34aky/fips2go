@@ -30,7 +30,10 @@ sibling fips checkout.
 | `armeabi-v7a` | `armv7-linux-androideabi` | Old 32-bit phones. Compiles and packages; not exercised on real 32-bit hardware. |
 | `x86_64` | `x86_64-linux-android` | Android emulator, Chromebooks. Emulator-verified: connect, VPN establish, and a live mesh link + npub resolve against a host-side fips daemon reached via `10.0.2.2`. |
 
-All three are packaged into one APK. min SDK 26 (Android 8.0).
+The debug APK packages all three. Releases ship **one APK per ABI**, plus a
+universal APK containing all three for anyone who would rather not work out
+which one they need (see [Release build](#release-build)). min SDK 26
+(Android 8.0).
 
 ## Prerequisites
 
@@ -79,13 +82,31 @@ Per-ABI notes:
 ## Release build
 
 ```bash
-./release-build.sh                # all ABIs
-./release-build.sh arm64-v8a      # subset
-# → dist/v<versionName>/: one signed APK per ABI + sha256 + unstripped .so
+./release-build.sh                # all ABIs + the universal APK
+./release-build.sh arm64-v8a      # subset; no universal APK
+# → dist/v<versionName>/: one signed APK per ABI + sha256 + unstripped .so,
+#   plus fips-android-v<version>-universal.apk + sha256
 ```
 
-Releases ship **one APK per ABI** (users install the one matching their
-device; `arm64-v8a` is the device-verified one — see Supported platforms).
+Releases ship **one APK per ABI** — `arm64-v8a` is the device-verified one
+(see Supported platforms) — **plus one universal APK** carrying all three.
+Point first-time installers at the universal APK: it is ~40 MB against ~18 MB
+for arm64, but it always installs, whereas picking the wrong per-ABI APK
+fails with `INSTALL_FAILED_NO_MATCHING_ABIS`.
+
+The per-ABI APKs are not redundant: the in-app updater selects assets by the
+`-<abi>.apk` suffix, so an installed app keeps taking the ~18 MB APK matching
+its own device on every update, universal-installed or not (same package, same
+signing key, higher `versionCode` — it updates in place). The universal APK's
+`-universal` suffix matches no ABI, so the updater never picks it. **Publish
+all of them**: dropping the per-ABI assets silently breaks in-app updates for
+every already-installed user, since the updater would find no matching asset
+and just report "no update".
+
+A partial run (`./release-build.sh arm64-v8a`) skips the universal APK rather
+than building one from whatever `jniLibs/` happens to hold, which could be a
+stale `.so` from an earlier version.
+
 Signing needs `android/keystore.properties` (gitignored):
 
 ```properties
@@ -137,6 +158,18 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   Nostr STUN/hole-punch. Not covered (no fd in those libraries): nostr-sdk
   relay websockets, mDNS — benign because the fips app itself is not
   captured by the per-app tunnel.
+- **FIPS Hotspot** (Settings toggle, on by default; API 29+, needs the fine
+  location permission — Android hides SSIDs and scan results without it):
+  while connected, the app auto-joins the open SSID `!FIPS` by two paths — a
+  `WifiNetworkSuggestion` (API 31+) that the platform auto-joins and roams
+  city-wide whenever the primary Wi-Fi slot is free, and a
+  `WifiNetworkSpecifier` local-only secondary connection for the dual-Wi-Fi
+  case, filed only once a scan actually shows `!FIPS` in range with the
+  strongest beacon's BSSID pinned (approval is stored per BSSID, so a known
+  AP rejoins with no prompt). The hotspot is never an underlay candidate: on
+  join the node is rebound with a *second* UDP transport bound to the hotspot
+  address on the main instance's port, dial-scoped to the link subnet, and
+  LAN mDNS is forced on for that link.
 - **Status**: `FipsNative.status()`/`query()` are served lock-free from the
   node's `ControlReadHandle` snapshots — same data as `fipsctl show_*`.
 
@@ -166,17 +199,19 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   the fix, same saver-on conditions). Not yet measured: a full multi-hour
   Doze cycle. The forwarder was validated on a few flows, not under broad
   real-app load.
-- mDNS LAN discovery is available behind a default-off Settings toggle,
-  and is live-verified against a fips daemon on the same Wi-Fi: the phone
-  discovered the host via `_fips._udp` within ~1.5 min, dialed its LAN
+- mDNS LAN discovery sits behind a Settings toggle, **on by default since
+  0.3**, and is live-verified against a fips daemon on the same Wi-Fi: the
+  phone discovered the host via `_fips._udp` within ~1.5 min, dialed its LAN
   address directly (no relay/mesh hop), and the advert carried only the
-  Wi-Fi address — the tunnel ULA stays off the LAN. The toggle
-  acquires a `MulticastLock` (held only while the underlay is Wi-Fi;
-  the lock disables the chip's multicast filtering, so chatty LANs cost
-  battery) and excludes the tunnel's own addresses from the adverts so the
-  mesh ULA is not broadcast on the LAN. mDNS sockets cannot be
-  socket-protected (no fd access) — fine for the per-app split tunnel,
-  non-functional under "Block connections without VPN". BLE/Ethernet
+  Wi-Fi address — the tunnel ULA stays off the LAN. The app holds a
+  `MulticastLock` while discovery can actually work — the toggle is on and
+  the underlay is Wi-Fi, or a FIPS Hotspot is joined (which forces LAN
+  discovery on for that link) — and never on cellular: the lock disables the
+  chip's hardware multicast filtering, so every LAN multicast frame wakes the
+  CPU and chatty LANs cost battery. The tunnel's own addresses are excluded
+  from the adverts so the mesh ULA is not broadcast on the LAN. mDNS sockets
+  cannot be socket-protected (no fd access) — fine for the per-app split
+  tunnel, non-functional under "Block connections without VPN". BLE/Ethernet
   transports are not available on Android. ICMP to clearnet is not
   forwarded (TCP/UDP are).
 - Signed per-ABI releases are published on GitHub Releases, and the app can
