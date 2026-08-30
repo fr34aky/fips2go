@@ -131,7 +131,7 @@ class FipsVpnService : VpnService() {
         // mDNS runs when the user enabled it (and the underlay is Wi-Fi) OR
         // while a FIPS Hotspot is joined (the shim forces LAN discovery on
         // for the hotspot link — that's the point of joining).
-        val want = (onWifi && prefs().getBoolean(ConfigStore.LAN_MDNS, false)) ||
+        val want = (onWifi && ConfigStore.lanMdns(this)) ||
             hotspotNetwork != null
         if (want && !lock.isHeld) {
             lock.acquire()
@@ -176,6 +176,10 @@ class FipsVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The service can start without the UI ever running (always-on VPN),
+        // so seed the first-run defaults here too — notably the bootstrap
+        // peer, which has no in-code fallback the way the toggles do.
+        ConfigStore.applyDefaults(this)
         when (intent?.action) {
             ACTION_DISCONNECT -> {
                 shutdown()
@@ -207,8 +211,8 @@ class FipsVpnService : VpnService() {
         }
         connectivity = getSystemService(ConnectivityManager::class.java)
         meshAddress = address
-        if (prefs().getBoolean(ConfigStore.LAN_MDNS, false) ||
-            prefs().getBoolean(ConfigStore.HOTSPOT, false)
+        if (ConfigStore.lanMdns(this) ||
+            ConfigStore.hotspotEnabled(this)
         ) {
             val wifi = applicationContext.getSystemService(WifiManager::class.java)
             multicastLock = wifi?.createMulticastLock("fips-mdns")
@@ -268,7 +272,7 @@ class FipsVpnService : VpnService() {
      */
     private fun startHotspot() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
-        if (!prefs().getBoolean(ConfigStore.HOTSPOT, false)) return
+        if (!ConfigStore.hotspotEnabled(this)) return
         addHotspotSuggestion()
         registerWifiWatcher()
         if (hasFineLocation() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -410,7 +414,7 @@ class FipsVpnService : VpnService() {
     private fun maybeFileSpecifier() {
         if (hotspotCallback != null || hotspotNetwork != null) return
         if (System.currentTimeMillis() < specifierBackoffUntil) return
-        if (!prefs().getBoolean(ConfigStore.HOTSPOT, false)) return
+        if (!ConfigStore.hotspotEnabled(this)) return
         val underlayWifi = currentUnderlying?.let { net ->
             connectivity?.getNetworkCapabilities(net)
                 ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true

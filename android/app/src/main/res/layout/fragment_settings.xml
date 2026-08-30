@@ -13,7 +13,8 @@
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
-        <!-- Bootstrap peer -->
+        <!-- Bootstrap peer. Seeded to a working public server on first run,
+             so this page needs no attention at all to get connected. -->
         <TextView style="@style/SettingsHeader" android:text="Bootstrap peer" />
 
         <com.google.android.material.textfield.TextInputLayout
@@ -28,110 +29,63 @@
                 android:inputType="none" />
         </com.google.android.material.textfield.TextInputLayout>
 
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Peer npub">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/peer_npub"
+            android:paddingBottom="6dp"
+            android:text="The public server your phone peers with to join the mesh. Any of them works — pick one near you. Choose “custom” to enter your own."
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <!-- Shown only while the dropdown reads "custom": the peer actually in
+             use must be visible and editable here, not buried in Advanced. -->
+        <LinearLayout
+            android:id="@+id/custom_peer_group"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="text" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:hint="Peer npub">
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/peer_npub"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text" />
+            </com.google.android.material.textfield.TextInputLayout>
 
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Peer endpoint (host:port)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/peer_endpoint"
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="text" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:hint="Peer endpoint (host:port)">
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/peer_endpoint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text" />
+            </com.google.android.material.textfield.TextInputLayout>
 
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Transport">
-            <com.google.android.material.textfield.MaterialAutoCompleteTextView
-                android:id="@+id/peer_transport"
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="none"
-                app:simpleItems="@array/peer_transports" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:hint="Transport">
+                <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                    android:id="@+id/peer_transport"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="none"
+                    app:simpleItems="@array/peer_transports" />
+            </com.google.android.material.textfield.TextInputLayout>
+        </LinearLayout>
 
-        <!-- Discovery -->
-        <TextView style="@style/SettingsHeader" android:text="Discovery" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/nostr"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="Nostr rendezvous (relay discovery + NAT traversal)" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Nostr relays (one per line; blank = defaults)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/nostr_relays"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="top"
-                android:inputType="textMultiLine|textNoSuggestions"
-                android:minLines="2" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="STUN servers (one per line; blank = defaults)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/stun_servers"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="top"
-                android:inputType="textMultiLine|textNoSuggestions"
-                android:minLines="2" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <!-- Transports -->
-        <TextView style="@style/SettingsHeader" android:text="Transports" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="UDP bind (host:port; blank = ephemeral)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/udp_bind"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="TCP bind (host:port; blank = no TCP)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/tcp_bind"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <!-- Inbound firewall -->
-        <TextView style="@style/SettingsHeader" android:text="Inbound firewall" />
+        <!-- Security -->
+        <TextView style="@style/SettingsHeader" android:text="Security" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/inbound_filter"
@@ -144,55 +98,12 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingBottom="6dp"
-            android:text="Other mesh nodes can otherwise reach any port your selected apps listen on, like on a shared LAN. With this on, only replies to connections this phone opened, pings, and the allowed ports below get through — everything else is dropped (blocked ports show up in the Diagnostics log). fips itself needs no inbound ports."
+            android:text="Other mesh nodes can otherwise reach any port your selected apps listen on, like on a shared LAN. With this on, only replies to connections this phone opened, pings, and the ports allowed under Advanced get through — everything else is dropped (blocked ports show up in the Diagnostics log). fips itself needs no inbound ports."
             android:textAppearance="?attr/textAppearanceBodySmall"
             android:textColor="?attr/colorOnSurfaceVariant" />
 
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Allowed inbound ports (comma-separated; blank = none)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/inbound_ports"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <!-- DNS -->
-        <TextView style="@style/SettingsHeader" android:text="DNS" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/enable_fips_dns"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="In-app .fips resolver" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Upstream DNS (one per line, host:port)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/dns_upstreams"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="top"
-                android:inputType="textMultiLine"
-                android:minLines="2" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <!-- Performance -->
-        <TextView style="@style/SettingsHeader" android:text="Performance &amp; battery" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/battery_saver"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="Battery saver (relaxed timers)" />
+        <!-- Connectivity -->
+        <TextView style="@style/SettingsHeader" android:text="Connectivity" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/lan_mdns"
@@ -224,24 +135,23 @@
             android:textAppearance="?attr/textAppearanceBodySmall"
             android:textColor="?attr/colorOnSurfaceVariant" />
 
+        <!-- Battery -->
+        <TextView style="@style/SettingsHeader" android:text="Battery" />
+
         <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/forward_clearnet"
+            android:id="@+id/battery_saver"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingVertical="6dp"
-            android:text="Forward non-mesh traffic (split tunnel)" />
+            android:text="Battery saver (relaxed timers)" />
 
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Worker threads (encrypt/decrypt)">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/worker_threads"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="number" />
-        </com.google.android.material.textfield.TextInputLayout>
+            android:paddingBottom="6dp"
+            android:text="Slows the mesh's background timers and heartbeats, cutting idle CPU and radio wakeups. Peers notice a dropped link a little later. Recommended on phones."
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
 
         <!-- Updates -->
         <TextView style="@style/SettingsHeader" android:text="Updates" />
@@ -261,61 +171,113 @@
             android:textAppearance="?attr/textAppearanceBodySmall"
             android:textColor="?attr/colorOnSurfaceVariant" />
 
-        <!-- Logging -->
-        <TextView style="@style/SettingsHeader" android:text="Logging" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+        <!-- Advanced: collapsed by default. Nothing in here needs touching
+             for a normal connection. -->
+        <LinearLayout
+            android:id="@+id/advanced_header"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Log level">
-            <com.google.android.material.textfield.MaterialAutoCompleteTextView
-                android:id="@+id/log_level"
+            android:background="?attr/selectableItemBackground"
+            android:baselineAligned="false"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:minHeight="48dp"
+            android:orientation="horizontal">
+
+            <TextView
+                style="@style/SettingsHeader"
+                android:layout_weight="1"
+                android:text="Advanced" />
+
+            <ImageView
+                android:id="@+id/advanced_chevron"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:contentDescription="Expand advanced settings"
+                android:src="@drawable/ic_expand_more"
+                android:tint="?attr/colorPrimary" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/advanced_content"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="none"
-                app:simpleItems="@array/log_levels" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:paddingBottom="8dp"
+                android:text="Defaults are fine for normal use. Change these only if you know why."
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant" />
 
-        <!-- Advanced -->
-        <TextView style="@style/SettingsHeader" android:text="Advanced: raw fips.yaml" />
+            <TextView style="@style/SettingsSubHeader" android:text="Inbound firewall" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="When set, this fully defines the fips config (every parameter) and overrides the structured fips settings above."
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?android:attr/textColorSecondary"
-            android:paddingBottom="8dp" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="fips.yaml">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/fips_yaml"
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:fontFamily="monospace"
-                android:gravity="top"
-                android:inputType="textMultiLine|textNoSuggestions"
-                android:minLines="6"
-                android:textSize="12sp" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:hint="Allowed inbound ports (comma-separated; blank = none)">
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/inbound_ports"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text" />
+            </com.google.android.material.textfield.TextInputLayout>
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/load_template"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Load template" />
+            <TextView style="@style/SettingsSubHeader" android:text="Performance" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/forward_clearnet"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingVertical="6dp"
+                android:text="Forward non-mesh traffic (split tunnel)" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="6dp"
+                android:text="Keeps normal internet working in the apps you selected. Turning this off leaves them with mesh access only."
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Worker threads (encrypt/decrypt)">
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/worker_threads"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="number" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <TextView style="@style/SettingsSubHeader" android:text="Logging" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Log level">
+                <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                    android:id="@+id/log_level"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="none"
+                    app:simpleItems="@array/log_levels" />
+            </com.google.android.material.textfield.TextInputLayout>
+        </LinearLayout>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/save"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="16dp"
             android:layout_marginBottom="24dp"
             android:text="Save settings" />
     </LinearLayout>
