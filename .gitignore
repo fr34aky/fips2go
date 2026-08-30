@@ -16,3 +16,9 @@ target/
 *.zip
 *.tar.gz
 /dist/
+
+# Zapstore publishing scratch. .env holds SIGN_WITH — a bunker:// URI with a
+# live secret token — and signing-crt_*.txt is an exported signing certificate.
+# Neither belongs in the repo; the first would leak a credential.
+/.env
+/signing-crt_*.txt
