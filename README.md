@@ -1,4 +1,4 @@
-# fips-android
+# fips2go
 
 Android port of [FIPS](https://github.com/jmcorgan/fips): the mesh daemon
 embedded in a `VpnService` app. Selected phone apps reach the mesh over

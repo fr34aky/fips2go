@@ -87,7 +87,7 @@ class TroubleshootFragment : Fragment() {
             pkg.versionCode.toLong()
         }
         view.findViewById<TextView>(R.id.app_version).text =
-            "fips-android ${pkg.versionName} (build $code, ${Build.SUPPORTED_ABIS.firstOrNull()})"
+            "fips2go ${pkg.versionName} (build $code, ${Build.SUPPORTED_ABIS.firstOrNull()})"
         view.findViewById<MaterialButton>(R.id.check_update).setOnClickListener {
             checkForUpdate(view, pkg.versionName ?: "0")
         }
