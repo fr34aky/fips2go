@@ -84,9 +84,14 @@ if [ "$built" = "$wanted" ]; then
     cp android/app/build/outputs/apk/release/app-release.apk "$UAPK"
 
     echo "--- packaged ABIs (must be all ${#ALL_ABIS[@]}):"
-    unzip -l "$UAPK" | grep 'lib/'
+    # Capture the listing once and match against it, rather than piping into
+    # `grep -q` per ABI: grep -q exits at the first match (line 9 of ~900),
+    # unzip then dies writing to the closed pipe, and `set -o pipefail` turns
+    # that into a failed check even though every ABI is present.
+    listing=$(unzip -l "$UAPK")
+    grep 'lib/' <<< "$listing"
     for abi in "${ALL_ABIS[@]}"; do
-        unzip -l "$UAPK" | grep -q "lib/$abi/libfips_android.so" \
+        grep -q "lib/$abi/libfips_android.so" <<< "$listing" \
             || { echo "$abi missing from the universal APK!"; exit 1; }
     done
     # The updater matches assets by "-<abi>.apk"; this name must match none of
