@@ -21,11 +21,11 @@ license: MIT
 # Drop this line to fall back to arm64-v8a.
 match: '.*-universal\.apk$'
 
-name: FIPS Mesh
+name: fips2go
 summary: Reach the FIPS mesh from your phone, on the apps you choose
 
 description: |
-  FIPS Mesh runs a FIPS mesh node on your phone and hands it to the apps you
+  fips2go runs a FIPS mesh node on your phone and hands it to the apps you
   pick, over a per-app VPN tunnel. Selected apps reach `.fips` names on the
   mesh **and** keep normal internet; every other app on the device is
   untouched.
