@@ -22,7 +22,7 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: fips pin is in sync across manifests and lockfiles
         run: |
@@ -88,14 +88,14 @@ jobs:
   android:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       - name: Install NDK r27c
         run: |
@@ -133,7 +133,7 @@ jobs:
           echo "armeabi-v7a LOAD alignment: $got"
           [ "$got" = "0x1000" ] || { echo "::error::armeabi-v7a must stay 4 KB aligned"; exit 1; }
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.7'
 
@@ -151,7 +151,7 @@ jobs:
             echo "$abi packaged"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: app-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
