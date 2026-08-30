@@ -19,8 +19,14 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-24.04
+    # Approval gate. The job pauses here until a reviewer approves it, before
+    # any step runs and before CLAUDE_API_KEY is reachable — same-repo PRs
+    # included, so an accidental or automated trigger cannot spend the key
+    # either. The fork-PR approval setting only covers external contributors;
+    # this covers everything.
+    environment: security-review
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, 2026-07-16
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
