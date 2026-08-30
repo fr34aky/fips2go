@@ -587,7 +587,7 @@ class FipsVpnService : VpnService() {
             .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
         return try {
             val builder = Builder()
-                .setSession("FIPS Mesh")
+                .setSession("fips2go")
                 .setMtu(MESH_MTU)
                 .addAddress(address, 128)          // mesh IPv6 address
                 .addAddress(TUN_IPV4, 32)          // IPv4 source for clearnet
