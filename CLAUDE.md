@@ -30,11 +30,26 @@ cd android && JAVA_HOME=~/.local/jdk-17 ~/.local/gradle-8.7/bin/gradle assembleD
 
 `source ./android-env.sh` is required before any cargo command:
 - Cross builds: sets the NDK r27c linker/CC/AR (API 24 floor — `getifaddrs` in fips's STUN code).
-- **Host builds too**: it pins `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, overriding a machine-wide ESP32/Xtensa libclang that breaks bindgen (`rustables`) with an `assertion failed 4 != 8` panic.
+- **Host builds too**: it pins `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, overriding a machine-wide ESP32/Xtensa libclang that breaks bindgen (`rustables`) with an `assertion failed 4 != 8` panic. The override is deliberately unconditional (an already-set `LIBCLANG_PATH` loses) — point elsewhere with `FIPS_LIBCLANG_PATH`, as CI does.
+- Both machine paths have env overrides so the script needs no editing off this machine: `FIPS_NDK_HOME` (NDK location) and `FIPS_LIBCLANG_PATH`.
 
 Toolchain: Rust 1.94.1 (pinned in `rust-toolchain.toml`), NDK r27c at `$HOME/android-ndk-r27c`, JDK 17 at `~/.local/jdk-17`, Gradle 8.7 at `~/.local/gradle-8.7`, Android SDK platform-34.
 
-There is no Kotlin test suite; the app was verified on-device (Pixel 9 Pro). Rust tests live as `#[cfg(test)]` modules inside `shim/src/*.rs`.
+There is no Kotlin test suite; every Kotlin path is verified by a human looking at a screen — a wiped emulator (the `fips-firstrun` AVD) for first-run and settings-migration paths, a real device (Pixel 9 Pro) for anything involving Wi-Fi, Doze, or the hotspot, which the emulator cannot test. Say which was used when changing Kotlin. Rust tests live as `#[cfg(test)]` modules inside `shim/src/*.rs` (`config`, `dns`, `engine`, `filter`, `forward`, `packet`).
+
+## CI (`.github/workflows/`)
+
+`build.yml` runs on every push to `main` and every PR, and mechanically enforces four constraints this file states in prose — check it before assuming a rule is only advisory:
+- **fips pin sync**: the `rev` in `shim/Cargo.toml` and `smoke/Cargo.toml` must match *and* appear in both `Cargo.lock`s (a bumped manifest with a stale lock quietly builds the old fips; the fix is `cargo update -p fips`).
+- **ABI list sync** between `build-native.sh` and the debug `abiFilters` in `android/app/build.gradle.kts`.
+- **Page alignment** per ABI, read out of the built `.so` with `llvm-readelf` (0x4000 on arm64/x86_64, 0x1000 on armeabi-v7a).
+- **APK contents**: all three `lib/<abi>/libfips_android.so` present in the debug APK, which is uploaded as an artifact.
+
+The `checks` job also runs the host suite as `cargo test --locked`, so a lockfile that drifts from the manifest fails there too. The `android` job is the only place all three ABIs are cross-compiled — it is the meaningful check on a fips pin bump.
+
+`security-review.yml` runs Anthropic's security reviewer on PR diffs, with extra repo context in `.github/security-scan-instructions.md` (trust boundaries, and the list of deliberate design choices that are *not* findings). Two things to know when a run looks stuck or red: it is gated on the `security-review` GitHub environment, so the job waits for a human approval before any step runs or the API key is reachable, and it is skipped entirely for Dependabot (whose restricted token cannot reach the secret). The action is not hardened against prompt injection — keep "Require approval for all external contributors" on so a fork PR cannot run it. A guard step fails the job when the audit produced no findings count, because the action exits 0 even when it never ran.
+
+`PR-REVIEW.md` is the maintainers' review checklist — the criteria applied to incoming PRs, several of which exist because the failure already happened once. Read it before reviewing or opening one.
 
 ## The fips dependency
 
@@ -79,4 +94,4 @@ Zero-config first run (0.3): a fresh install connects without the user opening S
 - **Release asset names are load-bearing.** `Updater.kt` picks a GitHub release asset by suffix — `-<abi>.apk` and `-<abi>.apk.sha256` — which is exactly what `release-build.sh` emits into `dist/v<versionName>/`. Renaming or omitting either artifact silently breaks in-app updates for already-installed users (the check returns "no update"). The updater downloads, verifies the sha256, and hands the APK to the system installer, which enforces the release signing key and refuses while the VPN is connected.
 - Don't reinstall or force-kill the app while the VPN is connected — it can leak netd routing rules that block other apps' connectivity until reboot. Disconnect first.
 - Launcher icon assets (`android/.../res/mipmap-*`) are generated from the fips repo's `docs/logos/fips_logo.png` (mesh graphic cropped, luminance→alpha, adaptive icon + monochrome layer).
-- `PHASE1-NOTES.md` / `PHASE2-NOTES.md` / `PHASE3-NOTES.md` document the porting history, the full socket-protect coverage table, and verification status — consult them before changing the embedding seam.
+- `PHASE1-NOTES.md` / `PHASE2-NOTES.md` / `PHASE3-NOTES.md` document the porting history, the full socket-protect coverage table, and verification status — consult them before changing the embedding seam. Much of this codebase's behaviour is the result of a specific device-observed bug, and the commit message usually explains it: search history for a file before changing it.
