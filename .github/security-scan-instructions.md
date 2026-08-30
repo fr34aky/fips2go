@@ -1,4 +1,4 @@
-# Extra context for the security review of fips-android
+# Extra context for the security review of fips2go
 
 Appended to the standard audit prompt. It describes where this codebase's
 trust boundaries actually are, so the review can weight findings accordingly.
