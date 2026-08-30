@@ -1,0 +1,72 @@
+# Anthropic's Claude Code security reviewer, on every pull request.
+#
+# Diff-aware: it reviews what the PR changes, not the whole tree. This repo is
+# worth pointing it at — the shim parses attacker-supplied packets off a public
+# mesh, brokers DNS, and holds a non-exportable signing identity.
+#
+# NOTE: the action is explicitly NOT hardened against prompt injection, so it
+# must only ever review trusted PRs. Keep "Require approval for all external
+# contributors" enabled under Settings -> Actions so a fork PR cannot run it.
+name: security review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write   # to leave findings as PR comments
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - uses: anthropics/claude-code-security-review@main
+        id: review
+        with:
+          claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
+          comment-pr: true
+          upload-results: true
+          custom-security-scan-instructions: .github/security-scan-instructions.md
+          # The action caches an "already scanned" marker per PR, not per
+          # commit, and writes it even when the run failed. One bad API key
+          # therefore disables scanning for the whole PR, and no amount of
+          # re-running or new commits recovers it — only deleting the cache
+          # entry does. Bypass the check; PRs here are small enough that the
+          # extra-false-positives tradeoff their docs mention does not bite.
+          run-every-commit: true
+
+      # The action exits 0 even when the audit never ran — a bad API key and a
+      # cached per-PR skip both surface as a green check, which is the worst
+      # possible failure mode for a security gate. Both happened while setting
+      # this up. Insist on evidence that an audit actually produced a verdict.
+      #
+      # findings-count is the discriminator: empty when no scan happened, and
+      # "0" when one ran and found nothing. The results file is only a
+      # secondary check, since its path is relative to the action's own
+      # working directory and may not resolve from here.
+      - name: Confirm the audit actually ran
+        if: always() && steps.review.outcome == 'success'
+        env:
+          FINDINGS: ${{ steps.review.outputs.findings-count }}
+          RESULTS: ${{ steps.review.outputs.results-file }}
+        run: |
+          set -uo pipefail
+          if [ -z "$FINDINGS" ]; then
+            echo "::error::the security audit did not run — it produced no findings count."
+            echo "Most likely causes: an API key the action cannot authenticate"
+            echo "with, or a stale per-PR cache marker (delete the caches named"
+            echo "claudecode-*-pr-<n>-* and re-run)."
+            exit 1
+          fi
+          if [ -n "$RESULTS" ] && [ -f "$RESULTS" ] && \
+             python3 -c "import json,sys; sys.exit(0 if 'error' in json.load(open('$RESULTS')) else 1)"; then
+            echo "::error::the audit reported an error instead of a verdict:"
+            python3 -c "import json; print(json.load(open('$RESULTS'))['error'][:800])"
+            exit 1
+          fi
+          echo "audit completed; findings: $FINDINGS"
