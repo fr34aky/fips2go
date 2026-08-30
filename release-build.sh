@@ -52,8 +52,19 @@ for abi in "${ABIS[@]}"; do
 
     # 3. Verify before publishing anything.
     echo "--- packaged ABIs (must be $abi only):"
-    unzip -l "$APK" | grep 'lib/' || { echo "no native libs in APK!"; exit 1; }
-    ! unzip -l "$APK" | grep 'lib/' | grep -qv "lib/$abi/"
+    # Derive the set of ABI directories present and compare it to what was
+    # asked for. Deliberately not `... | grep -qv "lib/$abi/"`: grep -qv exits
+    # at the first foreign line, SIGPIPEs the upstream grep, and pipefail
+    # turns that into a non-zero pipeline which the leading `!` flips into a
+    # PASS — so a foreign ABI shipped silently. Every command below reads its
+    # input to the end, so nothing can exit early and break the pipe.
+    listing=$(unzip -l "$APK")
+    grep 'lib/' <<< "$listing" || { echo "no native libs in APK!"; exit 1; }
+    found=$(grep -oE 'lib/[^/]+/' <<< "$listing" | sed 's#^lib/##; s#/$##' | sort -u)
+    if [ "$found" != "$abi" ]; then
+        echo "::error:: expected only $abi, found: $(echo $found)"
+        exit 1
+    fi
     # 16 KB LOAD alignment on 64-bit; 32-bit Android stays on 4 KB pages.
     want=0x4000; [ "$abi" = armeabi-v7a ] && want=0x1000
     echo "--- ELF LOAD alignment (must be $want):"
