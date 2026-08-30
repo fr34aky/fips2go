@@ -19,6 +19,12 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-24.04
+    # Dependabot PRs get restricted permissions and cannot reach environment
+    # secrets, so this job can only ever fail on them — a permanent red check
+    # that teaches everyone to ignore a failing security review. They change
+    # dependency versions, not source, and the pins still get a human read
+    # before merge.
+    if: github.actor != 'dependabot[bot]'
     # Approval gate. The job pauses here until a reviewer approves it, before
     # any step runs and before CLAUDE_API_KEY is reachable — same-repo PRs
     # included, so an accidental or automated trigger cannot spend the key
