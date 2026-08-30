@@ -58,8 +58,14 @@ jobs:
           [ "$from_script" = "$from_gradle" ] || {
             echo "::error::ABI list differs between build-native.sh and debug abiFilters"; exit 1; }
 
-      - name: Install libclang (bindgen, via rustables in the host build)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      # Host-only system deps. The Android cross-builds need none of this;
+      # these are pulled in by fips's Linux-desktop dependencies when the shim
+      # is built for the host: libclang for bindgen (rustables), and dbus for
+      # libdbus-sys, which fails its pkg-config probe without the dev package.
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libclang-dev libdbus-1-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
