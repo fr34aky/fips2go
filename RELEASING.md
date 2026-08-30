@@ -1,0 +1,278 @@
+# Releasing
+
+The full sequence for cutting a release, as actually performed for v0.3.3.
+Every step here has been run; the gotchas are ones that bit, not ones that
+might.
+
+Two distribution channels, in order: **GitHub Releases** (which the in-app
+updater reads) and **Zapstore** (Nostr-based). GitHub first — Zapstore's
+manifest pulls the APK from the GitHub release.
+
+## 0. Decide whether to release at all
+
+Check what actually changed:
+
+```bash
+git diff <last-tag>..main -- android/app/src/ shim/src/
+```
+
+If that is **empty**, the binary is functionally identical to the last
+release. `DEF_AUTO_UPDATE` is on, so every installed user gets prompted to
+download ~18 MB for no behavioural change. That is sometimes still the right
+call — v0.3.3 was cut precisely that way, because v0.3.2's artifacts had been
+built by a verification script that turned out never to work — but it should
+be a decision, not an accident, and the release notes should say so plainly.
+
+Versioning (pre-1.0 semver, adopted after 0.1.6):
+
+- **minor** (0.2 → 0.3) for new user-visible features
+- **patch** (0.3.2 → 0.3.3) for bug fixes and polish
+- **1.0** is reserved for the native npub-addressed API milestone
+- `versionCode` is a plain +1 counter, independent of the name
+
+The updater compares dotted numerics, so differing segment counts (`0.2` vs
+`0.1.6`) are fine.
+
+## 1. Prerequisites
+
+| Need | Where |
+|---|---|
+| Signing keystore | `~/.android-keys/fips-android-release.keystore`, referenced by gitignored `android/keystore.properties` |
+| Toolchain | Rust 1.94.1, NDK r27c, JDK 17, Gradle 8.7, SDK platform-34 |
+| GitHub CLI | `gh auth status` — needs `repo` scope |
+| Zapstore CLI | `zsp` (`~/go/bin/zsp`; on PATH via `~/.profile`) |
+| Nostr signer | A `bunker://` URI, browser extension, or nsec — see step 6 |
+
+Without `keystore.properties` the APKs come out **unsigned**, which the script
+does not treat as fatal. Check the signature output in step 2.
+
+## 2. Bump the version and build
+
+```bash
+# android/app/build.gradle.kts — bump BOTH together
+#   versionCode = <n+1>
+#   versionName = "<x.y.z>"
+
+./release-build.sh          # all ABIs + the universal APK
+```
+
+Land the bump through a PR like any other change; CI cross-compiles all three
+ABIs, which is the check that matters.
+
+`release-build.sh` produces, into `dist/v<versionName>/`:
+
+- one signed APK per ABI + `.sha256`
+- one signed **universal** APK (all three ABIs) + `.sha256`
+- an unstripped `.so` per ABI, for symbolicating native crashes
+
+and verifies, per APK: exactly the expected ABI(s) present, 16 KB LOAD
+alignment on 64-bit (4 KB on `armeabi-v7a`), and the signing certificate.
+
+> The universal APK is built **only when one run produces every ABI**.
+> `./release-build.sh arm64-v8a` skips it, deliberately: `jniLibs/` persists
+> between runs and may hold a stale `.so` from an earlier version.
+
+Confirm before going further:
+
+```bash
+cd dist/v<version> && sha256sum -c *.sha256
+
+# aapt2 is not on PATH; it lives in the SDK build-tools
+BT=$(ls -d ~/Android/Sdk/build-tools/* | sort -V | tail -1)
+"$BT/aapt2" dump badging fips-android-v<version>-universal.apk \
+  | grep -E "versionCode|native-code"
+```
+
+Expect the new `versionCode`/`versionName` and all three ABIs in the universal
+APK. The signature line in the build output must read `CN=fr34aky`.
+
+Regenerate `THIRD-PARTY-NOTICES.md` only when the **fips pin** moved (from the
+arm64 `cargo tree`); otherwise attach the existing one.
+
+## 3. Publish the GitHub release
+
+```bash
+gh release create v<version> --target main --title "v<version>" \
+  --notes "$(cat notes.md)" \
+  dist/v<version>/fips-android-v<version>-arm64-v8a.apk{,.sha256} \
+  dist/v<version>/fips-android-v<version>-armeabi-v7a.apk{,.sha256} \
+  dist/v<version>/fips-android-v<version>-x86_64.apk{,.sha256} \
+  dist/v<version>/fips-android-v<version>-universal.apk{,.sha256} \
+  THIRD-PARTY-NOTICES.md
+```
+
+**Asset names are load-bearing.** `Updater.kt` selects assets by the suffixes
+`-<abi>.apk` and `-<abi>.apk.sha256`. Renaming or omitting either silently
+breaks in-app updates for every installed user — the check just returns "no
+update", and no later release repairs it because the same mismatch recurs.
+
+- Publish **all four** APKs. The per-ABI ones are what the updater consumes;
+  the universal one is a first-install convenience for the release page.
+- `-universal.apk` deliberately matches no ABI suffix, so the updater never
+  selects it. `release-build.sh` asserts that non-collision.
+- Never re-upload per-ABI assets over an existing release: an APK rebuild is
+  **not** byte-reproducible, so the published `.sha256` would stop matching.
+
+Verify the updater contract:
+
+```bash
+curl -s https://api.github.com/repos/fr34aky/fips2go/releases/latest \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['tag_name']); [print(' ',a['name']) for a in d['assets']]"
+```
+
+`/releases/latest` must resolve to the new tag, and each ABI must have both its
+`.apk` and `.apk.sha256`.
+
+## 4. Release notes
+
+Cover: what changed, which APK to pick, and the signing fingerprint.
+
+```
+aa905e32bd0058874d252990abba26c78ddd8fca018195ebd1cd232a99a7a8e1
+```
+
+The fingerprint matters most on a **first** install — there is no previously
+installed signature for Android to compare against, so the checksum and this
+fingerprint are the only things identifying a genuine build. Updates are
+enforced against the key automatically.
+
+If the binary is unchanged (step 0), say so in the first line so anyone
+reading the update prompt knows it is optional.
+
+## 5. Zapstore: prepare the credential
+
+`zapstore.yaml` at the repo root already tracks this repo's latest GitHub
+release and pins the universal APK via `match: '.*-universal\.apk$'`. It needs
+no edit per release.
+
+Signing needs a Nostr key. **Do not paste a `bunker://` URI into a shared
+session or a shell command** — it carries a live secret token, and it would
+land in shell history and `ps`. Write it to a file:
+
+```bash
+umask 077
+printf '%s' 'bunker://...' > ~/.zsp-bunker
+```
+
+`$(cat ~/.zsp-bunker)` in the command below keeps it out of `argv`.
+
+`/.env` and `/signing-crt_*.txt` are gitignored because zsp's own flows leave
+credentials there.
+
+## 6. Publish to Zapstore
+
+```bash
+cd /home/andre/fips2go
+SIGN_WITH=$(cat ~/.zsp-bunker) zsp publish -q --skip-preview zapstore.yaml
+```
+
+`-q` auto-confirms; without it, `zsp publish` opens an interactive selector
+that needs a real TTY.
+
+> **`zsp publish -q` prints nothing on success**, and zsp documents "nothing to
+> do: silent exit 0". **Exit 0 does not mean it published.** Always verify
+> against the relay.
+
+Optional pre-flight (no signing, no publishing):
+
+```bash
+zsp publish --check zapstore.yaml     # → {"package_id":"org.fips.android"}
+```
+
+## 7. Verify the Zapstore release
+
+The relay is the source of truth — zapstore.dev renders its Releases panel
+client-side, so `curl`/fetch tools show "No releases found." even for
+long-published apps. Do not read anything into that.
+
+```python
+# python3 - <<'PY'   (needs the `websockets` package)
+import asyncio, json, websockets
+async def q(f):
+    out=[]
+    async with websockets.connect("wss://relay.zapstore.dev", open_timeout=20) as ws:
+        await ws.send(json.dumps(["REQ","v",f]))
+        while True:
+            try:
+                m=json.loads(await asyncio.wait_for(ws.recv(), timeout=8))
+            except asyncio.TimeoutError:
+                break
+            if m[0]=="EVENT": out.append(m[2])
+            elif m[0]=="EOSE": break
+    return out
+async def main():
+    rels=await q({"kinds":[30063],"#i":["org.fips.android"],"limit":10})
+    for r in sorted(rels, key=lambda x:-x["created_at"]):
+        tags={}
+        for t in r["tags"]: tags.setdefault(t[0],[]).append(t[1])
+        print(tags["d"][0])
+        for eid in tags.get("e",[]):
+            fe=await q({"ids":[eid]})
+            ft={}
+            for t in fe[0]["tags"]: ft.setdefault(t[0],[]).append(t[1])
+            print("  ", ft["filename"][0], ft["x"][0], ft["size"][0], "vc="+ft["version_code"][0])
+asyncio.run(main())
+# PY
+```
+
+Check the newest `d` tag is `org.fips.android@<version>` and that the file
+event's `x` (sha256) and `size` match `dist/v<version>/` exactly.
+
+## 8. Clean up
+
+```bash
+shred -u ~/.zsp-bunker
+```
+
+Keep it only if you deliberately want it for next time. Rotate the bunker
+secret if it was ever exposed — an ignore rule does not undo exposure.
+
+## One-time: link the signing certificate
+
+Only needed when the **signing key changes** or the proof expires. The current
+proof covers cert `aa905e32…6986cf` until **2027-08-30**; every release signed
+with that key is covered, so this is not a per-release step.
+
+```bash
+KEYSTORE_PASSWORD=$(sed -n 's/^storePassword=//p' android/keystore.properties) \
+SIGN_WITH=$(cat ~/.zsp-bunker) \
+  zsp identity --link-key ~/.android-keys/fips-android-release.p12 \
+               --key-alias fips-android
+```
+
+Two traps:
+
+- **The keystore is PKCS#12 despite its `.keystore` name** (modern `keytool`
+  defaults to PKCS12). zsp picks its loader from the file *extension*, so
+  `.keystore` makes it try JKS and fail with `got invalid magic`. Point it at
+  a `.p12` name — a symlink is enough, and avoids a second copy of the key.
+  One already exists: `~/.android-keys/fips-android-release.p12`.
+- **`zsp identity` has no `--yes`.** Its final confirmation is a TUI selector
+  needing a real TTY; `--json` and `-q` do not suppress it, and neither a
+  background shell nor Claude Code's `!` prefix can drive it. Run it in a real
+  terminal and press Enter on "Publish now".
+
+Verify (prompts for the npub):
+
+```bash
+zsp identity --verify dist/v<version>/fips-android-v<version>-universal.apk
+```
+
+Expect `Cert hash match: YES`, `Status: ACTIVE`, `Signature: VALID`.
+
+## Gotchas worth remembering
+
+- **Do not reinstall or force-stop the app while the VPN is connected** — it
+  can leak netd routing rules that block other apps' connectivity until
+  reboot. Disconnect first.
+- **Installing a release over a debug build (or vice versa) needs an
+  uninstall** — different signing keys — which **wipes the mesh identity**,
+  since the nsec is sealed by a non-exportable Keystore key. Since 0.3 this is
+  survivable if planned: Overview → **Back up** reveals the nsec, **Restore**
+  takes it back. There is no recovery from a build already uninstalled. Check
+  what is installed (`adb shell dumpsys package org.fips.android`) and compare
+  signers (`apksigner verify --print-certs`) first.
+- **`armeabi-v7a` is the build most likely to break on a fips pin bump**
+  (32-bit pointer-width casts). CI covers it; look at the result.
+- Only `arm64-v8a` is device-verified. `x86_64` is emulator-verified,
+  `armeabi-v7a` has never run on real 32-bit hardware.
