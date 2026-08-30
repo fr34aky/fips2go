@@ -5,6 +5,62 @@ embedded in a `VpnService` app. Selected phone apps reach the mesh over
 `fd00::/8` with `.fips` DNS while keeping normal internet (per-app split
 tunnel with a userspace forwarder).
 
+## Screenshots
+
+| Overview | Settings | Diagnostics | Mesh apps |
+|---|---|---|---|
+| ![Overview: connected to the mesh](docs/screenshots/overview.png) | ![Settings](docs/screenshots/settings.png) | ![Diagnostics](docs/screenshots/diagnostics.png) | ![Per-app split tunnel](docs/screenshots/app-picker.png) |
+
+<sub>Captured on the x86_64 emulator, joined to the live public mesh.</sub>
+
+## Features
+
+Beyond running a fips node on the phone, the app is what makes that node
+usable on a device you also use for everything else.
+
+- **Per-app split tunnel.** You pick which apps reach the mesh. Those apps get
+  the mesh **and** normal internet — clearnet traffic rides a userspace
+  forwarder on sockets protected from the tunnel — and every other app on the
+  phone is untouched. With nothing selected the tunnel captures only fips2go
+  itself, so it does nothing.
+- **`.fips` names just resolve.** Covered apps' DNS is intercepted in-process:
+  `.fips` names are answered by the built-in resolver, everything else goes to
+  your normal upstreams. A `.fips` hostname works in the browser with nothing
+  to configure.
+- **Default-deny inbound firewall.** Any authorized node on the mesh can
+  otherwise reach any port your selected apps listen on, as if you had joined
+  a shared LAN. Only replies to connections the phone opened, ICMPv6, and an
+  explicit port allowlist get through; blocked ports show up in the log.
+- **Identity sealed by the Android Keystore, with backup and restore.** The
+  node's secret key is encrypted with a non-exportable Keystore key. Overview
+  can reveal it for backup (clipboard flagged sensitive) and take it back
+  afterwards — the only way an identity survives an uninstall, since the
+  Keystore key dies with the app.
+- **FIPS Hotspot.** While connected, the app auto-joins any open Wi-Fi named
+  `!FIPS`, anywhere, to reach fips peers on it — your internet stays on your
+  normal network. On dual-Wi-Fi phones it joins as a *second*, local-only
+  connection without giving up the Wi-Fi you are already on.
+- **LAN discovery (mDNS).** Finds fips peers on your Wi-Fi and dials them
+  directly, with no relay or mesh hop. The tunnel's own addresses are kept out
+  of the adverts, so the mesh ULA is never broadcast on the LAN.
+- **Survives network changes.** Wi-Fi↔cellular hand-over is coalesced into a
+  single node restart, and the mesh comes back in ~20 s with no manual
+  reconnect — including on IPv4-only CGNAT mobile networks, where extra probe
+  routes keep AAAA lookups (and so `.fips` names) resolving.
+- **Diagnostics that answer the real questions.** Resolve or ping an npub,
+  live peer sessions with byte counts, nearby mDNS sightings, and a log viewer
+  you can expand and copy.
+- **In-app updates.** Checks GitHub Releases, downloads the APK matching your
+  device's ABI, verifies it against the release's sha256, and hands it to the
+  system installer — which enforces the release signing key and refuses while
+  the VPN is up. Identity and settings survive.
+- **Zero-config first run.** A fresh install connects without opening
+  Settings: a bootstrap peer and working defaults are seeded on first launch.
+  This also covers always-on VPN, where the service starts with no UI at all.
+- **Battery-aware.** A saver profile relaxes the maintenance tick and halves
+  heartbeats, measured at ~40% less idle CPU; the packet pump idles at
+  essentially zero wakeups.
+
 Standalone repo — it depends on fips as a pinned **git dependency**
 (`fr34aky/fips` @ `android-hooks`, which carries the small embedder hooks:
 socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`,
