@@ -1,0 +1,152 @@
+# Build and test on every push and PR.
+#
+# Exists to enforce two rules CLAUDE.md currently states but nothing checks:
+# the fips pin must stay in sync across both manifests and both lockfiles, and
+# all three ABIs must build — armeabi-v7a especially, which is the one most
+# likely to break on a pin bump (32-bit pointer-width casts) and the one a
+# human is least likely to remember to build.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Cheap guards + the host test suite. Runs in a couple of minutes and
+  # catches the pin-desync class of mistake before the slow job even starts.
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: fips pin is in sync across manifests and lockfiles
+        run: |
+          set -euo pipefail
+          rev_of() { grep -oP 'fips = \{ git = "[^"]+", rev = "\K[^"]+' "$1"; }
+          shim=$(rev_of shim/Cargo.toml)
+          smoke=$(rev_of smoke/Cargo.toml)
+          echo "shim/Cargo.toml   rev = $shim"
+          echo "smoke/Cargo.toml  rev = $smoke"
+          if [ "$shim" != "$smoke" ]; then
+            echo "::error::fips rev differs between shim/ and smoke/ Cargo.toml ($shim vs $smoke)"
+            exit 1
+          fi
+          # A bumped Cargo.toml with a stale Cargo.lock builds the OLD fips.
+          for lock in shim/Cargo.lock smoke/Cargo.lock; do
+            if ! grep -q "rev=$shim#" "$lock"; then
+              echo "::error::$lock does not reference rev $shim — run cargo update -p fips"
+              exit 1
+            fi
+            echo "$lock OK"
+          done
+
+      - name: ABI list is in sync across the three places that define it
+        run: |
+          set -euo pipefail
+          # build-native.sh, rust-toolchain.toml and the debug abiFilters must
+          # agree, or an ABI silently stops being built or packaged.
+          from_script=$(grep -oP '^\s+\S+:\K[a-z0-9_-]+' build-native.sh | sort -u)
+          from_gradle=$(grep -oP 'abiFilters \+= listOf\(\K[^)]+' \
+            android/app/build.gradle.kts | tr -d '" ' | tr ',' '\n' | sort -u)
+          echo "build-native.sh : $(echo $from_script)"
+          echo "abiFilters      : $(echo $from_gradle)"
+          [ "$from_script" = "$from_gradle" ] || {
+            echo "::error::ABI list differs between build-native.sh and debug abiFilters"; exit 1; }
+
+      - name: Install libclang (bindgen, via rustables in the host build)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-toolchain.toml pins the real version; this just ensures rustup
+          # is present so it can honour the pin.
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shim -> target
+
+      - name: Host tests (engine, DNS, packet codecs, filter, config)
+        run: |
+          set -euo pipefail
+          export FIPS_LIBCLANG_PATH=$(llvm-config --libdir 2>/dev/null || echo /usr/lib/llvm-18/lib)
+          source ./android-env.sh
+          cd shim && cargo test --locked
+
+  # The slow one: cross-compile every ABI, then package them into the APK.
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK r27c
+        run: |
+          set -euo pipefail
+          sdkmanager --install "ndk;27.2.12479018" "platforms;android-34" "build-tools;34.0.0"
+          echo "FIPS_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shim -> target
+
+      # Builds all three ABIs and drops the .so files into jniLibs. armeabi-v7a
+      # is the point of the exercise: it is 32-bit and breaks on pointer-width
+      # casts that the 64-bit targets accept.
+      - name: Build the shim for every ABI
+        run: ./build-native.sh
+
+      - name: Verify page alignment per ABI
+        run: |
+          set -euo pipefail
+          source ./android-env.sh
+          for abi in arm64-v8a x86_64; do
+            got=$("$NDK_BIN/llvm-readelf" -l "android/app/src/main/jniLibs/$abi/libfips_android.so" \
+              | awk '/LOAD/ {print $NF}' | sort -u)
+            echo "$abi LOAD alignment: $got"
+            [ "$got" = "0x4000" ] || { echo "::error::$abi must be 16 KB aligned"; exit 1; }
+          done
+          got=$("$NDK_BIN/llvm-readelf" -l android/app/src/main/jniLibs/armeabi-v7a/libfips_android.so \
+            | awk '/LOAD/ {print $NF}' | sort -u)
+          echo "armeabi-v7a LOAD alignment: $got"
+          [ "$got" = "0x1000" ] || { echo "::error::armeabi-v7a must stay 4 KB aligned"; exit 1; }
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Assemble the debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - name: Confirm every ABI made it into the APK
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            unzip -l "$apk" | grep -q "lib/$abi/libfips_android.so" \
+              || { echo "::error::$abi missing from the debug APK"; exit 1; }
+            echo "$abi packaged"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
