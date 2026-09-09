@@ -150,6 +150,13 @@ pub extern "system" fn Java_org_fips_android_FipsNative_onNetworkChanged(
     });
 }
 
+/// `networkHint()`: wake the medium-change detector now (see
+/// [`crate::engine::network_hint`]). Non-blocking; no-op when not running.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_fips_android_FipsNative_networkHint(_env: JNIEnv, _class: JClass) {
+    let _ = std::panic::catch_unwind(crate::engine::network_hint);
+}
+
 /// `status()` → JSON (see [`crate::engine::status_json`]).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_status(

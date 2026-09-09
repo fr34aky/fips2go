@@ -769,7 +769,8 @@ class FipsVpnService : VpnService() {
         // sending through a connect()-ed socket pinned to our old address.
         // Peers on older fips builds still show that black hole until their
         // link-dead timeout; the fix for them is upgrading, not restarting
-        // here. What still needs a rebind: the `::/0` route decision flipping
+        // here. FipsNative.networkHint() below wakes the detector at once,
+        // since its kernel event source is refused inside the app sandbox. What still needs a rebind: the `::/0` route decision flipping
         // (the tunnel must be re-established on a new fd) and the FIPS
         // Hotspot joining or leaving (a transport is added or removed —
         // onHotspotJoined/onHotspotLost call rebindNode themselves).
@@ -787,10 +788,17 @@ class FipsVpnService : VpnService() {
                 )
                 rebindNode()
             }
-            previous != network -> Log.i(
-                TAG,
-                "underlying network changed $previous -> $network (ipv6=$wantIpv6); node keeps running, netmon re-pins peers"
-            )
+            previous != network -> {
+                Log.i(
+                    TAG,
+                    "underlying network changed $previous -> $network (ipv6=$wantIpv6); node keeps running, netmon re-pins peers"
+                )
+                // The detector's kernel event source is denied to apps, so
+                // without this it would notice at its next 5 s poll; we know
+                // the moment, so say so. A hand-over burst yields several
+                // pokes; they coalesce on the node side.
+                FipsNative.networkHint()
+            }
             else -> {} // capability/link tick on the same network, same routes
         }
     }
