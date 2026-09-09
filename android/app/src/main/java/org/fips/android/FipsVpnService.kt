@@ -60,7 +60,9 @@ class FipsVpnService : VpnService() {
         private const val TUN_IPV4 = "10.111.222.1"
         // A Wi-Fi ↔ cellular hand-over emits a burst of network callbacks over
         // several seconds; wait this long before rebinding so one node restart
-        // serves the whole burst.
+        // serves the whole burst. Only route flips and hotspot transitions
+        // rebind any more (see onUnderlyingNetwork), but those ride the same
+        // burst.
         private const val REBIND_SETTLE_MS = 1500L
         // FIPS Hotspot: an open AP other fips nodes run (e.g. an offline mesh
         // island). Auto-joined while the toggle is armed — via suggestion
@@ -695,7 +697,7 @@ class FipsVpnService : VpnService() {
                 // Validation (NET_CAPABILITY_VALIDATED) arrives here — the
                 // moment the system actually moves its default network during
                 // a hand-over. Cheap when nothing relevant changed:
-                // onUnderlyingNetwork only rebinds on a real decision flip.
+                // onUnderlyingNetwork only rebinds on an IPv6-route flip.
                 updateUnderlying()
             }
         }
@@ -754,6 +756,23 @@ class FipsVpnService : VpnService() {
         currentUnderlying = network
         updateMulticastLock(network)
         val wantIpv6 = hasIpv6Internet(network)
+        // The node itself is NOT restarted for a plain underlying-network
+        // change any more. Its underlay sockets are protected wildcard
+        // sockets, which the kernel routes per packet over whatever the
+        // system default network is now, and fips's medium-change detector
+        // (node.netmon.*, on by default since the v0.5.1+ pin) notices the
+        // moved source address and heartbeats the affected peers at once so
+        // the far side re-pins — sessions, tree position and routes survive
+        // the hand-over. The restart that used to live here (~1–2 s of mesh
+        // outage plus a full re-handshake, see PHASE3-NOTES.md) papered over
+        // a peer-side bug that fips fixed in the same series: a peer kept
+        // sending through a connect()-ed socket pinned to our old address.
+        // Peers on older fips builds still show that black hole until their
+        // link-dead timeout; the fix for them is upgrading, not restarting
+        // here. What still needs a rebind: the `::/0` route decision flipping
+        // (the tunnel must be re-established on a new fd) and the FIPS
+        // Hotspot joining or leaving (a transport is added or removed —
+        // onHotspotJoined/onHotspotLost call rebindNode themselves).
         when {
             previous == null -> {
                 Log.i(TAG, "baseline underlying network: $network, ipv6=$wantIpv6")
@@ -761,25 +780,32 @@ class FipsVpnService : VpnService() {
                 // callback baseline; fix the routes if that guess was wrong.
                 if (wantIpv6 != tunnelHasIpv6Clearnet) rebindNode()
             }
-            previous == network && wantIpv6 == tunnelHasIpv6Clearnet -> {} // nothing to rebuild
-            else -> {
+            wantIpv6 != tunnelHasIpv6Clearnet -> {
                 Log.i(
                     TAG,
-                    "underlying network changed $previous -> $network (ipv6=$wantIpv6); rebinding node"
+                    "underlying network $previous -> $network flipped ipv6 to $wantIpv6; rebinding node"
                 )
                 rebindNode()
             }
+            previous != network -> Log.i(
+                TAG,
+                "underlying network changed $previous -> $network (ipv6=$wantIpv6); node keeps running, netmon re-pins peers"
+            )
+            else -> {} // capability/link tick on the same network, same routes
         }
     }
 
     /**
-     * Request a node restart so its underlay sockets rebind on the current
-     * network. A restart takes seconds while a hand-over emits callbacks for
-     * many more, so requests are queued on [rebindRequested] and served by a
-     * single worker that re-checks after every pass — the last callback in a
-     * burst always results in a rebind against final network state (the old
-     * drop-when-busy guard lost it, leaving the node bound to a dead network
-     * until a manual reconnect).
+     * Request a node restart: needed when the tunnel must be re-established
+     * on a new fd (the `::/0` route decision flipped) or the transport set
+     * changed (FIPS Hotspot joined/left) — never for a plain underlying-
+     * network switch, which the node absorbs on its own (see
+     * onUnderlyingNetwork). A restart takes seconds while a hand-over emits
+     * callbacks for many more, so requests are queued on [rebindRequested]
+     * and served by a single worker that re-checks after every pass — the
+     * last callback in a burst always results in a rebind against final
+     * network state (the old drop-when-busy guard lost it, leaving the node
+     * bound to a dead network until a manual reconnect).
      */
     private fun rebindNode() {
         rebindRequested.set(true)
