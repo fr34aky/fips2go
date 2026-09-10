@@ -92,6 +92,9 @@ struct Engine {
     /// underlay socket on the new network) on the same TUN fd.
     config_json: String,
     protect: Option<fips::SocketProtect>,
+    /// Wakes the node's medium-change detector (`node.netmon.*`) — see
+    /// [`network_hint`]. Per node: refreshed on every (re)start.
+    netmon: fips::NetmonTrigger,
 }
 
 /// What `start()` reports back to Kotlin.
@@ -169,6 +172,7 @@ fn start_inner(
     }
     let read_handle = node.control_read_handle();
     let cmd_handle = node.control_command_handle();
+    let netmon = node.netmon_trigger();
 
     // Node thread: current-thread runtime, same shape as the fips binary.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -309,6 +313,7 @@ fn start_inner(
         tun_fd: owned_fd,
         config_json: config_json.to_string(),
         protect: engine_protect,
+        netmon,
     };
     Ok((engine, StartInfo { npub, address }))
 }
@@ -395,6 +400,24 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
         tracing::error!(error = %e, "node rebuild after network change failed");
     }
     result
+}
+
+/// Wake the node's medium-change detector now: Kotlin calls this from the
+/// `ConnectivityManager` callback when the underlying network changed but
+/// nothing needs a rebind (same `::/0` decision, no hotspot transition).
+///
+/// The detector's own kernel event source is refused to an app on Android
+/// (the netlink group bind fails under the app SELinux policy, observed on a
+/// Pixel 9 Pro: "Kernel medium-change events unavailable; falling back to
+/// polling"), which leaves it on a 5 s poll. `ConnectivityManager` knows the
+/// exact moment the default network moved, so this turns a poll-period
+/// latency into a debounce-period one. Cheap and non-blocking (a `Notify`
+/// permit); safe on the main thread. No-op when not running.
+pub fn network_hint() {
+    let slot = ENGINE.lock().unwrap();
+    if let Some(engine) = slot.as_ref() {
+        engine.netmon.poke();
+    }
 }
 
 /// Compact status JSON for the UI. Always answers, running or not.
@@ -514,6 +537,10 @@ mod tests {
                 status["status"].is_object(),
                 "show_status snapshot present: {status}"
             );
+
+            // The netmon hint must be callable at any time without effect on
+            // the lifecycle (a poke is a `Notify` permit, nothing more).
+            network_hint();
 
             let peers = query_json("show_stats_list", "");
             let peers: serde_json::Value = serde_json::from_str(&peers).unwrap();

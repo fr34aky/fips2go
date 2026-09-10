@@ -46,6 +46,15 @@ object FipsNative {
      */
     external fun onNetworkChanged(tunFd: Int, configJson: String)
 
+    /**
+     * Tell the running node the underlying network moved when nothing needs
+     * a rebind: wakes its medium-change detector so it re-probes every peer
+     * now instead of at its next 5 s poll (the kernel event source it would
+     * use is denied to apps). Non-blocking; fine on the main thread. No-op if
+     * the engine isn't running.
+     */
+    external fun networkHint()
+
     /** Compact status JSON: `{running, npub, address, status: {...}}`. */
     external fun status(): String
 

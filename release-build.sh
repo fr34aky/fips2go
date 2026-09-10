@@ -24,6 +24,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ./android-env.sh
 export JAVA_HOME=$HOME/.local/jdk-17
+# apksigner is a shell wrapper that execs `java` from PATH, not JAVA_HOME.
+export PATH="$JAVA_HOME/bin:$PATH"
 SDK_DIR=$(sed -n 's/^sdk.dir=//p' android/local.properties)
 BUILD_TOOLS=$(ls -d "$SDK_DIR"/build-tools/* | sort -V | tail -1)
 

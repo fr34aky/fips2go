@@ -7,7 +7,7 @@ only — build tools and proc-macros do not ship in the binary).
 
 ## fips
 
-[fips](https://github.com/jmcorgan/fips) v0.5.0-dev — MIT License,
+[fips](https://github.com/jmcorgan/fips) v0.6.0-dev — MIT License,
 Copyright (c) Johnathan Corgan. The mesh daemon this app embeds (via the
 `fr34aky/fips` fork, branch `android-hooks`, which adds the embedder hooks
 under the same license).
@@ -41,10 +41,12 @@ crates.io per MPL §3.2(b).
 | atomic-destructor | 0.3.0 | MIT |
 | base64 | 0.22.1 | MIT OR Apache-2.0 |
 | bech32 | 0.11.1 | MIT |
+| bech32 | 0.12.0 | MIT |
 | bitcoin-io | 0.1.101 | CC0-1.0 |
 | bitcoin_hashes | 0.14.101 | CC0-1.0 |
 | bitflags | 2.13.1 | MIT OR Apache-2.0 |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 |
+| block-buffer | 0.12.1 | MIT OR Apache-2.0 |
 | block-padding | 0.3.3 | MIT OR Apache-2.0 |
 | bytes | 1.12.1 | MIT |
 | castaway | 0.2.4 | MIT |
@@ -56,22 +58,28 @@ crates.io per MPL §3.2(b).
 | clap | 4.6.6 | MIT OR Apache-2.0 |
 | clap_builder | 4.6.6 | MIT OR Apache-2.0 |
 | clap_lex | 1.1.0 | MIT OR Apache-2.0 |
+| cmov | 0.5.4 | Apache-2.0 OR MIT |
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 |
 | combine | 4.6.7 | MIT |
 | compact_str | 0.9.1 | MIT |
+| const-oid | 0.10.2 | Apache-2.0 OR MIT |
 | convert_case | 0.10.0 | MIT |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 |
+| cpufeatures | 0.3.0 | MIT OR Apache-2.0 |
 | critical-section | 1.2.0 | MIT OR Apache-2.0 |
 | crossbeam-channel | 0.5.16 | MIT OR Apache-2.0 |
 | crossbeam-utils | 0.8.22 | MIT OR Apache-2.0 |
 | crossterm | 0.29.0 | MIT |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 |
+| crypto-common | 0.2.2 | MIT OR Apache-2.0 |
+| ctutils | 0.4.2 | Apache-2.0 OR MIT |
 | darling | 0.24.0 | MIT |
 | darling_core | 0.24.0 | MIT |
 | data-encoding | 2.11.1 | MIT |
 | deranged | 0.5.8 | MIT OR Apache-2.0 |
 | derive_more | 2.1.1 | MIT |
 | digest | 0.10.7 | MIT OR Apache-2.0 |
+| digest | 0.11.3 | MIT OR Apache-2.0 |
 | dirs | 6.0.0 | MIT OR Apache-2.0 |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 |
 | either | 1.17.0 | MIT OR Apache-2.0 |
@@ -79,7 +87,7 @@ crates.io per MPL §3.2(b).
 | errno | 0.3.14 | MIT OR Apache-2.0 |
 | etherparse | 0.20.3 | MIT OR Apache-2.0 |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT |
-| flume | 0.11.1 | Apache-2.0/MIT |
+| flume | 0.12.0 | Apache-2.0/MIT |
 | foldhash | 0.2.0 | Zlib |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 |
 | futures | 0.3.33 | MIT OR Apache-2.0 |
@@ -99,10 +107,11 @@ crates.io per MPL §3.2(b).
 | heck | 0.5.0 | MIT OR Apache-2.0 |
 | hex | 0.4.3 | MIT OR Apache-2.0 |
 | hex-conservative | 0.2.2 | CC0-1.0 |
-| hkdf | 0.12.4 | MIT OR Apache-2.0 |
-| hmac | 0.12.1 | MIT OR Apache-2.0 |
+| hkdf | 0.13.0 | MIT OR Apache-2.0 |
+| hmac | 0.13.0 | MIT OR Apache-2.0 |
 | http | 1.5.0 | MIT OR Apache-2.0 |
 | httparse | 1.10.1 | MIT OR Apache-2.0 |
+| hybrid-array | 0.4.15 | MIT OR Apache-2.0 |
 | icu_collections | 2.2.0 | Unicode-3.0 |
 | icu_locale_core | 2.2.0 | Unicode-3.0 |
 | icu_normalizer | 2.2.0 | Unicode-3.0 |
@@ -136,7 +145,7 @@ crates.io per MPL §3.2(b).
 | lru | 0.16.4 | MIT |
 | lru | 0.18.2 | MIT |
 | matchers | 0.2.0 | MIT |
-| mdns-sd | 0.19.2 | Apache-2.0 OR MIT |
+| mdns-sd | 0.20.3 | Apache-2.0 OR MIT |
 | memchr | 2.8.3 | Unlicense OR MIT |
 | mio | 1.2.2 | MIT |
 | negentropy | 0.5.0 | MIT |
@@ -191,7 +200,7 @@ crates.io per MPL §3.2(b).
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
 | serde_yaml | 0.9.34+deprecated | MIT OR Apache-2.0 |
 | sha1 | 0.10.7 | MIT OR Apache-2.0 |
-| sha2 | 0.10.9 | MIT OR Apache-2.0 |
+| sha2 | 0.11.0 | MIT OR Apache-2.0 |
 | sharded-slab | 0.1.7 | MIT |
 | signal-hook | 0.3.18 | Apache-2.0/MIT |
 | signal-hook-mio | 0.2.5 | MIT OR Apache-2.0 |
@@ -199,7 +208,7 @@ crates.io per MPL §3.2(b).
 | simple-dns | 0.11.3 | MIT |
 | slab | 0.4.12 | MIT |
 | smallvec | 1.15.2 | MIT OR Apache-2.0 |
-| socket-pktinfo | 0.3.2 | MIT |
+| socket-pktinfo | 0.4.1 | MIT |
 | socket2 | 0.6.5 | MIT OR Apache-2.0 |
 | spin | 0.9.9 | MIT |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 |
