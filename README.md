@@ -43,10 +43,15 @@ usable on a device you also use for everything else.
 - **LAN discovery (mDNS).** Finds fips peers on your Wi-Fi and dials them
   directly, with no relay or mesh hop. The tunnel's own addresses are kept out
   of the adverts, so the mesh ULA is never broadcast on the LAN.
-- **Survives network changes.** Wi-Fi↔cellular hand-over is coalesced into a
-  single node restart, and the mesh comes back in ~20 s with no manual
-  reconnect — including on IPv4-only CGNAT mobile networks, where extra probe
-  routes keep AAAA lookups (and so `.fips` names) resolving.
+- **Survives network changes.** A Wi-Fi↔cellular hand-over keeps the node
+  running: sessions, tree position and routes are all kept, and the peers
+  whose path moved are re-pinned within about half a second of Android
+  reporting the new network (the service pokes fips's medium-change detector
+  the moment the callback fires). No restart, no manual reconnect — including
+  on IPv4-only CGNAT mobile networks, where extra probe routes keep AAAA
+  lookups (and so `.fips` names) resolving. Only two cases still restart the
+  node: an underlay whose IPv6 status differs from the last one, and a FIPS
+  Hotspot joining or leaving.
 - **Diagnostics that answer the real questions.** Resolve or ping an npub,
   live peer sessions with byte counts, nearby mDNS sightings, and a log viewer
   you can expand and copy.
@@ -62,11 +67,12 @@ usable on a device you also use for everything else.
   essentially zero wakeups.
 
 Standalone repo — it depends on fips as a pinned **git dependency**
-(`fr34aky/fips` @ `android-hooks`, which carries the small embedder hooks:
-socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`,
-`ControlCommandHandle` for socket-less connect/disconnect, and the
-`show_lan_peers` mDNS-sightings query), so it clones and builds without a
-sibling fips checkout.
+(`fr34aky/fips` @ `android-hooks`, upstream v0.5.1+ plus the small embedder
+hooks: socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`,
+`ControlCommandHandle` for socket-less connect/disconnect, the `show_lan_peers`
+mDNS-sightings query, dial-scoped UDP instances for the hotspot, and a
+`NetmonTrigger` to wake the medium-change detector), so it clones and builds
+without a sibling fips checkout.
 
 ## Layout
 
@@ -238,10 +244,11 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   connect/disconnect and joining a live ~1300-node mesh; `.fips` resolution
   and upstream DNS; per-app split tunnel (selected apps get mesh **and**
   clearnet, other apps untouched); automatic Wi-Fi↔cellular hand-over in both
-  directions — the callback burst is coalesced into one node restart and the
-  mesh recovers in ~20 s with no manual reconnect, including on a roaming
-  IPv4-only CGNAT 5G network, with `.fips` resolution surviving past
-  Chromium's 60 s IPv6-probe window; Keystore identity
+  directions — the node stays up and both peers were re-pinned 0.5 s (to
+  LTE) and 0.3 s (back to Wi-Fi) after the network callback, with no link
+  lost through the liveness window, including on a roaming IPv4-only CGNAT
+  5G network, with `.fips` resolution surviving past Chromium's 60 s
+  IPv6-probe window; Keystore identity
   + regenerate; the Material 3 UI (Overview / Settings / Diagnostics), npub
   resolve, and the log viewer; the battery profile (relaxed timers). Also
   unit-tested on the host (engine lifecycle, DNS proxy, packet codecs) and
