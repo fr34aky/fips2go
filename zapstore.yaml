@@ -14,8 +14,10 @@ repository: https://github.com/fr34aky/fips2go
 # The publisher's Nostr identity. relay.zapstore.dev only accepts events from
 # a pubkey it can find in this file at the repository root, so a new key is
 # allowlisted by committing it here. The nsec lives outside the repo (see
-# RELEASING.md step 5). Rotated 2026-09-10; the previous key was lost.
-pubkey: npub1q697zgclkyz9dztp9zt3mzctwgxvxnqj69u52sqrjvzmyxpaz6gsyrxvrw
+# RELEASING.md step 5). This is the key that has published every release so
+# far; the relay also enforces one publisher per app id, so changing it means
+# asking the Zapstore team to reassign the app (see RELEASING.md).
+pubkey: npub1yptpz34agws3z95dqxgvyhwnhkulav5vueryjpzrl32p57euwteqwha52w
 website: https://github.com/fr34aky/fips2go
 license: MIT
 
