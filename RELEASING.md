@@ -155,8 +155,10 @@ would land in shell history and `ps`. `$(cat ~/.zsp-nsec)` in the commands
 below keeps it out of `argv`. (A `bunker://` URI in the same file works too,
 if you run a remote signer.)
 
-If the key is ever lost (it was, 2026-09-10): generate a new one, commit its
-npub as `pubkey:` in `zapstore.yaml` — the relay fetches that file from the
+If the key is ever lost (it was thought to be, 2026-09-10 — a new key was
+generated, allowlisted and cert-linked before the old one turned up, and the
+relay's ownership rule below is what made that a dead end): generate a new
+one, commit its npub as `pubkey:` in `zapstore.yaml` — the relay fetches that file from the
 repo to allowlist the key, so until it is on `main` every publish fails with
 `event pubkey is not allowed` — then redo the one-time certificate link at the
 bottom of this document. Earlier releases stay under the old pubkey; Zapstore
@@ -262,8 +264,8 @@ if it was ever exposed — an ignore rule does not undo exposure.
 ## One-time: link the signing certificate
 
 Only needed when the **signing key changes** or the proof expires. The current
-proof (kind 30509, from npub `…xpaz6gsyrxvrw`, 2026-09-10) covers cert
-`aa905e32…a7a8e1` until **2028-09-09**; every release signed with that key is
+proof (kind 30509, from the publisher npub `…wha52w`) covers cert
+`aa905e32…a7a8e1` until **2027-08-30**; every release signed with that key is
 covered, so this is not a per-release step.
 
 ```bash
@@ -296,7 +298,7 @@ Two traps:
 Verify (prompts for the npub; pipe it in for a non-interactive run):
 
 ```bash
-printf '%s\n' npub1q697zgclkyz9dztp9zt3mzctwgxvxnqj69u52sqrjvzmyxpaz6gsyrxvrw \
+printf '%s\n' npub1yptpz34agws3z95dqxgvyhwnhkulav5vueryjpzrl32p57euwteqwha52w \
   | zsp identity --verify dist/v<version>/fips-android-v<version>-universal.apk
 ```
 
