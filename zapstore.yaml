@@ -11,6 +11,11 @@
 # zsp extracting it from the APK gives a better result than either layer.
 
 repository: https://github.com/fr34aky/fips2go
+# The publisher's Nostr identity. relay.zapstore.dev only accepts events from
+# a pubkey it can find in this file at the repository root, so a new key is
+# allowlisted by committing it here. The nsec lives outside the repo (see
+# RELEASING.md step 5). Rotated 2026-09-10; the previous key was lost.
+pubkey: npub1q697zgclkyz9dztp9zt3mzctwgxvxnqj69u52sqrjvzmyxpaz6gsyrxvrw
 website: https://github.com/fr34aky/fips2go
 license: MIT
 
@@ -44,8 +49,8 @@ description: |
     peers, while your internet stays on your normal network.
   - **LAN discovery (mDNS).** Finds peers on your Wi-Fi and dials them
     directly, with no relay hop.
-  - **Survives network changes.** Wi-Fi to cellular hand-over recovers in about
-    20 seconds with no manual reconnect.
+  - **Survives network changes.** A Wi-Fi to cellular hand-over keeps every
+    session and route; peers are re-pinned within a second, no reconnect.
   - **Diagnostics.** Resolve or ping an npub, inspect live peer sessions, and
     read the node log.
 
