@@ -162,6 +162,16 @@ repo to allowlist the key, so until it is on `main` every publish fails with
 bottom of this document. Earlier releases stay under the old pubkey; Zapstore
 users see the app as a new publisher.
 
+The allowlist is only the first gate. The relay also enforces **one publisher
+per app id**: a kind-32267 app event whose `d` tag (`org.fips.android`) is
+already held by a different pubkey is refused with `another pubkey has already
+published an app with the same 'd' tag identifier`, and nothing on our side
+can clear that — the relay's own code only lets a developer reclaim an app
+from Zapstore's *indexer* key, not from another developer key. The old app
+event has to be deleted or transferred by the Zapstore team (open an issue on
+`zapstore/relay`, naming the app id, the old npub and the new one). Until
+then `zsp publish` fails on `software_application` and publishes nothing.
+
 ```bash
 umask 077
 hex=$(nak key generate)
