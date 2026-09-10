@@ -40,8 +40,8 @@ The updater compares dotted numerics, so differing segment counts (`0.2` vs
 | Signing keystore | `~/.android-keys/fips-android-release.keystore`, referenced by gitignored `android/keystore.properties` |
 | Toolchain | Rust 1.94.1, NDK r27c, JDK 17, Gradle 8.7, SDK platform-34 |
 | GitHub CLI | `gh auth status` — needs `repo` scope |
-| Zapstore CLI | `zsp` (`~/go/bin/zsp`; on PATH via `~/.profile`) |
-| Nostr signer | A `bunker://` URI, browser extension, or nsec — see step 6 |
+| Zapstore CLI | `zsp` (`~/go/bin/zsp`; on PATH via `~/.profile`). Prebuilt: `gh release download -R zapstore/zsp -p 'zsp-*-linux-amd64' -O ~/go/bin/zsp` |
+| Nostr signer | The publisher nsec in `~/.zsp-nsec` (mode 600) — see step 5. `nak` (`~/go/bin/nak`, prebuilt from `fiatjaf/nak`) for the identity link and relay checks |
 
 Without `keystore.properties` the APKs come out **unsigned**, which the script
 does not treat as fatal. Check the signature output in step 2.
@@ -78,7 +78,7 @@ Confirm before going further:
 cd dist/v<version> && sha256sum -c *.sha256
 
 # aapt2 is not on PATH; it lives in the SDK build-tools
-BT=$(ls -d ~/Android/Sdk/build-tools/* | sort -V | tail -1)
+BT=$(ls -d "$(sed -n 's/^sdk.dir=//p' android/local.properties)"/build-tools/* | sort -V | tail -1)
 "$BT/aapt2" dump badging fips-android-v<version>-universal.apk \
   | grep -E "versionCode|native-code"
 ```
@@ -145,16 +145,29 @@ reading the update prompt knows it is optional.
 release and pins the universal APK via `match: '.*-universal\.apk$'`. It needs
 no edit per release.
 
-Signing needs a Nostr key. **Do not paste a `bunker://` URI into a shared
-session or a shell command** — it carries a live secret token, and it would
-land in shell history and `ps`. Write it to a file:
+Signing needs a Nostr key: the publisher nsec, kept in `~/.zsp-nsec` (mode
+600, one line, no newline needed). **That file is the identity, not a
+session token** — `relay.zapstore.dev` accepts events only from the pubkey
+declared in this repo's `zapstore.yaml`, and every published release and the
+certificate proof below hang off it. Back it up; do not shred it after a
+release. **Never paste it into a shared session or a shell command** — it
+would land in shell history and `ps`. `$(cat ~/.zsp-nsec)` in the commands
+below keeps it out of `argv`. (A `bunker://` URI in the same file works too,
+if you run a remote signer.)
+
+If the key is ever lost (it was, 2026-09-10): generate a new one, commit its
+npub as `pubkey:` in `zapstore.yaml` — the relay fetches that file from the
+repo to allowlist the key, so until it is on `main` every publish fails with
+`event pubkey is not allowed` — then redo the one-time certificate link at the
+bottom of this document. Earlier releases stay under the old pubkey; Zapstore
+users see the app as a new publisher.
 
 ```bash
 umask 077
-printf '%s' 'bunker://...' > ~/.zsp-bunker
+hex=$(nak key generate)
+printf '%s' "$(nak encode nsec "$hex")" > ~/.zsp-nsec
+nak key public "$hex" | nak encode npub        # → the pubkey: line
 ```
-
-`$(cat ~/.zsp-bunker)` in the command below keeps it out of `argv`.
 
 `/.env` and `/signing-crt_*.txt` are gitignored because zsp's own flows leave
 credentials there.
@@ -162,8 +175,8 @@ credentials there.
 ## 6. Publish to Zapstore
 
 ```bash
-cd $HOME/fips2go
-SIGN_WITH=$(cat ~/.zsp-bunker) zsp publish -q --skip-preview zapstore.yaml
+cd ~/fips2go
+SIGN_WITH=$(cat ~/.zsp-nsec) zsp publish -q --skip-preview zapstore.yaml
 ```
 
 `-q` auto-confirms; without it, `zsp publish` opens an interactive selector
@@ -184,6 +197,17 @@ zsp publish --check zapstore.yaml     # → {"package_id":"org.fips.android"}
 The relay is the source of truth — zapstore.dev renders its Releases panel
 client-side, so `curl`/fetch tools show "No releases found." even for
 long-published apps. Do not read anything into that.
+
+Quickest check, with `nak` (the release event is kind 30063, addressed by the
+package id; the file event it references is kind 1063):
+
+```bash
+nak req -k 30063 -i org.fips.android --limit 3 wss://relay.zapstore.dev \
+  | python3 -c "import json,sys; [print([t for t in json.loads(l)['tags'] if t[0] in ('d','e')]) for l in sys.stdin]"
+nak req --id <e-tag> wss://relay.zapstore.dev    # → filename, x (sha256), size, version_code
+```
+
+Or the longer script below, which walks the same events:
 
 ```python
 # python3 - <<'PY'   (needs the `websockets` package)
@@ -220,25 +244,31 @@ event's `x` (sha256) and `size` match `dist/v<version>/` exactly.
 
 ## 8. Clean up
 
-```bash
-shred -u ~/.zsp-bunker
-```
-
-Keep it only if you deliberately want it for next time. Rotate the bunker
-secret if it was ever exposed — an ignore rule does not undo exposure.
+Nothing to shred: `~/.zsp-nsec` is the publisher identity and stays (step 5).
+`zsp`'s own flows can leave `/.env` and `/signing-crt_*.txt` in the repo; both
+are gitignored, but check `git status` before the next commit. Rotate the key
+if it was ever exposed — an ignore rule does not undo exposure.
 
 ## One-time: link the signing certificate
 
 Only needed when the **signing key changes** or the proof expires. The current
-proof covers cert `aa905e32…6986cf` until **2027-08-30**; every release signed
-with that key is covered, so this is not a per-release step.
+proof (kind 30509, from npub `…xpaz6gsyrxvrw`, 2026-09-10) covers cert
+`aa905e32…a7a8e1` until **2028-09-09**; every release signed with that key is
+covered, so this is not a per-release step.
 
 ```bash
 KEYSTORE_PASSWORD=$(sed -n 's/^storePassword=//p' android/keystore.properties) \
-SIGN_WITH=$(cat ~/.zsp-bunker) \
+SIGN_WITH=$(cat ~/.zsp-nsec) \
   zsp identity --link-key ~/.android-keys/fips-android-release.p12 \
-               --key-alias fips-android
+               --key-alias fips-android --link-key-expiry 2y --offline \
+  | nak event wss://relay.primal.net wss://relay.damus.io wss://relay.zapstore.dev
 ```
+
+`--offline` prints the signed kind-30509 event instead of publishing it, and
+`nak event` publishes an already-signed event unchanged — which is what makes
+this runnable from a script or an agent session (see the second trap below).
+Two of the three relays accepting is enough; `relay.damus.io` rate-limits
+freely.
 
 Two traps:
 
@@ -249,13 +279,15 @@ Two traps:
   One already exists: `~/.android-keys/fips-android-release.p12`.
 - **`zsp identity` has no `--yes`.** Its final confirmation is a TUI selector
   needing a real TTY; `--json` and `-q` do not suppress it, and neither a
-  background shell nor Claude Code's `!` prefix can drive it. Run it in a real
-  terminal and press Enter on "Publish now".
+  background shell nor Claude Code's `!` prefix can drive it. The `--offline |
+  nak event` form above sidesteps the prompt entirely; if you drop `--offline`,
+  run it in a real terminal and press Enter on "Publish now".
 
-Verify (prompts for the npub):
+Verify (prompts for the npub; pipe it in for a non-interactive run):
 
 ```bash
-zsp identity --verify dist/v<version>/fips-android-v<version>-universal.apk
+printf '%s\n' npub1q697zgclkyz9dztp9zt3mzctwgxvxnqj69u52sqrjvzmyxpaz6gsyrxvrw \
+  | zsp identity --verify dist/v<version>/fips-android-v<version>-universal.apk
 ```
 
 Expect `Cert hash match: YES`, `Status: ACTIVE`, `Signature: VALID`.
