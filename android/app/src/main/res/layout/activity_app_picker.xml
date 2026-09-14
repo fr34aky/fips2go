@@ -19,8 +19,8 @@
         android:layout_weight="1" />
 
     <Button
-        android:id="@+id/save"
+        android:id="@+id/done"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Save" />
+        android:text="Done" />
 </LinearLayout>
