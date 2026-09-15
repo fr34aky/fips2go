@@ -26,19 +26,32 @@ import androidx.appcompat.app.AppCompatActivity
  * silently discarded the change while the rows still showed the new state —
  * the user believed an app was selected that the tunnel never captured
  * (issue #26). The bottom button now just closes the screen.
+ *
+ * The tunnel is built from this set only at connect time (`establishTunnel`),
+ * so a change made while the node is running is saved but not yet in effect.
+ * Settings says "reconnect to apply" for the same reason; the picker shows a
+ * matching hint the first time a row is toggled while connected, and keeps it
+ * up for the rest of the visit.
  */
 class AppPickerActivity : AppCompatActivity() {
 
     companion object {
         const val PREFS = "fips"
         const val KEY_MESH_APPS = "mesh_apps"
+        private const val STATE_HINT_SHOWN = "reconnect_hint_shown"
     }
 
     private data class AppEntry(val pkg: String, val label: String, val icon: Drawable)
 
+    private lateinit var reconnectHint: TextView
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_app_picker)
+        reconnectHint = findViewById(R.id.reconnect_hint)
+        if (savedInstanceState?.getBoolean(STATE_HINT_SHOWN) == true) {
+            reconnectHint.visibility = View.VISIBLE
+        }
 
         val pm = packageManager
         val entries = pm.queryIntentActivities(
@@ -75,6 +88,7 @@ class AppPickerActivity : AppCompatActivity() {
                         if (!selected.remove(e.pkg)) selected.add(e.pkg)
                         check.isChecked = e.pkg in selected
                         persist(selected)
+                        if (nodeRunning()) reconnectHint.visibility = View.VISIBLE
                     }
                     return row
                 }
@@ -83,7 +97,15 @@ class AppPickerActivity : AppCompatActivity() {
         findViewById<Button>(R.id.done).setOnClickListener { finish() }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_HINT_SHOWN, reconnectHint.visibility == View.VISIBLE)
+    }
+
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** False when the native library is unavailable, matching OverviewFragment. */
+    private fun nodeRunning() = runCatching { FipsNative.isRunning() }.getOrDefault(false)
 
     /**
      * Write the selection now. The copy is defensive: the Editor contract does not
