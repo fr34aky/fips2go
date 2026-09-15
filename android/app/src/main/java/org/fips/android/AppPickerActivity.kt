@@ -26,6 +26,13 @@ import androidx.appcompat.app.AppCompatActivity
  * silently discarded the change while the rows still showed the new state —
  * the user believed an app was selected that the tunnel never captured
  * (issue #26). The bottom button now just closes the screen.
+ *
+ * The tunnel takes this set only when it is (re-)established — at connect, or
+ * when the service rebinds on an IPv6-route flip — so a change made while the
+ * node is running is saved but not yet in effect. Settings says "reconnect to
+ * apply" for the same reason; while the node is running the picker shows a
+ * matching note above Done, recomputed on every resume rather than latched,
+ * so it disappears by itself once the user disconnects.
  */
 class AppPickerActivity : AppCompatActivity() {
 
@@ -81,6 +88,15 @@ class AppPickerActivity : AppCompatActivity() {
             }
 
         findViewById<Button>(R.id.done).setOnClickListener { finish() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-read the live fact each time, like the Overview battery card does:
+        // a disconnect from the notification while this screen is open is
+        // reflected as soon as the user comes back to it.
+        findViewById<TextView>(R.id.reconnect_hint).visibility =
+            if (FipsNative.isRunning()) View.VISIBLE else View.GONE
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
