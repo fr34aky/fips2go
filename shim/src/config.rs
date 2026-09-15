@@ -59,6 +59,21 @@ pub struct ShimConfig {
     /// STUN servers for NAT traversal. Empty → FIPS built-in defaults.
     #[serde(default)]
     pub stun_servers: Vec<String>,
+    /// Nostr relays discovered on the local network (the app browses DNS-SD
+    /// for `_nostr._tcp`), appended to the ADVERT relay set on top of
+    /// whatever it is (fips built-in defaults or [`Self::nostr_relays`]).
+    /// Deliberately not the DM set: fips publishes `dm_relays` under the
+    /// node's npub as its public inbox-relay list (kind 10050) and fans every
+    /// traversal signal to them, and a URL taken off an untrusted LAN must
+    /// neither end up in the identity's published record nor receive its
+    /// signaling. Adverts are public, self-signed documents, so a LAN relay
+    /// carrying them costs nothing. Each must be a `ws://`/`wss://` URL: a
+    /// malformed entry is dropped here with a warning instead of passed on,
+    /// because a failing `add_relay` aborts fips's whole Nostr runtime at
+    /// start. Deduplicated on `RelayUrl` equality and capped at
+    /// [`MAX_EXTRA_RELAYS`].
+    #[serde(default)]
+    pub extra_nostr_relays: Vec<String>,
     /// UDP transport bind address (e.g. "0.0.0.0:2121"). Empty → ephemeral
     /// "0.0.0.0:0" (pure-client, no fixed inbound port).
     #[serde(default)]
@@ -99,6 +114,12 @@ pub struct ShimConfig {
     #[serde(default)]
     pub fips_yaml: Option<String>,
 }
+
+/// Upper bound on LAN-discovered relays passed to the node. A relay pool
+/// entry costs a websocket plus reconnect timers; a LAN has no business
+/// offering more than a handful, and a runaway advertiser must not be able
+/// to balloon the pool.
+pub const MAX_EXTRA_RELAYS: usize = 8;
 
 /// Resolve the main and hotspot bind addresses to a shared concrete port.
 ///
@@ -328,6 +349,20 @@ impl ShimConfig {
         if !self.stun_servers.is_empty() {
             config.node.rendezvous.nostr.stun_servers = self.stun_servers.clone();
         }
+        if self.enable_nostr {
+            let advert = &mut config.node.rendezvous.nostr.advert_relays;
+            let base: Vec<nostr::RelayUrl> = advert
+                .iter()
+                .filter_map(|r| nostr::RelayUrl::parse(r).ok())
+                .collect();
+            for url in self.extra_relay_urls() {
+                if base.contains(&url) {
+                    continue;
+                }
+                tracing::info!(relay = %url, "LAN-discovered Nostr relay added to advert relays");
+                advert.push(url.to_string());
+            }
+        }
         if self.battery_saver {
             // Fewer CPU/radio wakeups on mobile; heartbeat stays < the ~30s
             // aggressive-NAT UDP timeout so mappings don't expire.
@@ -352,6 +387,40 @@ impl ShimConfig {
             .validate()
             .map_err(|e| format!("config validate: {e}"))?;
         Ok(config)
+    }
+
+    /// The [`Self::extra_nostr_relays`] that parse as relay URLs, rendered
+    /// in `RelayUrl` form, deduplicated, in input order, at most
+    /// [`MAX_EXTRA_RELAYS`]. Malformed entries are logged and skipped.
+    pub fn valid_extra_relays(&self) -> Vec<String> {
+        self.extra_relay_urls()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// [`Self::valid_extra_relays`] as parsed values. `RelayUrl` equality
+    /// ignores a trailing slash (its `Display` keeps it), so dedup happens
+    /// on the parsed value, never on the rendered string.
+    fn extra_relay_urls(&self) -> Vec<nostr::RelayUrl> {
+        let mut seen: Vec<nostr::RelayUrl> = Vec::new();
+        for raw in &self.extra_nostr_relays {
+            if seen.len() >= MAX_EXTRA_RELAYS {
+                tracing::warn!(cap = MAX_EXTRA_RELAYS, "too many LAN relays; ignoring the rest");
+                break;
+            }
+            match nostr::RelayUrl::parse(raw.trim()) {
+                Ok(url) => {
+                    if !seen.contains(&url) {
+                        seen.push(url);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(relay = %raw, error = %e, "ignoring malformed LAN relay URL");
+                }
+            }
+        }
+        seen
     }
 
     /// Parsed upstream resolver addresses (invalid entries dropped with a log).
@@ -422,6 +491,54 @@ mod tests {
         assert_eq!(excl.len(), 2);
         assert!(excl.contains(&id.address.parse().unwrap()), "own mesh ULA");
         assert!(excl.contains(&"10.111.222.1".parse().unwrap()), "TUN_IPV4");
+    }
+
+    /// LAN-discovered relays are appended to the ADVERT set only, on top of
+    /// the fips defaults (never replacing them), normalized, deduplicated
+    /// (including against a default given with a trailing slash), with
+    /// malformed ones dropped rather than handed to fips. The DM set — the
+    /// identity's published inbox list and the signaling fan-out — must not
+    /// gain anything from the LAN.
+    #[test]
+    fn extra_relays_append_to_advert_defaults_only_and_drop_bad_ones() {
+        let id = derive_identity("").unwrap();
+        let json = format!(
+            r#"{{ "nsec": "{}", "enable_nostr": true, "extra_nostr_relays": [
+                "ws://192.168.1.20:7777", "ws://192.168.1.20:7777/",
+                "http://not-a-relay", "garbage", "wss://relay.damus.io/",
+                "ws://[fd12::5]:4848"
+            ] }}"#,
+            id.nsec
+        );
+        let shim = ShimConfig::from_json(&json).unwrap();
+        assert_eq!(
+            shim.valid_extra_relays(),
+            ["ws://192.168.1.20:7777", "wss://relay.damus.io/", "ws://[fd12::5]:4848"]
+        );
+        let defaults = fips::Config::new().node.rendezvous.nostr;
+        let config = shim.to_fips_config().unwrap();
+        let nostr = &config.node.rendezvous.nostr;
+
+        assert_eq!(nostr.dm_relays, defaults.dm_relays, "DM set untouched by the LAN");
+
+        let advert = &nostr.advert_relays;
+        assert_eq!(advert.len(), defaults.advert_relays.len() + 2, "{advert:?}");
+        for d in &defaults.advert_relays {
+            assert_eq!(advert.iter().filter(|r| *r == d).count(), 1, "default {d} kept once");
+        }
+        assert!(advert.contains(&"ws://192.168.1.20:7777".to_string()), "{advert:?}");
+        assert!(advert.contains(&"ws://[fd12::5]:4848".to_string()), "{advert:?}");
+        assert!(!advert.iter().any(|r| r.contains("not-a-relay") || r == "garbage"));
+    }
+
+    #[test]
+    fn extra_relays_are_capped() {
+        let relays: Vec<String> = (0..20).map(|i| format!("ws://10.0.0.{i}:7777")).collect();
+        let shim = ShimConfig {
+            extra_nostr_relays: relays,
+            ..ShimConfig::from_json(r#"{"nsec": ""}"#).unwrap()
+        };
+        assert_eq!(shim.valid_extra_relays().len(), MAX_EXTRA_RELAYS);
     }
 
     #[test]

@@ -121,6 +121,21 @@
             android:textColor="?attr/colorOnSurfaceVariant" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/lan_relays"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingVertical="6dp"
+            android:text="Local relays (mDNS)" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="6dp"
+            android:text="Looks for Nostr relays advertised on your Wi-Fi (DNS-SD “_nostr._tcp”) and adds them to the node’s relay pool alongside the built-in public relays for peer adverts (never for your inbox-relay list or signaling), so peer discovery keeps working on a LAN without internet. A newly found relay restarts the node once (a few seconds). Connected relays are listed on the Overview page. Takes effect on the next connect."
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/hotspot"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

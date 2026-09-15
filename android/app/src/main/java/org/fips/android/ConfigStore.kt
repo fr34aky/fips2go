@@ -25,6 +25,7 @@ object ConfigStore {
     const val FORWARD_CLEARNET = "forward_clearnet"
     const val BATTERY_SAVER = "battery_saver"
     const val LAN_MDNS = "enable_lan_mdns"
+    const val LAN_RELAYS = "lan_relays"
     const val HOTSPOT = "hotspot_enabled"
     const val INBOUND_FILTER = "inbound_filter"
     const val INBOUND_PORTS = "inbound_ports"
@@ -54,6 +55,7 @@ object ConfigStore {
     const val DEF_INBOUND_FILTER = true
     const val DEF_BATTERY_SAVER = true
     const val DEF_LAN_MDNS = true
+    const val DEF_LAN_RELAYS = true
     const val DEF_HOTSPOT = true
     const val DEF_AUTO_UPDATE = true
     const val DEF_FORWARD_CLEARNET = true
@@ -124,6 +126,7 @@ object ConfigStore {
         if (!p.contains(INBOUND_FILTER)) e.putBoolean(INBOUND_FILTER, DEF_INBOUND_FILTER)
         if (!p.contains(BATTERY_SAVER)) e.putBoolean(BATTERY_SAVER, DEF_BATTERY_SAVER)
         if (!p.contains(LAN_MDNS)) e.putBoolean(LAN_MDNS, DEF_LAN_MDNS)
+        if (!p.contains(LAN_RELAYS)) e.putBoolean(LAN_RELAYS, DEF_LAN_RELAYS)
         if (!p.contains(HOTSPOT)) e.putBoolean(HOTSPOT, DEF_HOTSPOT)
         if (!p.contains(AUTO_UPDATE)) e.putBoolean(AUTO_UPDATE, DEF_AUTO_UPDATE)
         if (!p.contains(FORWARD_CLEARNET)) e.putBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET)
@@ -136,6 +139,9 @@ object ConfigStore {
     /** LAN mDNS discovery, honouring the default. */
     fun lanMdns(context: Context) = prefs(context).getBoolean(LAN_MDNS, DEF_LAN_MDNS)
 
+    /** Local Nostr relay discovery (DNS-SD `_nostr._tcp`), honouring the default. */
+    fun lanRelays(context: Context) = prefs(context).getBoolean(LAN_RELAYS, DEF_LAN_RELAYS)
+
     /** FIPS Hotspot auto-join, honouring the default. */
     fun hotspotEnabled(context: Context) = prefs(context).getBoolean(HOTSPOT, DEF_HOTSPOT)
 
@@ -144,7 +150,9 @@ object ConfigStore {
      * the shim's `ShimConfig`. [hotspotAddr]/[hotspotPrefixLen] describe our
      * interface address on a joined FIPS Hotspot ("!FIPS") network; the
      * service passes them while that local-only network is up, and the shim
-     * then runs a second dial-scoped UDP transport bound to it.
+     * then runs a second dial-scoped UDP transport bound to it. [lanRelays]
+     * are the Nostr relays discovered on the local network; the shim appends
+     * them to the fips default relay set (never replacing it).
      *
      * Fields the app no longer exposes are simply omitted, which leaves the
      * shim (and fips) on their own defaults: built-in Nostr relays and STUN
@@ -156,6 +164,7 @@ object ConfigStore {
         nsec: String,
         hotspotAddr: String? = null,
         hotspotPrefixLen: Int = 0,
+        lanRelays: Collection<String> = emptyList(),
     ): String {
         val p = prefs(context)
 
@@ -198,6 +207,10 @@ object ConfigStore {
                 "hotspot",
                 JSONObject().put("addr", hotspotAddr).put("prefix_len", hotspotPrefixLen)
             )
+        }
+
+        if (lanRelays.isNotEmpty()) {
+            config.put("extra_nostr_relays", JSONArray(lanRelays.toList()))
         }
 
         return config.toString()

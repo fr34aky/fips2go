@@ -76,12 +76,28 @@ class FipsVpnService : VpnService() {
         // off, which would leave "!FIPS" unseen for many minutes. Android
         // allows a foreground app ~4 scans per 2 minutes.
         private const val SCAN_KICK_MS = 60_000L
+        // A LAN relay sighting requests a node restart; a browse resolves
+        // its relays one at a time over a few seconds, so wait this long
+        // after the last change before asking, so one restart serves them
+        // all. Longer than REBIND_SETTLE_MS on purpose: nothing about a
+        // relay is urgent.
+        private const val RELAY_SETTLE_MS = 4_000L
 
         /**
          * UI-visible hotspot state: "addr on !FIPS" while joined, null
          * otherwise. Written only by the service.
          */
         @Volatile var hotspotStatus: String? = null
+            private set
+
+        /**
+         * UI-visible local relay discovery state: the relay URLs currently
+         * seen on the LAN via DNS-SD, and whether a browse is active (so the
+         * Overview can say "searching" vs "off"). Written only by the service.
+         */
+        @Volatile var lanRelays: Set<String> = emptySet()
+            private set
+        @Volatile var lanRelaySearching: Boolean = false
             private set
     }
 
@@ -97,6 +113,16 @@ class FipsVpnService : VpnService() {
     @Volatile private var meshAddress: String? = null
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
     @Volatile private var tunnelHasIpv6Clearnet = false
+
+    // Local Nostr relay discovery — see [startRelayDiscovery]. The browser
+    // is main-thread confined; [discoveredLanRelays] is what it currently
+    // sees, [appliedLanRelays] what the running node was last built with.
+    @Volatile private var relayDiscovery: RelayDiscovery? = null
+    @Volatile private var discoveredLanRelays: Set<String> = emptySet()
+    @Volatile private var appliedLanRelays: Set<String> = emptySet()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    /** Pending relay-triggered rebind request (debounced by RELAY_SETTLE_MS). */
+    private var relayRebind: Runnable? = null
 
     // FIPS Hotspot ("!FIPS") state — see [startHotspot] for the two join
     // paths. A specifier-joined network is local-only (no INTERNET
@@ -234,6 +260,8 @@ class FipsVpnService : VpnService() {
         tunFd = pfd
         tunnelHasIpv6Clearnet = wantIpv6
 
+        appliedLanRelays = emptySet()
+        discoveredLanRelays = emptySet()
         val error = FipsNative.start(config, pfd.fd, this)
         if (error.isNotEmpty()) {
             Log.e(TAG, "engine start failed: $error")
@@ -242,7 +270,104 @@ class FipsVpnService : VpnService() {
             Log.i(TAG, "fips engine running, address $address, ipv6Clearnet=$wantIpv6")
             registerNetworkMonitoring()
             startHotspot()
+            startRelayDiscovery()
         }
+    }
+
+    // ---- Local Nostr relay discovery --------------------------------------
+
+    /**
+     * Browse the LAN for Nostr relays (Settings "Local relays": DNS-SD
+     * `_nostr._tcp` via [RelayDiscovery]) and feed every relay found into the
+     * node's relay pool. fips fixes the pool at node start (no runtime
+     * add-relay), so a relay it has not been built with rides the coalesced
+     * rebind path — the same cost as a FIPS Hotspot join. Sightings are
+     * debounced ([RELAY_SETTLE_MS]) so a browse that resolves several relays
+     * costs one restart, and [rebindOnce] re-checks the set after every pass
+     * so a relay resolved mid-restart is not lost. When an underlay switch
+     * also flips the IPv6 route decision, that rebind fires before the new
+     * LAN's browse has resolved anything, and its relay then costs a second
+     * restart — accepted rather than holding every route flip for the
+     * browse. Relays that vanish are NOT worth a restart: they are dropped
+     * lazily by the next rebind for any other reason, and until then sit in
+     * the pool on nostr-sdk's reconnect backoff, shown as disconnected. That
+     * also keeps a plain Wi-Fi → cellular hop restart-free, as the netmon
+     * path intends — and when the same LAN comes back, the relay is already
+     * in the pool and simply reconnects.
+     *
+     * The browse follows the underlying network: active only while it is
+     * Wi-Fi or Ethernet (NsdManager browses the default network), restarted
+     * from scratch after a switch so relays of the old LAN are forgotten.
+     */
+    private fun startRelayDiscovery() {
+        if (!ConfigStore.lanRelays(this)) return
+        val discovery = RelayDiscovery(
+            this,
+            onChanged = { found -> onLanRelaysChanged(found) },
+            onStateChanged = { running -> lanRelaySearching = running },
+        )
+        relayDiscovery = discovery
+        updateRelayDiscovery(currentUnderlying ?: connectivity?.activeNetwork, restart = false)
+    }
+
+    private fun isLan(network: Network?): Boolean {
+        if (network == null) return false
+        val caps = connectivity?.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
+
+    /** Start, stop or restart the browse to match the underlay (main thread). */
+    private fun updateRelayDiscovery(network: Network?, restart: Boolean) {
+        val discovery = relayDiscovery ?: return
+        val lan = isLan(network)
+        mainHandler.post {
+            if (relayDiscovery !== discovery) return@post
+            when {
+                !lan -> discovery.stop()
+                restart -> discovery.restart()
+                else -> discovery.start() // no-op while running; re-arms after a failed start
+            }
+        }
+    }
+
+    private fun stopRelayDiscovery() {
+        val discovery = relayDiscovery ?: return
+        relayDiscovery = null
+        mainHandler.post {
+            relayRebind?.let { mainHandler.removeCallbacks(it) }
+            relayRebind = null
+            discovery.stop()
+        }
+        discoveredLanRelays = emptySet()
+        lanRelays = emptySet()
+        lanRelaySearching = false
+    }
+
+    /**
+     * The browse result changed (main thread). A relay the node was not
+     * built with schedules a debounced rebind. No "is the node running"
+     * guard: the engine reports not-running for the whole of a restart, a
+     * rebind request is only a flag the worker serves against final state,
+     * and the shim's rebind is a no-op after a disconnect (which stops the
+     * browse anyway).
+     */
+    private fun onLanRelaysChanged(found: Set<String>) {
+        discoveredLanRelays = found
+        lanRelays = found
+        val fresh = found - appliedLanRelays
+        if (fresh.isEmpty()) return
+        if (relayRebind != null) return // already scheduled; it reads the latest set
+        val task = Runnable {
+            relayRebind = null
+            val pending = discoveredLanRelays - appliedLanRelays
+            if (pending.isNotEmpty()) {
+                Log.i(TAG, "new local relays $pending; rebinding node")
+                rebindNode()
+            }
+        }
+        relayRebind = task
+        mainHandler.postDelayed(task, RELAY_SETTLE_MS)
     }
 
     private fun hasFineLocation(): Boolean =
@@ -763,6 +888,9 @@ class FipsVpnService : VpnService() {
         }
         currentUnderlying = network
         updateMulticastLock(network)
+        // Local relay browse follows the LAN: (re)start on a new network,
+        // stop off-LAN. A burst of same-network ticks leaves it alone.
+        if (previous != network) updateRelayDiscovery(network, restart = previous != null)
         val wantIpv6 = hasIpv6Internet(network)
         // The node itself is NOT restarted for a plain underlying-network
         // change any more. Its underlay sockets are protected wildcard
@@ -861,11 +989,13 @@ class FipsVpnService : VpnService() {
      */
     private fun rebindOnce() {
         // Regenerate the config so the rebuilt node reflects current
-        // per-network state (the FIPS Hotspot transport overlay). The nsec
-        // is re-decrypted from the Keystore — it must not linger in a field.
+        // per-network state (the FIPS Hotspot transport overlay, the relays
+        // seen on this LAN). The nsec is re-decrypted from the Keystore — it
+        // must not linger in a field.
+        val relays = discoveredLanRelays
         val config = try {
             ConfigStore.buildConfigJson(
-                this, IdentityStore.getOrCreate(this), hotspotAddr, hotspotPrefixLen
+                this, IdentityStore.getOrCreate(this), hotspotAddr, hotspotPrefixLen, relays
             )
         } catch (e: Exception) {
             Log.e(TAG, "config rebuild failed; rebinding with previous config", e)
@@ -889,6 +1019,15 @@ class FipsVpnService : VpnService() {
             val fd = tunFd?.fd ?: return
             FipsNative.onNetworkChanged(fd, config)
         }
+        // Only a node that was actually rebuilt carries this relay set
+        // (the early returns above leave the previous one running). Empty
+        // config = previous config = previous relays.
+        if (config.isNotEmpty()) appliedLanRelays = relays
+        // A relay resolved while the restart was under way is in
+        // discoveredLanRelays but not in this pass; queue another one so the
+        // worker loop serves it rather than leaving it until an unrelated
+        // rebind.
+        if ((discoveredLanRelays - appliedLanRelays).isNotEmpty()) rebindRequested.set(true)
     }
 
     private fun unregisterNetworkMonitoring() {
@@ -905,6 +1044,7 @@ class FipsVpnService : VpnService() {
     }
 
     private fun shutdown() {
+        stopRelayDiscovery()
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
@@ -918,6 +1058,7 @@ class FipsVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        stopRelayDiscovery()
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()

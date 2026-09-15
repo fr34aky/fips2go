@@ -23,6 +23,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.snackbar.Snackbar
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Overview page: identity, live status, connect/disconnect, mesh apps. */
@@ -31,6 +32,8 @@ class OverviewFragment : Fragment() {
     private val poller = Handler(Looper.getMainLooper())
     private lateinit var headline: TextView
     private lateinit var detail: TextView
+    private lateinit var relaysSummary: TextView
+    private lateinit var relaysList: TextView
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -41,6 +44,8 @@ class OverviewFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         headline = view.findViewById(R.id.status_headline)
         detail = view.findViewById(R.id.status_detail)
+        relaysSummary = view.findViewById(R.id.relays_summary)
+        relaysList = view.findViewById(R.id.relays_list)
 
         showIdentity()
 
@@ -291,6 +296,7 @@ class OverviewFragment : Fragment() {
     private fun renderStatus() {
         try {
             val status = JSONObject(FipsNative.status())
+            renderRelays(status)
             if (!status.optBoolean("running")) {
                 headline.text = "Disconnected"
                 detail.text = "The mesh node is not running."
@@ -317,5 +323,49 @@ class OverviewFragment : Fragment() {
         } catch (e: Exception) {
             detail.text = "status error: ${e.message}"
         }
+    }
+
+    /**
+     * "Nostr relays" card: the node's relay pool (`status.relays`, refreshed
+     * by the shim every 2 s) with per-relay connection state, the ones the
+     * service found on this LAN tagged. The service's discovery state fills
+     * the summary line so "no local relay" is distinguishable from "not
+     * looking".
+     */
+    private fun renderRelays(status: JSONObject) {
+        val running = status.optBoolean("running")
+        val relays = status.optJSONArray("relays") ?: JSONArray()
+        val lan = FipsVpnService.lanRelays.map { it.trimEnd('/') }.toSet()
+        var connected = 0
+        val lines = ArrayList<String>()
+        for (i in 0 until relays.length()) {
+            val r = relays.getJSONObject(i)
+            val url = r.optString("url")
+            val up = r.optBoolean("connected")
+            if (up) connected++
+            val local = url.trimEnd('/') in lan
+            lines.add(
+                (if (up) "● " else "○ ") +
+                    url.removePrefix("wss://").removePrefix("ws://") +
+                    "  " + r.optString("status").lowercase() +
+                    (if (local) "  (local)" else "")
+            )
+        }
+        relaysList.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
+        relaysList.text = lines.joinToString("\n")
+        val discovery = when {
+            !running -> ""
+            !ConfigStore.lanRelays(requireContext()) -> "Local relay discovery is off."
+            FipsVpnService.lanRelaySearching && lan.isEmpty() ->
+                "Searching this network for local relays…"
+            FipsVpnService.lanRelaySearching ->
+                "${lan.size} local relay${if (lan.size == 1) "" else "s"} found on this network."
+            else -> "Local relay discovery needs Wi-Fi."
+        }
+        relaysSummary.text = when {
+            !running -> "Relays connect when the node is running."
+            lines.isEmpty() -> "Connecting to relays…"
+            else -> "$connected of ${lines.size} connected."
+        } + (if (discovery.isEmpty()) "" else " $discovery")
     }
 }

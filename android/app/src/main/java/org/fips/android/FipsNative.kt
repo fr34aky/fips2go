@@ -55,7 +55,11 @@ object FipsNative {
      */
     external fun networkHint()
 
-    /** Compact status JSON: `{running, npub, address, status: {...}}`. */
+    /**
+     * Compact status JSON: `{running, npub, address, status: {...}, relays:
+     * [{url, status, connected}]}` — `relays` is the Nostr relay pool with
+     * live per-relay state (empty until the node has started it).
+     */
     external fun status(): String
 
     /** Any snapshot-served `show_*` query, e.g. `query("show_peers", "")`. */

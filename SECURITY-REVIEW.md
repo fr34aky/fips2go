@@ -26,6 +26,14 @@ Everything crosses JNI as JSON strings.
 4. **GitHub release metadata and the downloaded APK** in
    `android/.../Updater.kt`.
 5. **Nostr relay traffic**, handled inside the fips dependency rather than here.
+6. **DNS-SD relay adverts on the LAN** (`android/.../RelayDiscovery.kt`):
+   anyone on the same Wi-Fi can announce `_nostr._tcp` and choose the URL the
+   phone dials. The shim validates the URL (`ws`/`wss` only, capped at 8) and
+   adds it to the *advert* relay set only — never the DM set, which fips
+   publishes under the npub as the identity's inbox-relay list (kind 10050)
+   and fans every traversal signal to. A LAN relay therefore sees adverts
+   (public, self-signed documents also on the public relays) and nothing
+   that isn't already public.
 
 ## Things that would be serious in this codebase
 

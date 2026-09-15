@@ -43,6 +43,11 @@ usable on a device you also use for everything else.
 - **LAN discovery (mDNS).** Finds fips peers on your Wi-Fi and dials them
   directly, with no relay or mesh hop. The tunnel's own addresses are kept out
   of the adverts, so the mesh ULA is never broadcast on the LAN.
+- **Local relays.** Finds Nostr relays advertised on your Wi-Fi (DNS-SD
+  `_nostr._tcp`) and adds them to the node's relay pool next to the public
+  ones, so peer discovery keeps working on a LAN with no internet. The
+  Overview page lists every relay with its live connection state and marks
+  the local ones.
 - **Survives network changes.** A Wi-Fi↔cellular hand-over keeps the node
   running: sessions, tree position and routes are all kept, and the peers
   whose path moved are re-pinned within about half a second of Android
