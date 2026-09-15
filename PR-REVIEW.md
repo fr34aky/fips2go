@@ -15,7 +15,10 @@ happened once.
 Skip and say so briefly:
 
 - Closed, merged, or draft PRs.
-- Dependabot PRs, unless the bump crosses a major version.
+- Dependabot PRs, unless the bump crosses a major version or moves an
+  action that handles the checked-out tree or the cache (`actions/checkout`,
+  `Swatinem/rust-cache`) — those run with the repo's contents in hand and
+  were pinned for exactly that reason.
 - Pure version bumps (`versionCode` / `versionName`) that accompany a release.
 - Changes confined to `dist/`, generated notices, or screenshots.
 
@@ -29,9 +32,12 @@ Do this before reading a single diff hunk.
 1. **PR metadata.** `gh pr view <n>` and `gh pr diff <n>`. Read the body: does
    it say what the change does and why, or only what it touches?
 2. **CI state.** `gh pr checks <n>`. `android` is the meaningful one — it is
-   the only job that cross-compiles all three ABIs. There is no automated
-   security scan: the security review is part of this checklist (criteria
-   5–8 and 10), done by a person reading the diff with `SECURITY-REVIEW.md`
+   the only job that cross-compiles all three ABIs. Do not treat a red check
+   as authoritative without reading why: on 2026-09-15 every `android` run
+   was red for an hour because a third-party setup action broke, with no
+   change on our side. There is no automated security scan: the security
+   review is part of this checklist (section B, plus criterion 14 for the
+   updater), done by a person reading the diff with `SECURITY-REVIEW.md`
    open — it maps the trust boundaries and lists the deliberate design
    choices that are not findings.
 3. **Base freshness.** Is the branch behind `main`? Workflow and pin changes in
@@ -160,9 +166,10 @@ Do not flag:
 
 - Style the codebase does not enforce. There is no linter here; do not become one.
 - Hypotheticals with no reachable path. Name the caller or drop it.
-- Deliberate design choices documented in `CLAUDE.md` — the empty default
-  inbound allowlist, the nsec shown in cleartext by the backup dialog, the
-  pinned `LIBCLANG_PATH`, `enable_nostr` being hardcoded on.
+- Deliberate design choices — the list lives in `SECURITY-REVIEW.md` (empty
+  default inbound allowlist, nsec shown in cleartext by the backup dialog,
+  no signing key in CI, the in-app `.fips` resolver, and so on) with the
+  reasoning in `CLAUDE.md`. Add new ones there, not here.
 - Missing tests for Kotlin. There is no suite; asking for one per PR is noise.
   Ask how it was verified instead.
 
@@ -190,6 +197,5 @@ On re-review, read the fixes rather than re-running the whole checklist, and
 say explicitly what is now resolved. A PR whose findings were addressed should
 not have to re-litigate them.
 
-Green CI does not mean the code is safe. It means it built on three ABIs and
-the host tests passed. Nothing in CI reads the change for security; that is
-this review's job, and `SECURITY-REVIEW.md` is its map.
+Green CI means the change built on three ABIs and the host tests passed,
+nothing more; reading it for security is this review's job.
