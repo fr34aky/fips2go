@@ -24,7 +24,7 @@
         android:layout_height="wrap_content"
         android:paddingTop="8dp"
         android:paddingBottom="4dp"
-        android:text="Selection saved — reconnect to apply it to the running tunnel"
+        android:text="Connected — changes here apply on the next connect"
         android:textAppearance="?attr/textAppearanceBodySmall"
         android:textColor="?attr/colorOnSurfaceVariant"
         android:visibility="gone" />

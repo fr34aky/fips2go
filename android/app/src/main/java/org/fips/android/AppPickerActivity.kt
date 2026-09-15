@@ -27,31 +27,25 @@ import androidx.appcompat.app.AppCompatActivity
  * the user believed an app was selected that the tunnel never captured
  * (issue #26). The bottom button now just closes the screen.
  *
- * The tunnel is built from this set only at connect time (`establishTunnel`),
- * so a change made while the node is running is saved but not yet in effect.
- * Settings says "reconnect to apply" for the same reason; the picker shows a
- * matching hint the first time a row is toggled while connected, and keeps it
- * up for the rest of the visit.
+ * The tunnel takes this set only when it is (re-)established — at connect, or
+ * when the service rebinds on an IPv6-route flip — so a change made while the
+ * node is running is saved but not yet in effect. Settings says "reconnect to
+ * apply" for the same reason; while the node is running the picker shows a
+ * matching note above Done, recomputed on every resume rather than latched,
+ * so it disappears by itself once the user disconnects.
  */
 class AppPickerActivity : AppCompatActivity() {
 
     companion object {
         const val PREFS = "fips"
         const val KEY_MESH_APPS = "mesh_apps"
-        private const val STATE_HINT_SHOWN = "reconnect_hint_shown"
     }
 
     private data class AppEntry(val pkg: String, val label: String, val icon: Drawable)
 
-    private lateinit var reconnectHint: TextView
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_app_picker)
-        reconnectHint = findViewById(R.id.reconnect_hint)
-        if (savedInstanceState?.getBoolean(STATE_HINT_SHOWN) == true) {
-            reconnectHint.visibility = View.VISIBLE
-        }
 
         val pm = packageManager
         val entries = pm.queryIntentActivities(
@@ -88,7 +82,6 @@ class AppPickerActivity : AppCompatActivity() {
                         if (!selected.remove(e.pkg)) selected.add(e.pkg)
                         check.isChecked = e.pkg in selected
                         persist(selected)
-                        if (nodeRunning()) reconnectHint.visibility = View.VISIBLE
                     }
                     return row
                 }
@@ -97,15 +90,16 @@ class AppPickerActivity : AppCompatActivity() {
         findViewById<Button>(R.id.done).setOnClickListener { finish() }
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putBoolean(STATE_HINT_SHOWN, reconnectHint.visibility == View.VISIBLE)
+    override fun onResume() {
+        super.onResume()
+        // Re-read the live fact each time, like the Overview battery card does:
+        // a disconnect from the notification while this screen is open is
+        // reflected as soon as the user comes back to it.
+        findViewById<TextView>(R.id.reconnect_hint).visibility =
+            if (FipsNative.isRunning()) View.VISIBLE else View.GONE
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-    /** False when the native library is unavailable, matching OverviewFragment. */
-    private fun nodeRunning() = runCatching { FipsNative.isRunning() }.getOrDefault(false)
 
     /**
      * Write the selection now. The copy is defensive: the Editor contract does not
