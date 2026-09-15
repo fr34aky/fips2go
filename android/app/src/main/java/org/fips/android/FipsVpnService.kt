@@ -587,6 +587,14 @@ class FipsVpnService : VpnService() {
     private fun establishTunnel(address: String, ipv6Clearnet: Boolean): ParcelFileDescriptor? {
         val meshApps = prefs()
             .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
+        // Logged so a "my app is not captured" report can be settled from
+        // logcat alone: this is the set the tunnel is built from, whatever
+        // the picker or the Overview card shows (issue #26).
+        if (meshApps.isEmpty()) {
+            Log.i(TAG, "mesh apps: none selected; capturing only $packageName")
+        } else {
+            Log.i(TAG, "mesh apps: ${meshApps.sorted()}")
+        }
         return try {
             val builder = Builder()
                 .setSession("fips2go")

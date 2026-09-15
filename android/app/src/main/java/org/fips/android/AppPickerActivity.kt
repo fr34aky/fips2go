@@ -21,7 +21,11 @@ import androidx.appcompat.app.AppCompatActivity
  * every other app on the phone is left on the normal network untouched.
  *
  * The selection is persisted as a package-name set in the shared prefs the
- * service reads at connect time.
+ * service reads at connect time. Every toggle is written immediately: the
+ * screen used to persist only on an explicit Save, and leaving it with Back
+ * silently discarded the change while the rows still showed the new state —
+ * the user believed an app was selected that the tunnel never captured
+ * (issue #26). The bottom button now just closes the screen.
  */
 class AppPickerActivity : AppCompatActivity() {
 
@@ -70,16 +74,24 @@ class AppPickerActivity : AppCompatActivity() {
                     row.setOnClickListener {
                         if (!selected.remove(e.pkg)) selected.add(e.pkg)
                         check.isChecked = e.pkg in selected
+                        persist(selected)
                     }
                     return row
                 }
             }
 
-        findViewById<Button>(R.id.save).setOnClickListener {
-            prefs().edit().putStringSet(KEY_MESH_APPS, selected.toSet()).apply()
-            finish()
-        }
+        findViewById<Button>(R.id.done).setOnClickListener { finish() }
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /**
+     * Write the selection now. The copy is defensive: the Editor contract does not
+     * promise one. The aliasing hazard that matters is on the *read* side — the set
+     * returned by getStringSet must never be mutated, which is why the load above
+     * goes through toMutableSet().
+     */
+    private fun persist(selected: Set<String>) {
+        prefs().edit().putStringSet(KEY_MESH_APPS, selected.toSet()).apply()
+    }
 }
