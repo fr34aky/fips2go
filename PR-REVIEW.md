@@ -15,9 +15,7 @@ happened once.
 Skip and say so briefly:
 
 - Closed, merged, or draft PRs.
-- Dependabot PRs, unless the bump crosses a major version or touches
-  `anthropics/claude-code-security-review` — that action holds the API key and
-  reads the diff, so its bumps get read.
+- Dependabot PRs, unless the bump crosses a major version.
 - Pure version bumps (`versionCode` / `versionName`) that accompany a release.
 - Changes confined to `dist/`, generated notices, or screenshots.
 
@@ -31,11 +29,11 @@ Do this before reading a single diff hunk.
 1. **PR metadata.** `gh pr view <n>` and `gh pr diff <n>`. Read the body: does
    it say what the change does and why, or only what it touches?
 2. **CI state.** `gh pr checks <n>`. `android` is the meaningful one — it is
-   the only job that cross-compiles all three ABIs. A green `review` check
-   means the security scan ran *and* found nothing; a skipped scan is caught by
-   the guard in `security-review.yml` and fails the job, so green is
-   trustworthy. Do not treat a red `review` as authoritative without reading
-   why — a cancelled run also reports red.
+   the only job that cross-compiles all three ABIs. There is no automated
+   security scan: the security review is part of this checklist (criteria
+   5–8 and 10), done by a person reading the diff with `SECURITY-REVIEW.md`
+   open — it maps the trust boundaries and lists the deliberate design
+   choices that are not findings.
 3. **Base freshness.** Is the branch behind `main`? Workflow and pin changes in
    particular go stale within hours.
 4. **Project guidance.** `CLAUDE.md` is the architecture and constraints
@@ -192,6 +190,6 @@ On re-review, read the fixes rather than re-running the whole checklist, and
 say explicitly what is now resolved. A PR whose findings were addressed should
 not have to re-litigate them.
 
-A green `review` check does not mean the code is safe. It means an automated
-scan of the diff found nothing, on a diff that so far has mostly been CI YAML.
-It is not a substitute for reading the change.
+Green CI does not mean the code is safe. It means it built on three ABIs and
+the host tests passed. Nothing in CI reads the change for security; that is
+this review's job, and `SECURITY-REVIEW.md` is its map.

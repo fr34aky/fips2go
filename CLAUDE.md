@@ -47,7 +47,7 @@ There is no Kotlin test suite; every Kotlin path is verified by a human looking 
 
 The `checks` job also runs the host suite as `cargo test --locked`, so a lockfile that drifts from the manifest fails there too. The `android` job is the only place all three ABIs are cross-compiled — it is the meaningful check on a fips pin bump.
 
-`security-review.yml` runs Anthropic's security reviewer on PR diffs, with extra repo context in `.github/security-scan-instructions.md` (trust boundaries, and the list of deliberate design choices that are *not* findings). Two things to know when a run looks stuck or red: it is gated on the `security-review` GitHub environment, so the job waits for a human approval before any step runs or the API key is reachable, and it is skipped entirely for Dependabot (whose restricted token cannot reach the secret). The action is not hardened against prompt injection — keep "Require approval for all external contributors" on so a fork PR cannot run it. A guard step fails the job when the audit produced no findings count, because the action exits 0 even when it never ran.
+There is no automated security scan in CI (the Anthropic security-reviewer workflow was removed in September 2026; reviews are done by hand). `SECURITY-REVIEW.md` is the context for that manual review: the trust boundaries, and the list of deliberate design choices that are *not* findings. Keep "Require approval for all external contributors" on under Settings → Actions regardless, so a fork PR cannot run CI without a maintainer looking first.
 
 `PR-REVIEW.md` is the maintainers' review checklist — the criteria applied to incoming PRs, several of which exist because the failure already happened once. Read it before reviewing or opening one.
 

@@ -1,7 +1,10 @@
-# Extra context for the security review of fips2go
+# Security review context for fips2go
 
-Appended to the standard audit prompt. It describes where this codebase's
-trust boundaries actually are, so the review can weight findings accordingly.
+Security review here is done by hand, as part of the PR review in
+`PR-REVIEW.md` (there is no automated scanner in CI any more). This file is
+the context that review needs: where this codebase's trust boundaries
+actually are, so findings can be weighted accordingly, and which deliberate
+design choices are not findings.
 
 ## What this is
 
