@@ -22,7 +22,7 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4, 2026-07-16
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, 2026-07-17
 
       - name: fips pin is in sync across manifests and lockfiles
         run: |
@@ -73,7 +73,7 @@ jobs:
           # is present so it can honour the pin.
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2, 2026-08-06
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2, 2026-08-06
         with:
           workspaces: shim -> target
 
@@ -88,14 +88,23 @@ jobs:
   android:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4, 2026-07-16
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, 2026-07-17
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1, 2026-08-06.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1, 2026-09-09
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v3, 2024-11-09
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1, 2026-04-04
+        with:
+          # Install nothing here. The action's default is 'tools platform-tools', and
+          # Google's SDK repository stopped serving the legacy 'tools' package on
+          # 2026-09-15 (android-actions/setup-android#537), so that default fails on
+          # every cmdline-tools version before our own install step runs. Nothing in
+          # this job uses platform-tools either; the packages the build needs are
+          # installed explicitly below. Drop the override once upstream's default
+          # no longer names 'tools'.
+          packages: ''
 
       - name: Install NDK r27c
         run: |
@@ -108,7 +117,7 @@ jobs:
           toolchain: stable
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2, 2026-08-06
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2, 2026-08-06
         with:
           workspaces: shim -> target
 
@@ -133,7 +142,7 @@ jobs:
           echo "armeabi-v7a LOAD alignment: $got"
           [ "$got" = "0x1000" ] || { echo "::error::armeabi-v7a must stay 4 KB aligned"; exit 1; }
 
-      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v4, 2025-09-09
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0, 2026-08-02
         with:
           gradle-version: '8.7'
 
@@ -151,7 +160,7 @@ jobs:
             echo "$abi packaged"
           done
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4, 2025-03-19
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, 2026-04-10
         with:
           name: app-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
