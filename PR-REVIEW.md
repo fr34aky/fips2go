@@ -15,9 +15,10 @@ happened once.
 Skip and say so briefly:
 
 - Closed, merged, or draft PRs.
-- Dependabot PRs, unless the bump crosses a major version or touches
-  `anthropics/claude-code-security-review` — that action holds the API key and
-  reads the diff, so its bumps get read.
+- Dependabot PRs, unless the bump crosses a major version or moves an
+  action that handles the checked-out tree or the cache (`actions/checkout`,
+  `Swatinem/rust-cache`) — those run with the repo's contents in hand and
+  were pinned for exactly that reason.
 - Pure version bumps (`versionCode` / `versionName`) that accompany a release.
 - Changes confined to `dist/`, generated notices, or screenshots.
 
@@ -31,11 +32,14 @@ Do this before reading a single diff hunk.
 1. **PR metadata.** `gh pr view <n>` and `gh pr diff <n>`. Read the body: does
    it say what the change does and why, or only what it touches?
 2. **CI state.** `gh pr checks <n>`. `android` is the meaningful one — it is
-   the only job that cross-compiles all three ABIs. A green `review` check
-   means the security scan ran *and* found nothing; a skipped scan is caught by
-   the guard in `security-review.yml` and fails the job, so green is
-   trustworthy. Do not treat a red `review` as authoritative without reading
-   why — a cancelled run also reports red.
+   the only job that cross-compiles all three ABIs. Do not treat a red check
+   as authoritative without reading why: on 2026-09-15 every `android` run
+   was red for an hour because a third-party setup action broke, with no
+   change on our side. There is no automated security scan: the security
+   review is part of this checklist (section B, plus criterion 14 for the
+   updater), done by a person reading the diff with `SECURITY-REVIEW.md`
+   open — it maps the trust boundaries and lists the deliberate design
+   choices that are not findings.
 3. **Base freshness.** Is the branch behind `main`? Workflow and pin changes in
    particular go stale within hours.
 4. **Project guidance.** `CLAUDE.md` is the architecture and constraints
@@ -162,9 +166,10 @@ Do not flag:
 
 - Style the codebase does not enforce. There is no linter here; do not become one.
 - Hypotheticals with no reachable path. Name the caller or drop it.
-- Deliberate design choices documented in `CLAUDE.md` — the empty default
-  inbound allowlist, the nsec shown in cleartext by the backup dialog, the
-  pinned `LIBCLANG_PATH`, `enable_nostr` being hardcoded on.
+- Deliberate design choices — the list lives in `SECURITY-REVIEW.md` (empty
+  default inbound allowlist, nsec shown in cleartext by the backup dialog,
+  no signing key in CI, the in-app `.fips` resolver, and so on) with the
+  reasoning in `CLAUDE.md`. Add new ones there, not here.
 - Missing tests for Kotlin. There is no suite; asking for one per PR is noise.
   Ask how it was verified instead.
 
@@ -192,6 +197,5 @@ On re-review, read the fixes rather than re-running the whole checklist, and
 say explicitly what is now resolved. A PR whose findings were addressed should
 not have to re-litigate them.
 
-A green `review` check does not mean the code is safe. It means an automated
-scan of the diff found nothing, on a diff that so far has mostly been CI YAML.
-It is not a substitute for reading the change.
+Green CI means the change built on three ABIs and the host tests passed,
+nothing more; reading it for security is this review's job.

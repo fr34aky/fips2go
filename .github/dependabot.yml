@@ -11,13 +11,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    # One PR for routine bumps; the security reviewer gets its own, since it
-    # holds the API key and reads the diff, and deserves a deliberate look.
+    # All action bumps land in one PR.
     groups:
       actions:
         patterns:
           - "*"
-        exclude-patterns:
-          - "anthropics/claude-code-security-review"
     commit-message:
       prefix: "CI"
