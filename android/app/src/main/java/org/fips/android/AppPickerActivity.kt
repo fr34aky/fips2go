@@ -85,7 +85,12 @@ class AppPickerActivity : AppCompatActivity() {
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /** Write the selection now — a copy, since SharedPreferences keeps the set it is handed. */
+    /**
+     * Write the selection now. The copy is defensive: the Editor contract does not
+     * promise one. The aliasing hazard that matters is on the *read* side — the set
+     * returned by getStringSet must never be mutated, which is why the load above
+     * goes through toMutableSet().
+     */
     private fun persist(selected: Set<String>) {
         prefs().edit().putStringSet(KEY_MESH_APPS, selected.toSet()).apply()
     }
