@@ -95,6 +95,14 @@ struct Engine {
     /// Wakes the node's medium-change detector (`node.netmon.*`) — see
     /// [`network_hint`]. Per node: refreshed on every (re)start.
     netmon: fips::NetmonTrigger,
+    /// Live view of the Nostr relay pool (URL + connection state). The pool
+    /// can only be awaited on the node runtime, so a task there refreshes
+    /// this slot — but only when poked by `status_json` (the UI's 2 s poll
+    /// while the Overview is on screen), never on its own timer: nothing
+    /// should wake the data-path runtime for a value nobody is reading.
+    /// Empty while Nostr is disabled.
+    relay_status: Arc<Mutex<Vec<fips::nostr::RelayStatusView>>>,
+    relay_refresh: Arc<tokio::sync::Notify>,
 }
 
 /// What `start()` reports back to Kotlin.
@@ -174,6 +182,10 @@ fn start_inner(
     let cmd_handle = node.control_command_handle();
     let netmon = node.netmon_trigger();
 
+    let relay_status: Arc<Mutex<Vec<fips::nostr::RelayStatusView>>> = Arc::default();
+    let relay_slot = relay_status.clone();
+    let relay_refresh = Arc::new(tokio::sync::Notify::new());
+    let relay_wake = relay_refresh.clone();
     // Node thread: current-thread runtime, same shape as the fips binary.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -197,6 +209,19 @@ fn start_inner(
                 }
                 // Processor needs the started transports' MTU floor.
                 let _ = ready_tx.send(Ok(node.tun_packet_processor()));
+                // Relay-pool refresher for the UI: the pool lives inside the
+                // Nostr runtime, which only this runtime may await on. Runs
+                // once per status poll (Notify permit), so it costs nothing
+                // while no screen is asking.
+                let relay_poll = node.nostr_rendezvous_arc().map(|nostr| {
+                    tokio::spawn(async move {
+                        loop {
+                            let rows = nostr.relay_status().await;
+                            *relay_slot.lock().unwrap() = rows;
+                            relay_wake.notified().await;
+                        }
+                    })
+                });
                 let result = node
                     .run_rx_loop_with_shutdown(async {
                         let _ = stop_rx.await;
@@ -204,6 +229,9 @@ fn start_inner(
                     .await;
                 if let Err(e) = result {
                     tracing::error!(error = %e, "rx loop exited with error");
+                }
+                if let Some(task) = relay_poll {
+                    task.abort();
                 }
                 node.finish_shutdown().await;
             });
@@ -314,6 +342,8 @@ fn start_inner(
         config_json: config_json.to_string(),
         protect: engine_protect,
         netmon,
+        relay_status,
+        relay_refresh,
     };
     Ok((engine, StartInfo { npub, address }))
 }
@@ -420,7 +450,10 @@ pub fn network_hint() {
     }
 }
 
-/// Compact status JSON for the UI. Always answers, running or not.
+/// Compact status JSON for the UI. Always answers, running or not. `relays`
+/// lists the Nostr relay pool with per-relay connection state (empty when
+/// Nostr is off or the node has not published a snapshot yet); each call
+/// also asks the node runtime for a fresh snapshot, served by the next call.
 pub fn status_json() -> String {
     let slot = ENGINE.lock().unwrap();
     let value = match slot.as_ref() {
@@ -431,8 +464,12 @@ pub fn status_json() -> String {
             "address": engine.address,
             "status": engine.read_handle.query("show_status", None)
                 .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take)),
+            "relays": engine.relay_status.lock().unwrap().clone(),
         }),
     };
+    if let Some(engine) = slot.as_ref() {
+        engine.relay_refresh.notify_one();
+    }
     value.to_string()
 }
 
@@ -490,11 +527,82 @@ pub fn connect_peer_json(npub: &str, address: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The engine is a process singleton, and cargo runs tests in parallel:
+    /// every test that starts one holds this for its whole run.
+    static ENGINE_TEST: Mutex<()> = Mutex::new(());
+
+    fn engine_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENGINE_TEST.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// With Nostr on and the pool pointed at a loopback websocket server,
+    /// `status_json` reports that relay as connected within a few seconds —
+    /// the Overview's relay list end to end, minus the UI. No public
+    /// network: the relay list is overridden and STUN points at a dead
+    /// loopback port.
+    #[test]
+    fn status_reports_loopback_relay_connected() {
+        let _serial = engine_test_lock();
+        // Minimal "relay": accept the upgrade, swallow frames.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    if let Ok(mut ws) = tungstenite::accept(stream) {
+                        while ws.read().is_ok() {}
+                    }
+                });
+            }
+        });
+
+        let identity = crate::config::derive_identity("").unwrap();
+        let relay = format!("ws://127.0.0.1:{port}");
+        let config = serde_json::json!({
+            "nsec": identity.nsec,
+            "enable_nostr": true,
+            "nostr_relays": [relay],
+            "stun_servers": ["127.0.0.1:9"],
+            "enable_fips_dns": false,
+            "forward_clearnet": false,
+            "battery_saver": false,
+            "log_level": "warn",
+        })
+        .to_string();
+
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let [read_fd, write_fd] = fds;
+        start(&config, read_fd, None).unwrap_or_else(|e| panic!("start: {e}"));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut last;
+        let connected = loop {
+            last = status_json();
+            let status: serde_json::Value = serde_json::from_str(&last).unwrap();
+            let relays = status["relays"].as_array().cloned().unwrap_or_default();
+            if relays.len() == 1 && relays[0]["connected"] == true {
+                assert_eq!(relays[0]["url"], relay);
+                assert_eq!(relays[0]["status"], "Connected");
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        stop();
+        unsafe { libc::close(write_fd) };
+        unsafe { libc::close(read_fd) };
+        assert!(connected, "loopback relay never reported connected: {last}");
+    }
+
     /// Full lifecycle on the host: a pipe stands in for the TUN fd, a
     /// loopback UDP transport stands in for the network. Start → status →
     /// query → stop, twice (restartability).
     #[test]
     fn engine_lifecycle_on_host() {
+        let _serial = engine_test_lock();
         let identity = crate::config::derive_identity("").unwrap();
         let config = serde_json::json!({
             "nsec": identity.nsec,
@@ -536,6 +644,10 @@ mod tests {
             assert!(
                 status["status"].is_object(),
                 "show_status snapshot present: {status}"
+            );
+            assert!(
+                status["relays"].as_array().is_some_and(|r| r.is_empty()),
+                "relay list present and empty with Nostr off: {status}"
             );
 
             // The netmon hint must be callable at any time without effect on

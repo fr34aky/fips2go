@@ -53,8 +53,9 @@ usable on a device you also use for everything else.
   node: an underlay whose IPv6 status differs from the last one, and a FIPS
   Hotspot joining or leaving.
 - **Diagnostics that answer the real questions.** Resolve or ping an npub,
-  live peer sessions with byte counts, nearby mDNS sightings, and a log viewer
-  you can expand and copy.
+  live peer sessions with byte counts, nearby mDNS sightings, which Nostr
+  relays the node is actually connected to, and a log viewer you can expand
+  and copy.
 - **In-app updates.** Checks GitHub Releases, downloads the APK matching your
   device's ABI, verifies it against the release's sha256, and hands it to the
   system installer — which enforces the release signing key and refuses while
