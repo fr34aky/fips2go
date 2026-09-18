@@ -336,6 +336,7 @@ class OverviewFragment : Fragment() {
         val running = status.optBoolean("running")
         val relays = status.optJSONArray("relays") ?: JSONArray()
         val lan = FipsVpnService.lanRelays.map { it.trimEnd('/') }.toSet()
+        val onPhone = ConfigStore.localRelayUrl(requireContext()).trimEnd('/')
         var connected = 0
         val lines = ArrayList<String>()
         for (i in 0 until relays.length()) {
@@ -343,12 +344,15 @@ class OverviewFragment : Fragment() {
             val url = r.optString("url")
             val up = r.optBoolean("connected")
             if (up) connected++
-            val local = url.trimEnd('/') in lan
+            val tag = when (url.trimEnd('/')) {
+                in lan -> "  (local)"
+                onPhone -> "  (this phone)"
+                else -> ""
+            }
             lines.add(
                 (if (up) "● " else "○ ") +
                     url.removePrefix("wss://").removePrefix("ws://") +
-                    "  " + r.optString("status").lowercase() +
-                    (if (local) "  (local)" else "")
+                    "  " + r.optString("status").lowercase() + tag
             )
         }
         relaysList.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE

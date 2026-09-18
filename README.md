@@ -47,7 +47,8 @@ usable on a device you also use for everything else.
   `_nostr._tcp`) and adds them to the node's relay pool next to the public
   ones, so peer discovery keeps working on a LAN with no internet. The
   Overview page lists every relay with its live connection state and marks
-  the local ones.
+  the local ones. A relay app running on the phone itself (which mDNS cannot
+  see) can be entered in Settings.
 - **Survives network changes.** A Wi-Fi↔cellular hand-over keeps the node
   running: sessions, tree position and routes are all kept, and the peers
   whose path moved are re-pinned within about half a second of Android

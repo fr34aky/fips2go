@@ -151,6 +151,7 @@ class SettingsFragment : Fragment() {
             p.getBoolean(CS.BATTERY_SAVER, CS.DEF_BATTERY_SAVER) ||
             sw(view, R.id.lan_mdns).isChecked != CS.lanMdns(requireContext()) ||
             sw(view, R.id.lan_relays).isChecked != CS.lanRelays(requireContext()) ||
+            e(R.id.local_relay_url) != CS.localRelayUrl(requireContext()) ||
             sw(view, R.id.hotspot).isChecked != CS.hotspotEnabled(requireContext()) ||
             sw(view, R.id.auto_update).isChecked !=
             p.getBoolean(CS.AUTO_UPDATE, CS.DEF_AUTO_UPDATE) ||
@@ -251,6 +252,7 @@ class SettingsFragment : Fragment() {
             p.getBoolean(CS.BATTERY_SAVER, CS.DEF_BATTERY_SAVER)
         sw(view, R.id.lan_mdns).isChecked = CS.lanMdns(requireContext())
         sw(view, R.id.lan_relays).isChecked = CS.lanRelays(requireContext())
+        edit(view, R.id.local_relay_url).setText(CS.localRelayUrl(requireContext()))
         sw(view, R.id.hotspot).isChecked = CS.hotspotEnabled(requireContext())
         sw(view, R.id.auto_update).isChecked = p.getBoolean(CS.AUTO_UPDATE, CS.DEF_AUTO_UPDATE)
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
@@ -279,6 +281,7 @@ class SettingsFragment : Fragment() {
             .putBoolean(CS.BATTERY_SAVER, sw(view, R.id.battery_saver).isChecked)
             .putBoolean(CS.LAN_MDNS, sw(view, R.id.lan_mdns).isChecked)
             .putBoolean(CS.LAN_RELAYS, sw(view, R.id.lan_relays).isChecked)
+            .putString(CS.LOCAL_RELAY_URL, edit(view, R.id.local_relay_url).text.toString().trim())
             .putBoolean(CS.HOTSPOT, sw(view, R.id.hotspot).isChecked)
             .putBoolean(CS.AUTO_UPDATE, sw(view, R.id.auto_update).isChecked)
             .putBoolean(CS.FORWARD_CLEARNET, sw(view, R.id.forward_clearnet).isChecked)

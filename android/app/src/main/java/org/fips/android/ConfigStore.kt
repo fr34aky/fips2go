@@ -26,6 +26,7 @@ object ConfigStore {
     const val BATTERY_SAVER = "battery_saver"
     const val LAN_MDNS = "enable_lan_mdns"
     const val LAN_RELAYS = "lan_relays"
+    const val LOCAL_RELAY_URL = "local_relay_url"
     const val HOTSPOT = "hotspot_enabled"
     const val INBOUND_FILTER = "inbound_filter"
     const val INBOUND_PORTS = "inbound_ports"
@@ -142,6 +143,15 @@ object ConfigStore {
     /** Local Nostr relay discovery (DNS-SD `_nostr._tcp`), honouring the default. */
     fun lanRelays(context: Context) = prefs(context).getBoolean(LAN_RELAYS, DEF_LAN_RELAYS)
 
+    /**
+     * A relay running on this phone (e.g. Citrine at `ws://127.0.0.1:4869`),
+     * which mDNS cannot find; empty when none. Joins the LAN-discovered
+     * relays in the shim's `extra_nostr_relays`, so the same rules apply
+     * (advert relays only; the shim drops a malformed URL with a warning).
+     */
+    fun localRelayUrl(context: Context): String =
+        prefs(context).getString(LOCAL_RELAY_URL, "")?.trim() ?: ""
+
     /** FIPS Hotspot auto-join, honouring the default. */
     fun hotspotEnabled(context: Context) = prefs(context).getBoolean(HOTSPOT, DEF_HOTSPOT)
 
@@ -151,8 +161,9 @@ object ConfigStore {
      * interface address on a joined FIPS Hotspot ("!FIPS") network; the
      * service passes them while that local-only network is up, and the shim
      * then runs a second dial-scoped UDP transport bound to it. [lanRelays]
-     * are the Nostr relays discovered on the local network; the shim appends
-     * them to the fips default relay set (never replacing it).
+     * are the Nostr relays discovered on the local network; together with
+     * the configured relay on this phone ([LOCAL_RELAY_URL]) the shim appends
+     * them to the fips default advert relay set (never replacing it).
      *
      * Fields the app no longer exposes are simply omitted, which leaves the
      * shim (and fips) on their own defaults: built-in Nostr relays and STUN
@@ -209,8 +220,11 @@ object ConfigStore {
             )
         }
 
-        if (lanRelays.isNotEmpty()) {
-            config.put("extra_nostr_relays", JSONArray(lanRelays.toList()))
+        val extraRelays = LinkedHashSet<String>()
+        localRelayUrl(context).takeIf { it.isNotEmpty() }?.let { extraRelays.add(it) }
+        extraRelays.addAll(lanRelays)
+        if (extraRelays.isNotEmpty()) {
+            config.put("extra_nostr_relays", JSONArray(extraRelays.toList()))
         }
 
         return config.toString()
