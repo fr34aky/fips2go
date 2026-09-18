@@ -141,7 +141,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
             android:hint="Relay on this phone (optional)"
-            app:helperText="A relay app running on this phone is not found by mDNS. Enter its address, e.g. ws://127.0.0.1:4869 (Citrine). Used for peer adverts like a LAN relay."
+            app:helperText="A relay app running on this phone is not found by mDNS. Enter its address, e.g. ws://127.0.0.1:4869 (Citrine). Unlike relays found on the Wi-Fi, this one is trusted: it also carries your inbox-relay list and peer signaling, so handshakes work with no public relay reachable."
             app:helperTextEnabled="true">
             <com.google.android.material.textfield.TextInputEditText
                 android:id="@+id/local_relay_url"

@@ -74,6 +74,14 @@ pub struct ShimConfig {
     /// [`MAX_EXTRA_RELAYS`].
     #[serde(default)]
     pub extra_nostr_relays: Vec<String>,
+    /// Relays the USER configured by hand (the Settings "relay on this
+    /// phone" field), appended to BOTH the advert and DM relay sets: the
+    /// user vouched for them, so unlike [`Self::extra_nostr_relays`] they may
+    /// enter the identity's published inbox-relay list and carry its
+    /// traversal signaling — which is what makes a handshake possible with
+    /// no public relay reachable. Same validation, dedup and cap.
+    #[serde(default)]
+    pub trusted_nostr_relays: Vec<String>,
     /// UDP transport bind address (e.g. "0.0.0.0:2121"). Empty → ephemeral
     /// "0.0.0.0:0" (pure-client, no fixed inbound port).
     #[serde(default)]
@@ -120,6 +128,48 @@ pub struct ShimConfig {
 /// offering more than a handful, and a runaway advertiser must not be able
 /// to balloon the pool.
 pub const MAX_EXTRA_RELAYS: usize = 8;
+
+/// Relay URL strings → parsed `RelayUrl`s, deduplicated, in input order, at
+/// most [`MAX_EXTRA_RELAYS`]; malformed entries are logged and skipped
+/// (handing one to fips would abort its Nostr runtime at start). `RelayUrl`
+/// equality ignores a trailing slash (its `Display` keeps it), so dedup
+/// happens on the parsed value, never on the rendered string.
+fn parse_relays(raw: &[String], what: &str) -> Vec<nostr::RelayUrl> {
+    let mut seen: Vec<nostr::RelayUrl> = Vec::new();
+    for entry in raw {
+        if seen.len() >= MAX_EXTRA_RELAYS {
+            tracing::warn!(cap = MAX_EXTRA_RELAYS, what, "too many relays; ignoring the rest");
+            break;
+        }
+        match nostr::RelayUrl::parse(entry.trim()) {
+            Ok(url) => {
+                if !seen.contains(&url) {
+                    seen.push(url);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(relay = %entry, error = %e, what, "ignoring malformed relay URL");
+            }
+        }
+    }
+    seen
+}
+
+/// Append `urls` to a fips relay list, skipping any relay already in it
+/// (compared as parsed `RelayUrl`s, so `wss://x/` matches `wss://x`).
+fn append_relays(set: &mut Vec<String>, urls: &[nostr::RelayUrl], what: &str, which: &str) {
+    let base: Vec<nostr::RelayUrl> = set
+        .iter()
+        .filter_map(|r| nostr::RelayUrl::parse(r).ok())
+        .collect();
+    for url in urls {
+        if base.contains(url) {
+            continue;
+        }
+        tracing::info!(relay = %url, what, which, "Nostr relay added");
+        set.push(url.to_string());
+    }
+}
 
 /// Resolve the main and hotspot bind addresses to a shared concrete port.
 ///
@@ -350,18 +400,12 @@ impl ShimConfig {
             config.node.rendezvous.nostr.stun_servers = self.stun_servers.clone();
         }
         if self.enable_nostr {
-            let advert = &mut config.node.rendezvous.nostr.advert_relays;
-            let base: Vec<nostr::RelayUrl> = advert
-                .iter()
-                .filter_map(|r| nostr::RelayUrl::parse(r).ok())
-                .collect();
-            for url in self.extra_relay_urls() {
-                if base.contains(&url) {
-                    continue;
-                }
-                tracing::info!(relay = %url, "LAN-discovered Nostr relay added to advert relays");
-                advert.push(url.to_string());
-            }
+            let nostr = &mut config.node.rendezvous.nostr;
+            let trusted = parse_relays(&self.trusted_nostr_relays, "trusted");
+            append_relays(&mut nostr.advert_relays, &trusted, "trusted", "advert");
+            append_relays(&mut nostr.dm_relays, &trusted, "trusted", "DM");
+            let lan = parse_relays(&self.extra_nostr_relays, "LAN");
+            append_relays(&mut nostr.advert_relays, &lan, "LAN-discovered", "advert");
         }
         if self.battery_saver {
             // Fewer CPU/radio wakeups on mobile; heartbeat stays < the ~30s
@@ -393,34 +437,10 @@ impl ShimConfig {
     /// in `RelayUrl` form, deduplicated, in input order, at most
     /// [`MAX_EXTRA_RELAYS`]. Malformed entries are logged and skipped.
     pub fn valid_extra_relays(&self) -> Vec<String> {
-        self.extra_relay_urls()
+        parse_relays(&self.extra_nostr_relays, "LAN")
             .iter()
             .map(ToString::to_string)
             .collect()
-    }
-
-    /// [`Self::valid_extra_relays`] as parsed values. `RelayUrl` equality
-    /// ignores a trailing slash (its `Display` keeps it), so dedup happens
-    /// on the parsed value, never on the rendered string.
-    fn extra_relay_urls(&self) -> Vec<nostr::RelayUrl> {
-        let mut seen: Vec<nostr::RelayUrl> = Vec::new();
-        for raw in &self.extra_nostr_relays {
-            if seen.len() >= MAX_EXTRA_RELAYS {
-                tracing::warn!(cap = MAX_EXTRA_RELAYS, "too many LAN relays; ignoring the rest");
-                break;
-            }
-            match nostr::RelayUrl::parse(raw.trim()) {
-                Ok(url) => {
-                    if !seen.contains(&url) {
-                        seen.push(url);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(relay = %raw, error = %e, "ignoring malformed LAN relay URL");
-                }
-            }
-        }
-        seen
     }
 
     /// Parsed upstream resolver addresses (invalid entries dropped with a log).
@@ -529,6 +549,37 @@ mod tests {
         assert!(advert.contains(&"ws://192.168.1.20:7777".to_string()), "{advert:?}");
         assert!(advert.contains(&"ws://[fd12::5]:4848".to_string()), "{advert:?}");
         assert!(!advert.iter().any(|r| r.contains("not-a-relay") || r == "garbage"));
+    }
+
+    /// A hand-configured relay is trusted into BOTH sets (that is what lets
+    /// a handshake complete with no public relay reachable), deduplicated
+    /// against the defaults and against the LAN list, which stays
+    /// advert-only even when it names the same relay.
+    #[test]
+    fn trusted_relays_enter_both_sets() {
+        let id = derive_identity("").unwrap();
+        let json = format!(
+            r#"{{ "nsec": "{}", "enable_nostr": true,
+                 "trusted_nostr_relays": ["ws://127.0.0.1:4869/", "wss://nos.lol", "bogus"],
+                 "extra_nostr_relays": ["ws://127.0.0.1:4869", "ws://192.168.1.20:7777"] }}"#,
+            id.nsec
+        );
+        let defaults = fips::Config::new().node.rendezvous.nostr;
+        let nostr = ShimConfig::from_json(&json)
+            .unwrap()
+            .to_fips_config()
+            .unwrap()
+            .node
+            .rendezvous
+            .nostr;
+        let phone = "ws://127.0.0.1:4869/".to_string();
+        assert_eq!(nostr.dm_relays.len(), defaults.dm_relays.len() + 1, "{:?}", nostr.dm_relays);
+        assert!(nostr.dm_relays.contains(&phone));
+        assert!(!nostr.dm_relays.iter().any(|r| r.contains("192.168")), "LAN never in DM");
+        assert_eq!(nostr.advert_relays.len(), defaults.advert_relays.len() + 2, "{:?}", nostr.advert_relays);
+        assert_eq!(nostr.advert_relays.iter().filter(|r| r.contains("127.0.0.1")).count(), 1);
+        assert!(nostr.advert_relays.contains(&"ws://192.168.1.20:7777".to_string()));
+        assert!(!nostr.advert_relays.iter().any(|r| r == "bogus"));
     }
 
     #[test]

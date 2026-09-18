@@ -33,7 +33,10 @@ Everything crosses JNI as JSON strings.
    publishes under the npub as the identity's inbox-relay list (kind 10050)
    and fans every traversal signal to. A LAN relay therefore sees adverts
    (public, self-signed documents also on the public relays) and nothing
-   that isn't already public.
+   that isn't already public. The one relay that does reach the DM set is
+   the hand-typed "relay on this phone" Settings field (`trusted_nostr_relays`):
+   the user vouched for it, and DM membership is what makes an offline
+   handshake possible — deliberate, not a finding.
 
 ## Things that would be serious in this codebase
 
