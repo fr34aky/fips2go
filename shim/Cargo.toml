@@ -20,7 +20,7 @@ crate-type = ["cdylib", "lib"]
 # pinned. For local fips development, override with:
 #   [patch."https://github.com/fr34aky/fips"]
 #   fips = { path = "../fips" }
-fips = { git = "https://github.com/fr34aky/fips", rev = "cc03494", default-features = false }
+fips = { git = "https://github.com/fr34aky/fips", rev = "80ad19d", default-features = false }
 ipstack = "1"
 jni = "0.21"
 libc = "0.2"
@@ -30,6 +30,11 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Loopback websocket server standing in for a relay in the engine test
+# (same tungstenite the tree already carries via nostr-sdk; no TLS features).
+tungstenite = { version = "0.26", default-features = false }
 
 [profile.release]
 strip = true

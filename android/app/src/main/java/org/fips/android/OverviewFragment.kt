@@ -23,6 +23,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.snackbar.Snackbar
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Overview page: identity, live status, connect/disconnect, mesh apps. */
@@ -31,6 +32,8 @@ class OverviewFragment : Fragment() {
     private val poller = Handler(Looper.getMainLooper())
     private lateinit var headline: TextView
     private lateinit var detail: TextView
+    private lateinit var relaysSummary: TextView
+    private lateinit var relaysList: TextView
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -41,6 +44,8 @@ class OverviewFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         headline = view.findViewById(R.id.status_headline)
         detail = view.findViewById(R.id.status_detail)
+        relaysSummary = view.findViewById(R.id.relays_summary)
+        relaysList = view.findViewById(R.id.relays_list)
 
         showIdentity()
 
@@ -291,6 +296,7 @@ class OverviewFragment : Fragment() {
     private fun renderStatus() {
         try {
             val status = JSONObject(FipsNative.status())
+            renderRelays(status)
             if (!status.optBoolean("running")) {
                 headline.text = "Disconnected"
                 detail.text = "The mesh node is not running."
@@ -316,6 +322,37 @@ class OverviewFragment : Fragment() {
             }
         } catch (e: Exception) {
             detail.text = "status error: ${e.message}"
+        }
+    }
+
+    /**
+     * "Nostr relays" card: the node's relay pool (`status.relays`, refreshed
+     * by the shim on every status poll) with per-relay connection state —
+     * the only place short of logcat that shows whether rendezvous is
+     * actually working.
+     */
+    private fun renderRelays(status: JSONObject) {
+        val running = status.optBoolean("running")
+        val relays = status.optJSONArray("relays") ?: JSONArray()
+        var connected = 0
+        val lines = ArrayList<String>()
+        for (i in 0 until relays.length()) {
+            val r = relays.getJSONObject(i)
+            val url = r.optString("url")
+            val up = r.optBoolean("connected")
+            if (up) connected++
+            lines.add(
+                (if (up) "● " else "○ ") +
+                    url.removePrefix("wss://").removePrefix("ws://") +
+                    "  " + r.optString("status").lowercase()
+            )
+        }
+        relaysList.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
+        relaysList.text = lines.joinToString("\n")
+        relaysSummary.text = when {
+            !running -> "Relays connect when the node is running."
+            lines.isEmpty() -> "Connecting to relays…"
+            else -> "$connected of ${lines.size} connected."
         }
     }
 }
