@@ -23,6 +23,8 @@ Everything crosses JNI as JSON strings.
 2. **Packets from covered apps** heading out through the TUN, including
    intercepted DNS to the `fd00::53` sentinel (`shim/src/dns.rs`).
 3. **DNS responses** from configured upstreams, parsed in `shim/src/dns.rs`.
+   (`answer_as_asked` there also parses a reply, but only the in-process
+   responder's on `[::1]`, for a name out of the user's own hosts file.)
 4. **GitHub release metadata and the downloaded APK** in
    `android/.../Updater.kt`.
 5. **Nostr relay traffic**, handled inside the fips dependency rather than here.
@@ -62,6 +64,10 @@ Everything crosses JNI as JSON strings.
   TUN ports; that is intentional, not a misconfiguration.
 - `enable_nostr` and the in-app `.fips` resolver are hardcoded on.
 - The nsec is shown in cleartext by the Back up dialog by design.
+- Mesh names (`files/hosts`) are stored in plaintext in the app's private
+  dir: they hold npubs — public keys — and labels, and the shim has to read
+  the file. Only `.fips` queries from covered apps consult it; nothing
+  arriving from the mesh can probe the name space.
 - `android-env.sh` pins `LIBCLANG_PATH` to override a bad machine-wide value;
   that is a build-environment workaround, not a hardcoded secret.
 - Release signing happens on a workstation, never in CI. There is deliberately

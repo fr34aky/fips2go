@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        app:navigationContentDescription="Back"
+        app:navigationIcon="?attr/homeAsUpIndicator"
+        app:title="Mesh names" />
+
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false"
+        android:paddingHorizontal="16dp"
+        android:paddingBottom="24dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/Widget.Fips.Summary"
+                android:layout_marginTop="0dp"
+                android:text="Give a node a name and your mesh apps can use home.fips instead of its npub1….fips address. Names live on this device only — they are your address book, not something other nodes see." />
+
+            <!-- Add / re-point -->
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/host_name_layout"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:hint="Name"
+                app:suffixText=".fips">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/host_name"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:imeOptions="actionNext"
+                    android:inputType="textUri|textNoSuggestions"
+                    android:maxLines="1" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/host_npub_layout"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="npub1…">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/host_npub"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:imeOptions="actionDone"
+                    android:inputType="textUri|textNoSuggestions"
+                    android:maxLines="1" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/host_add"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end"
+                android:layout_marginTop="4dp"
+                android:text="Add" />
+
+            <TextView
+                style="@style/SettingsHeader"
+                android:layout_marginTop="8dp"
+                android:text="Your names" />
+
+            <TextView
+                android:id="@+id/host_empty"
+                style="@style/Widget.Fips.Summary"
+                android:text="No names yet." />
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/host_list_card"
+                style="@style/Widget.Fips.Card">
+
+                <LinearLayout
+                    android:id="@+id/host_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingVertical="4dp" />
+            </com.google.android.material.card.MaterialCardView>
+        </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
+</LinearLayout>

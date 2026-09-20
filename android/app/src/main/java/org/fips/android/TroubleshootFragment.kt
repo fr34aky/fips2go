@@ -58,7 +58,7 @@ class TroubleshootFragment : Fragment() {
             result.visibility = View.VISIBLE
         }
         view.findViewById<MaterialButton>(R.id.resolve).setOnClickListener {
-            val npub = npubField.text.toString().trim()
+            val npub = probeTarget(npubField.text.toString())
             val info = JSONObject(FipsNative.resolveNpub(npub))
             show(
                 if (info.has("error")) {
@@ -70,7 +70,7 @@ class TroubleshootFragment : Fragment() {
         }
 
         view.findViewById<MaterialButton>(R.id.reachability).setOnClickListener {
-            show(checkReachability(npubField.text.toString().trim()))
+            show(checkReachability(probeTarget(npubField.text.toString())))
         }
 
         view.findViewById<MaterialButton>(R.id.refresh_logs).setOnClickListener {
@@ -126,6 +126,13 @@ class TroubleshootFragment : Fragment() {
 
     private fun offerUpdate(root: View, update: Updater.Update) {
         UpdateUi.offer(requireActivity() as AppCompatActivity, root, update)
+    }
+
+    /** The probe field also takes a mesh name (`home` / `home.fips`). */
+    private fun probeTarget(typed: String): String {
+        val name = HostsStore.normalizeName(typed)
+        return HostsStore.load(requireContext()).firstOrNull { it.name == name }?.npub
+            ?: typed.trim()
     }
 
     /**

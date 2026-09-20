@@ -62,6 +62,12 @@
             android:label="Nostr relays"
             android:windowSoftInputMode="adjustResize" />
 
+        <activity
+            android:name=".HostsActivity"
+            android:exported="false"
+            android:label="Mesh names"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Exposes the downloaded update APK to the package installer. -->
         <provider
             android:name="androidx.core.content.FileProvider"

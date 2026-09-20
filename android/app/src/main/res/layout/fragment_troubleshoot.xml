@@ -42,7 +42,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:hint="npub1…">
+                android:hint="npub1… or a mesh name">
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/probe_npub"
                     android:layout_width="match_parent"

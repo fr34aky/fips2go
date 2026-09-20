@@ -261,6 +261,45 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
+        <!-- Mesh names: the readable-name address book (HostsActivity). -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/mesh_names_card"
+            style="@style/Widget.Fips.Card"
+            android:clickable="true"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/Widget.Fips.CardTitle"
+                        android:text="Mesh names" />
+
+                    <TextView
+                        android:id="@+id/mesh_names_summary"
+                        style="@style/Widget.Fips.Summary" />
+                </LinearLayout>
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:layout_marginStart="8dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_chevron_right"
+                    app:tint="?attr/colorOnSurfaceVariant" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
         <!-- Nostr relays: the node's relay pool with live connection state. -->
         <com.google.android.material.card.MaterialCardView
             style="@style/Widget.Fips.Card">

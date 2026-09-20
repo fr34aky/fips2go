@@ -251,6 +251,9 @@ object ConfigStore {
             .put("enable_lan_mdns", p.getBoolean(LAN_MDNS, DEF_LAN_MDNS))
             .put("inbound_filter", p.getBoolean(INBOUND_FILTER, DEF_INBOUND_FILTER))
             .put("log_level", p.getString(LOG_LEVEL, DEF_LOG_LEVEL))
+            // Always sent, file or no file: the shim watches the path, so the
+            // first name added while connected resolves without a rebind.
+            .put("hosts_path", HostsStore.file(context).absolutePath)
 
         // Only a customised list is sent; omitted → fips's built-in relays
         // (the shim treats an empty array the same way). Re-normalised on the
