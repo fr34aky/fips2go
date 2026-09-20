@@ -50,7 +50,8 @@ class OverviewFragment : Fragment() {
 
     private var link: Link? = null
 
-    /** STARTING was entered from UP: a rebind, not a first connect. */
+    /** STARTING was entered from UP: a rebind (network flip, hotspot,
+     *  changed mesh apps), not a first connect. */
     private var reconnecting = false
     private var haloPulse: ObjectAnimator? = null
 
@@ -435,7 +436,7 @@ class OverviewFragment : Fragment() {
         detail.text = when (state) {
             Link.OFF -> "Tap to connect to the mesh"
             Link.STARTING ->
-                if (reconnecting) "Network changed — restarting the node"
+                if (reconnecting) "Applying changes — restarting the node"
                 else "Starting the mesh node — tap to cancel"
             Link.UP -> "Tap to disconnect"
         }

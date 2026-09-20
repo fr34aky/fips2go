@@ -50,6 +50,14 @@ class FipsVpnService : VpnService() {
     companion object {
         const val ACTION_CONNECT = "org.fips.android.CONNECT"
         const val ACTION_DISCONNECT = "org.fips.android.DISCONNECT"
+
+        /**
+         * The mesh-app selection changed while connected. `addAllowedApplication`
+         * is fixed at `establish()`, so applying it means a replacement tunnel —
+         * which rides the ordinary coalesced rebind (see [rebindOnce]). Sent by
+         * the picker once, on leaving the screen, not per toggle.
+         */
+        const val ACTION_APPS_CHANGED = "org.fips.android.APPS_CHANGED"
         private const val TAG = "FipsVpnService"
         private const val CHANNEL_ID = "fips_vpn"
         private const val NOTIFICATION_ID = 1
@@ -108,6 +116,13 @@ class FipsVpnService : VpnService() {
     @Volatile private var meshAddress: String? = null
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
     @Volatile private var tunnelHasIpv6Clearnet = false
+
+    /**
+     * The mesh-app set the live tunnel was established with; null before the
+     * first establish. [rebindOnce] compares it against the stored selection,
+     * so ANY rebind picks up a changed selection, whatever triggered it.
+     */
+    @Volatile private var tunnelMeshApps: Set<String>? = null
 
     // FIPS Hotspot ("!FIPS") state — see [startHotspot] for the two join
     // paths. A specifier-joined network is local-only (no INTERNET
@@ -196,6 +211,17 @@ class FipsVpnService : VpnService() {
         when (intent?.action) {
             ACTION_DISCONNECT -> {
                 shutdown()
+                return START_NOT_STICKY
+            }
+            ACTION_APPS_CHANGED -> {
+                if (!tunnelActive) {
+                    // Nothing to apply it to: the next connect reads the
+                    // selection itself. Do not linger as a started service.
+                    stopSelf()
+                } else if (currentMeshApps() != tunnelMeshApps) {
+                    Log.i(TAG, "mesh apps changed while connected; rebinding node")
+                    rebindNode()
+                }
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
@@ -595,10 +621,13 @@ class FipsVpnService : VpnService() {
         hotspotStatus = null
     }
 
+    /** The stored mesh-app selection, as an immutable copy. */
+    private fun currentMeshApps(): Set<String> =
+        (prefs().getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()).toSet()
+
     /** Build and establish the TUN. `ipv6Clearnet` decides whether `::/0` is claimed. */
     private fun establishTunnel(address: String, ipv6Clearnet: Boolean): ParcelFileDescriptor? {
-        val meshApps = prefs()
-            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
+        val meshApps = currentMeshApps()
         // Logged so a "my app is not captured" report can be settled from
         // logcat alone: this is the set the tunnel is built from, whatever
         // the picker or the Overview card shows (issue #26).
@@ -656,7 +685,9 @@ class FipsVpnService : VpnService() {
                     }
                 }
             }
-            builder.establish()
+            // Recorded only for a tunnel that actually came up, so a failed
+            // establish leaves the comparison pointing at the live one.
+            builder.establish()?.also { tunnelMeshApps = meshApps }
         } catch (e: Exception) {
             Log.e(TAG, "establish failed", e)
             null
@@ -867,9 +898,9 @@ class FipsVpnService : VpnService() {
 
     /**
      * One rebind pass. When the IPv6-clearnet decision no longer matches the
-     * tunnel's routes, establish a replacement tunnel first (Android tears the
-     * old session down when the new one comes up) and move the engine onto the
-     * fresh fd.
+     * tunnel's routes, or the mesh-app selection no longer matches its allowed
+     * apps, establish a replacement tunnel first (Android tears the old session
+     * down when the new one comes up) and move the engine onto the fresh fd.
      */
     private fun rebindOnce() {
         // Regenerate the config so the rebuilt node reflects current
@@ -884,12 +915,17 @@ class FipsVpnService : VpnService() {
             ""
         }
         val wantIpv6 = hasIpv6Internet(currentUnderlying)
-        if (wantIpv6 != tunnelHasIpv6Clearnet) {
+        // A replacement tunnel is needed when its routes are wrong (IPv6
+        // decision flipped) or its allowed-app list is (selection changed).
+        // Only ever REPLACE a tunnel: while the first connect is still
+        // establishing (tunFd null) it reads the current selection itself.
+        val appsChanged = tunFd != null && currentMeshApps() != tunnelMeshApps
+        if (wantIpv6 != tunnelHasIpv6Clearnet || appsChanged) {
             val address = meshAddress ?: return
-            Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6")
+            Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6 appsChanged=$appsChanged")
             val fresh = establishTunnel(address, wantIpv6)
             if (fresh == null) {
-                Log.e(TAG, "re-establish for route change failed; keeping old tunnel")
+                Log.e(TAG, "re-establish failed; keeping old tunnel")
                 return
             }
             val old = tunFd
@@ -918,6 +954,7 @@ class FipsVpnService : VpnService() {
 
     private fun shutdown() {
         tunnelActive = false
+        tunnelMeshApps = null
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()

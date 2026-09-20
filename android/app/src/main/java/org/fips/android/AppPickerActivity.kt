@@ -30,12 +30,15 @@ import com.google.android.material.appbar.MaterialToolbar
  * (issue #26). There is no confirm button any more — the toolbar's back arrow
  * closes the screen, and its subtitle shows the live selection count.
  *
- * The tunnel takes this set only when it is (re-)established — at connect, or
- * when the service rebinds on an IPv6-route flip — so a change made while the
- * node is running is saved but not yet in effect. Settings says "reconnect to
- * apply" for the same reason; while the node is running the picker shows a
- * matching note above the list, recomputed on every resume rather than latched,
- * so it disappears by itself once the user disconnects.
+ * The tunnel takes this set only when it is (re-)established, so a change made
+ * while connected is applied by asking the service for a replacement tunnel
+ * ([FipsVpnService.ACTION_APPS_CHANGED]). That restarts the node (~2 s of
+ * "Reconnecting…"), so it is sent ONCE, when the screen is left with a
+ * selection that differs from the one it was opened with — not per toggle,
+ * which would bounce the mesh on every tap. The service compares the stored
+ * set against the live tunnel's itself, so a redundant nudge is a no-op. While
+ * connected the picker shows a note saying so, recomputed on every resume
+ * rather than latched, so it disappears once the user disconnects.
  */
 class AppPickerActivity : AppCompatActivity() {
 
@@ -45,6 +48,9 @@ class AppPickerActivity : AppCompatActivity() {
     }
 
     private data class AppEntry(val pkg: String, val label: String, val icon: Drawable)
+
+    /** The selection as of the last nudge (or of opening the screen). */
+    private var appliedSelection: Set<String> = emptySet()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,6 +77,7 @@ class AppPickerActivity : AppCompatActivity() {
         // re-sorted on toggle: a row jumping away under the finger is worse
         // than a list that is only tidy on the next visit.
         val picked = selected.toSet()
+        appliedSelection = picked
         val sorted = entries.sortedWith(
             compareBy({ it.pkg !in picked }, { it.label.lowercase() })
         )
@@ -131,7 +138,26 @@ class AppPickerActivity : AppCompatActivity() {
         // a disconnect from the notification while this screen is open is
         // reflected as soon as the user comes back to it.
         findViewById<TextView>(R.id.reconnect_hint).visibility =
-            if (FipsNative.isRunning()) View.VISIBLE else View.GONE
+            if (FipsVpnService.tunnelActive) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Leaving the screen (Back, or the app going to the background) applies a
+     * changed selection to a live tunnel. onPause rather than onStop/onDestroy:
+     * the app is still in the foreground here, so startService is always legal.
+     */
+    override fun onPause() {
+        super.onPause()
+        val now = (prefs().getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet()).toSet()
+        if (now == appliedSelection) return
+        appliedSelection = now
+        if (!FipsVpnService.tunnelActive) return // the next connect reads it
+        runCatching {
+            startService(
+                Intent(this, FipsVpnService::class.java)
+                    .setAction(FipsVpnService.ACTION_APPS_CHANGED)
+            )
+        }
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
