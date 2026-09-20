@@ -58,6 +58,14 @@ class FipsVpnService : VpnService() {
          * the picker once, on leaving the screen, not per toggle.
          */
         const val ACTION_APPS_CHANGED = "org.fips.android.APPS_CHANGED"
+
+        /**
+         * A setting the node only reads at start changed while connected (the
+         * Nostr relay list: fips fixes its relay pool at node start). Every
+         * rebind regenerates the config JSON and restarts the node, so this is
+         * just a rebind request. The sender checks that something changed.
+         */
+        const val ACTION_CONFIG_CHANGED = "org.fips.android.CONFIG_CHANGED"
         private const val TAG = "FipsVpnService"
         private const val CHANNEL_ID = "fips_vpn"
         private const val NOTIFICATION_ID = 1
@@ -220,6 +228,15 @@ class FipsVpnService : VpnService() {
                     stopSelf()
                 } else if (currentMeshApps() != tunnelMeshApps) {
                     Log.i(TAG, "mesh apps changed while connected; rebinding node")
+                    rebindNode()
+                }
+                return START_NOT_STICKY
+            }
+            ACTION_CONFIG_CHANGED -> {
+                if (!tunnelActive) {
+                    stopSelf()
+                } else {
+                    Log.i(TAG, "node config changed while connected; rebinding node")
                     rebindNode()
                 }
                 return START_NOT_STICKY

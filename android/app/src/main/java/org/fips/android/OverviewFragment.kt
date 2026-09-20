@@ -114,6 +114,9 @@ class OverviewFragment : Fragment() {
             startActivity(Intent(requireContext(), AppPickerActivity::class.java))
         }
         view.findViewById<View>(R.id.pick_apps).setOnClickListener(pickApps)
+        view.findViewById<View>(R.id.manage_relays).setOnClickListener {
+            startActivity(Intent(requireContext(), RelaysActivity::class.java))
+        }
         view.findViewById<View>(R.id.mesh_apps_card).setOnClickListener(pickApps)
         view.findViewById<MaterialButton>(R.id.battery_allow).setOnClickListener {
             requestBatteryExemption()
@@ -486,6 +489,14 @@ class OverviewFragment : Fragment() {
         val relays = status.optJSONArray("relays") ?: JSONArray()
         var connected = 0
         val rows = ArrayList<Triple<String, String, Boolean>>()
+        // Not running: there is no pool to report, so show the CONFIGURED
+        // relays, stateless, rather than an empty card — it is what the next
+        // connect will use, and where an edit in the relay editor shows up.
+        if (!running) {
+            for (url in ConfigStore.effectiveRelays(requireContext())) {
+                rows.add(Triple(url.removePrefix("wss://").removePrefix("ws://"), "", false))
+            }
+        }
         for (i in 0 until relays.length()) {
             val r = relays.getJSONObject(i)
             val up = r.optBoolean("connected")
@@ -499,7 +510,7 @@ class OverviewFragment : Fragment() {
             )
         }
         relaysList.visibility = if (rows.isEmpty()) View.GONE else View.VISIBLE
-        relaysCount.visibility = relaysList.visibility
+        relaysCount.visibility = if (running && rows.isNotEmpty()) View.VISIBLE else View.GONE
         relaysCount.text = "$connected/${rows.size}"
         relaysSummary.text = when {
             !running -> "Relays connect when the node is running."

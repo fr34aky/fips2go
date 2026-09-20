@@ -30,6 +30,17 @@ object ConfigStore {
     const val INBOUND_PORTS = "inbound_ports"
     const val LOG_LEVEL = "log_level"
 
+    /**
+     * User-edited Nostr relay list, one URL per line. ABSENT means "never
+     * customised": nothing is passed to the shim and fips uses its built-in
+     * relays — so an untouched install keeps following fips's defaults across
+     * pin bumps. Deliberately not seeded by [applyDefaults] for that reason.
+     *
+     * NOT "nostr_relays": that name belongs to the pre-0.3 setting and sits in
+     * [RETIRED_KEYS], so applyDefaults would delete this list on every launch.
+     */
+    const val NOSTR_RELAYS = "relay_list"
+
     /** App-side only (not part of the shim config JSON). */
     const val AUTO_UPDATE = "auto_update_check"
 
@@ -103,6 +114,61 @@ object ConfigStore {
 
     /** Dropdown entry for a manually configured peer. */
     const val BOOTSTRAP_CUSTOM = "custom"
+
+    /**
+     * What an uncustomised node uses — a DISPLAY mirror of fips's built-in
+     * `advert_relays`/`dm_relays` default (fips `src/config/node.rs`), shown
+     * in the relay editor and on Overview while disconnected. It is never sent
+     * to the shim; check it against fips when bumping the pin.
+     */
+    val DEFAULT_RELAYS = listOf("wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub")
+
+    /** Every relay is a standing websocket; keep the list phone-sized. */
+    const val MAX_RELAYS = 8
+
+    /** The customised list, or null when the node runs on fips's defaults. */
+    fun customRelays(context: Context): List<String>? {
+        val p = prefs(context)
+        if (!p.contains(NOSTR_RELAYS)) return null
+        return (p.getString(NOSTR_RELAYS, "") ?: "").lines()
+            .mapNotNull { normalizeRelay(it) }.distinct().ifEmpty { null }
+    }
+
+    /** The relays the next node start will use. */
+    fun effectiveRelays(context: Context): List<String> = customRelays(context) ?: DEFAULT_RELAYS
+
+    /** Store a customised list; null or empty returns to fips's defaults. */
+    fun setCustomRelays(context: Context, relays: List<String>?) {
+        val e = prefs(context).edit()
+        if (relays.isNullOrEmpty()) e.remove(NOSTR_RELAYS)
+        else e.putString(NOSTR_RELAYS, relays.joinToString("\n"))
+        e.apply()
+    }
+
+    /**
+     * Canonical form of a user-typed relay, or null if it is not one. Strict
+     * on purpose: fips adds every configured relay with `add_relay(..)?`, so a
+     * single URL nostr-sdk rejects fails the whole Nostr bootstrap — NAT
+     * traversal and npub lookup gone, with only a log line to show for it. A
+     * bare host gets `wss://`; `ws://` stays allowed for LAN/test relays.
+     */
+    fun normalizeRelay(input: String): String? {
+        val raw = input.trim()
+        if (raw.isEmpty() || raw.any { it.isWhitespace() }) return null
+        val withScheme = if ("://" in raw) raw else "wss://$raw"
+        val uri = runCatching { java.net.URI(withScheme) }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase() ?: return null
+        val host = uri.host?.lowercase() ?: return null
+        if (scheme != "wss" && scheme != "ws") return null
+        if (uri.userInfo != null || uri.fragment != null) return null
+        if (!host.contains('.') && host != "localhost" && !host.startsWith("[")) return null
+        // -1 = none given. Anything else out of range is a typo, not a default.
+        if (uri.port != -1 && uri.port !in 1..65535) return null
+        val port = if (uri.port == -1) "" else ":${uri.port}"
+        val path = (uri.rawPath ?: "").trimEnd('/')
+        val query = uri.rawQuery?.let { "?$it" } ?: ""
+        return "$scheme://$host$port$path$query"
+    }
 
     /**
      * Seed the defaults for any setting the user has never saved, and drop
@@ -185,6 +251,14 @@ object ConfigStore {
             .put("enable_lan_mdns", p.getBoolean(LAN_MDNS, DEF_LAN_MDNS))
             .put("inbound_filter", p.getBoolean(INBOUND_FILTER, DEF_INBOUND_FILTER))
             .put("log_level", p.getString(LOG_LEVEL, DEF_LOG_LEVEL))
+
+        // Only a customised list is sent; omitted → fips's built-in relays
+        // (the shim treats an empty array the same way). Re-normalised on the
+        // way out, so nothing unvalidated reaches `add_relay` even if the
+        // stored string was written by an older build.
+        customRelays(context)?.let { relays ->
+            config.put("nostr_relays", JSONArray(relays.take(MAX_RELAYS)))
+        }
 
         val inboundPorts = JSONArray()
         (p.getString(INBOUND_PORTS, "") ?: "").split('\n', ',', ' ')
