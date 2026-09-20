@@ -5,7 +5,6 @@ import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.google.android.material.snackbar.Snackbar
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -39,7 +38,7 @@ object UpdateUi {
     }
 
     fun downloadAndInstall(activity: AppCompatActivity, root: View, update: Updater.Update) {
-        Snackbar.make(root, "Downloading v${update.version}…", Snackbar.LENGTH_SHORT).show()
+        Ui.snack(root, "Downloading v${update.version}…")
         thread {
             val result = runCatching { Updater.fetch(activity.applicationContext, update) }
             activity.runOnUiThread {
@@ -47,8 +46,7 @@ object UpdateUi {
                 result.fold(
                     onSuccess = { apk -> launchInstall(activity, update, apk) },
                     onFailure = {
-                        Snackbar.make(root, "Download failed: ${it.message}", Snackbar.LENGTH_LONG)
-                            .show()
+                        Ui.snack(root, "Download failed: ${it.message}", long = true)
                     },
                 )
             }

@@ -10,9 +10,9 @@
     android:layout_height="match_parent"
     android:clipToPadding="false"
     android:fillViewport="true"
-    android:paddingHorizontal="12dp"
-    android:paddingTop="12dp"
-    android:paddingBottom="88dp">
+    android:paddingHorizontal="16dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="96dp">
 
 <LinearLayout
     android:layout_width="match_parent"
@@ -21,11 +21,7 @@
 
     <!-- Resolve / reachability -->
     <com.google.android.material.card.MaterialCardView
-        style="@style/Widget.Material3.CardView.Filled"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
-        app:cardCornerRadius="16dp">
+        style="@style/Widget.Fips.Card">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -34,16 +30,18 @@
             android:padding="16dp">
 
             <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Resolve / ping an npub"
-                android:textAppearance="?attr/textAppearanceTitleMedium" />
+                style="@style/Widget.Fips.CardTitle"
+                android:text="Resolve / ping an npub" />
+
+            <TextView
+                style="@style/Widget.Fips.Summary"
+                android:text="Turn an npub into its mesh address, or ask the running node whether it has a link or a route to it." />
 
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
+                android:layout_marginTop="12dp"
                 android:hint="npub1…">
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/probe_npub"
@@ -55,6 +53,7 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:orientation="horizontal">
 
                 <com.google.android.material.button.MaterialButton
@@ -75,24 +74,23 @@
                     android:text="Check reachability" />
             </LinearLayout>
 
+            <!-- Hidden until there is a result to show. -->
             <TextView
                 android:id="@+id/probe_result"
+                style="@style/Widget.Fips.Mono"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:fontFamily="monospace"
+                android:background="@drawable/bg_field"
+                android:padding="12dp"
                 android:textIsSelectable="true"
-                android:textSize="12sp" />
+                android:visibility="gone" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
     <!-- Live FMP / FSP sessions -->
     <com.google.android.material.card.MaterialCardView
-        style="@style/Widget.Material3.CardView.Filled"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
-        app:cardCornerRadius="16dp">
+        style="@style/Widget.Fips.Card">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -101,17 +99,21 @@
             android:padding="16dp">
 
             <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Sessions"
-                android:textAppearance="?attr/textAppearanceTitleMedium" />
+                style="@style/Widget.Fips.CardTitle"
+                android:text="Sessions" />
+
+            <TextView
+                style="@style/Widget.Fips.Summary"
+                android:text="Direct links to peers (FMP) and end-to-end encrypted sessions (FSP). ▲ parent · ▼ child." />
 
             <TextView
                 android:id="@+id/sessions_view"
+                style="@style/Widget.Fips.Mono"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:fontFamily="monospace"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_field"
+                android:padding="12dp"
                 android:textIsSelectable="true"
                 android:textSize="11sp" />
         </LinearLayout>
@@ -119,11 +121,7 @@
 
     <!-- Nearby peers seen via mDNS LAN discovery -->
     <com.google.android.material.card.MaterialCardView
-        style="@style/Widget.Material3.CardView.Filled"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
-        app:cardCornerRadius="16dp">
+        style="@style/Widget.Fips.Card">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -132,27 +130,18 @@
             android:padding="16dp">
 
             <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Nearby (mDNS)"
-                android:textAppearance="?attr/textAppearanceTitleMedium" />
+                style="@style/Widget.Fips.CardTitle"
+                android:text="Nearby (mDNS)" />
 
             <TextView
                 android:id="@+id/hotspot_status"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="12sp"
+                style="@style/Widget.Fips.Summary"
                 android:visibility="gone" />
 
             <TextView
                 android:id="@+id/lan_empty"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="12sp" />
+                style="@style/Widget.Fips.Summary"
+                android:layout_marginTop="8dp" />
 
             <ScrollView
                 android:id="@+id/lan_scroll"
@@ -170,6 +159,17 @@
     </com.google.android.material.card.MaterialCardView>
 
     <!-- Logs -->
+    <com.google.android.material.card.MaterialCardView
+        style="@style/Widget.Fips.Card">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingHorizontal="16dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="16dp">
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -177,11 +177,10 @@
         android:orientation="horizontal">
 
         <TextView
+            style="@style/Widget.Fips.CardTitle"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Logs"
-            android:textAppearance="?attr/textAppearanceTitleMedium" />
+            android:text="Logs" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/expand_logs"
@@ -209,17 +208,20 @@
         android:id="@+id/log_scroll"
         android:layout_width="match_parent"
         android:layout_height="260dp"
-        android:background="?attr/colorSurfaceVariant"
-        android:padding="8dp">
+        android:background="@drawable/bg_field"
+        android:padding="12dp">
 
         <TextView
             android:id="@+id/log_view"
+            style="@style/Widget.Fips.Mono"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:fontFamily="monospace"
             android:textIsSelectable="true"
             android:textSize="11sp" />
     </ScrollView>
+
+    </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
 
     <LinearLayout
         android:layout_width="wrap_content"
@@ -232,7 +234,7 @@
             android:id="@+id/app_version"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="?android:attr/textColorSecondary"
+            android:textColor="?attr/colorOnSurfaceVariant"
             android:textSize="11sp" />
 
         <com.google.android.material.button.MaterialButton

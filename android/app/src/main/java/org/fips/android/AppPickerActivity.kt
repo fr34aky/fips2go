@@ -7,12 +7,14 @@ import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
-import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.ListView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.doAfterTextChanged
+import com.google.android.material.appbar.MaterialToolbar
 
 /**
  * Lets the user pick which apps route through the FIPS mesh (VpnService
@@ -25,13 +27,14 @@ import androidx.appcompat.app.AppCompatActivity
  * screen used to persist only on an explicit Save, and leaving it with Back
  * silently discarded the change while the rows still showed the new state —
  * the user believed an app was selected that the tunnel never captured
- * (issue #26). The bottom button now just closes the screen.
+ * (issue #26). There is no confirm button any more — the toolbar's back arrow
+ * closes the screen, and its subtitle shows the live selection count.
  *
  * The tunnel takes this set only when it is (re-)established — at connect, or
  * when the service rebinds on an IPv6-route flip — so a change made while the
  * node is running is saved but not yet in effect. Settings says "reconnect to
  * apply" for the same reason; while the node is running the picker shows a
- * matching note above Done, recomputed on every resume rather than latched,
+ * matching note above the list, recomputed on every resume rather than latched,
  * so it disappears by itself once the user disconnects.
  */
 class AppPickerActivity : AppCompatActivity() {
@@ -60,34 +63,66 @@ class AppPickerActivity : AppCompatActivity() {
                     AppEntry(pkg, pm.getApplicationLabel(info).toString(), pm.getApplicationIcon(info))
                 }.getOrNull()
             }
-            .sortedBy { it.label.lowercase() }
 
         val selected =
             (prefs().getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet()).toMutableSet()
 
-        // Custom rows (icon + label + package + checkbox); selection is kept
-        // in `selected` directly rather than ListView's choice mode.
-        findViewById<ListView>(R.id.app_list).adapter =
-            object : ArrayAdapter<AppEntry>(this, 0, entries) {
-                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val row = convertView
-                        ?: layoutInflater.inflate(R.layout.item_app, parent, false)
-                    val e = entries[position]
-                    row.findViewById<ImageView>(R.id.app_icon).setImageDrawable(e.icon)
-                    row.findViewById<TextView>(R.id.app_label).text = e.label
-                    row.findViewById<TextView>(R.id.app_pkg).text = e.pkg
-                    val check = row.findViewById<CheckBox>(R.id.app_check)
-                    check.isChecked = e.pkg in selected
-                    row.setOnClickListener {
-                        if (!selected.remove(e.pkg)) selected.add(e.pkg)
-                        check.isChecked = e.pkg in selected
-                        persist(selected)
-                    }
-                    return row
-                }
-            }
+        // Selected apps first, as of opening the screen. The order is NOT
+        // re-sorted on toggle: a row jumping away under the finger is worse
+        // than a list that is only tidy on the next visit.
+        val picked = selected.toSet()
+        val sorted = entries.sortedWith(
+            compareBy({ it.pkg !in picked }, { it.label.lowercase() })
+        )
 
-        findViewById<Button>(R.id.done).setOnClickListener { finish() }
+        val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
+        toolbar.setNavigationOnClickListener { finish() }
+        val showCount = {
+            toolbar.subtitle = when (selected.size) {
+                0 -> "None selected"
+                else -> "${selected.size} selected"
+            }
+        }
+        showCount()
+
+        // Custom rows (icon + label + package + checkbox); selection is kept
+        // in `selected` directly rather than ListView's choice mode. The
+        // adapter owns a filtered copy of `sorted`, so rows bind via getItem.
+        val adapter = object : ArrayAdapter<AppEntry>(this, 0, ArrayList(sorted)) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = convertView
+                    ?: layoutInflater.inflate(R.layout.item_app, parent, false)
+                val e = getItem(position) ?: return row
+                row.findViewById<ImageView>(R.id.app_icon).setImageDrawable(e.icon)
+                row.findViewById<TextView>(R.id.app_label).text = e.label
+                row.findViewById<TextView>(R.id.app_pkg).text = e.pkg
+                val check = row.findViewById<CheckBox>(R.id.app_check)
+                check.isChecked = e.pkg in selected
+                row.setOnClickListener {
+                    if (!selected.remove(e.pkg)) selected.add(e.pkg)
+                    check.isChecked = e.pkg in selected
+                    persist(selected)
+                    showCount()
+                }
+                return row
+            }
+        }
+        val list = findViewById<ListView>(R.id.app_list)
+        list.adapter = adapter
+        val empty = findViewById<View>(R.id.app_list_empty)
+
+        // Match on the label or the package name. Filtered by hand rather than
+        // through ArrayAdapter's Filter, which matches toString() prefixes.
+        findViewById<EditText>(R.id.app_search).doAfterTextChanged { text ->
+            val query = text?.toString()?.trim()?.lowercase().orEmpty()
+            val matches = if (query.isEmpty()) sorted else sorted.filter {
+                it.label.lowercase().contains(query) || it.pkg.lowercase().contains(query)
+            }
+            adapter.clear()
+            adapter.addAll(matches)
+            list.visibility = if (matches.isEmpty()) View.GONE else View.VISIBLE
+            empty.visibility = if (matches.isEmpty()) View.VISIBLE else View.GONE
+        }
     }
 
     override fun onResume() {

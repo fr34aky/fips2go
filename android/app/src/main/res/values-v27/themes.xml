@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The system navigation bar takes the bottom navigation's colour so the
+         two read as one slab. Only from API 27: that is where
+         windowLightNavigationBar exists, and without it a light bar would
+         carry white, invisible system buttons. API 26 keeps the default. -->
+    <style name="Theme.Fips" parent="Base.Theme.Fips">
+        <item name="android:navigationBarColor">?attr/colorSurfaceContainer</item>
+        <item name="android:windowLightNavigationBar">?attr/isLightTheme</item>
+    </style>
+</resources>

@@ -83,6 +83,17 @@ class FipsVpnService : VpnService() {
          */
         @Volatile var hotspotStatus: String? = null
             private set
+
+        /**
+         * UI-visible: the service holds (or is bringing up) a tunnel. Unlike
+         * `FipsNative.isRunning()` this stays true across a rebind, where the
+         * node is torn down and restarted on the same tun fd and the engine
+         * reports "not running" for a couple of seconds. Overview's single
+         * connect toggle keys off it: during that gap a tap must still mean
+         * "disconnect". Written only by the service; changes no behaviour here.
+         */
+        @Volatile var tunnelActive: Boolean = false
+            private set
     }
 
     private var tunFd: ParcelFileDescriptor? = null
@@ -198,6 +209,7 @@ class FipsVpnService : VpnService() {
                 }
                 val address = identity.getString("address")
                 val config = ConfigStore.buildConfigJson(this, nsec)
+                tunnelActive = true
                 startForegroundWithNotification(address)
                 thread(name = "fips-connect") { connect(config, address) }
                 return START_STICKY
@@ -905,6 +917,7 @@ class FipsVpnService : VpnService() {
     }
 
     private fun shutdown() {
+        tunnelActive = false
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
@@ -918,6 +931,7 @@ class FipsVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        tunnelActive = false
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()

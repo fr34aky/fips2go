@@ -1,11 +1,53 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Fips" parent="Theme.Material3.DayNight.NoActionBar">
+    <!-- One theme for both modes: every role points at a colour that has a
+         values-night twin, so DayNight swaps the scheme and nothing here
+         needs a night copy. The full role set is mapped (not just primary):
+         Material fills whatever is missing from its purple baseline, and the
+         surface-container roles are what cards, the bottom bar and dialogs
+         actually paint with. -->
+    <style name="Base.Theme.Fips" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">@color/fips_primary</item>
         <item name="colorOnPrimary">@color/fips_on_primary</item>
         <item name="colorPrimaryContainer">@color/fips_primary_container</item>
         <item name="colorOnPrimaryContainer">@color/fips_on_primary_container</item>
+        <item name="colorPrimaryInverse">@color/fips_inverse_primary</item>
         <item name="colorSecondary">@color/fips_secondary</item>
+        <item name="colorOnSecondary">@color/fips_on_secondary</item>
+        <item name="colorSecondaryContainer">@color/fips_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/fips_on_secondary_container</item>
+        <item name="colorTertiary">@color/fips_tertiary</item>
+        <item name="colorOnTertiary">@color/fips_on_tertiary</item>
+        <item name="colorTertiaryContainer">@color/fips_tertiary_container</item>
+        <item name="colorOnTertiaryContainer">@color/fips_on_tertiary_container</item>
+        <item name="colorError">@color/fips_error</item>
+        <item name="colorOnError">@color/fips_on_error</item>
+        <item name="colorErrorContainer">@color/fips_error_container</item>
+        <item name="colorOnErrorContainer">@color/fips_on_error_container</item>
+
+        <item name="android:colorBackground">@color/fips_surface</item>
+        <item name="colorOnBackground">@color/fips_on_surface</item>
+        <item name="colorSurface">@color/fips_surface</item>
+        <item name="colorOnSurface">@color/fips_on_surface</item>
+        <item name="colorSurfaceVariant">@color/fips_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/fips_on_surface_variant</item>
+        <item name="colorOutline">@color/fips_outline</item>
+        <item name="colorOutlineVariant">@color/fips_outline_variant</item>
+        <item name="colorSurfaceInverse">@color/fips_inverse_surface</item>
+        <item name="colorOnSurfaceInverse">@color/fips_inverse_on_surface</item>
+        <item name="colorSurfaceDim">@color/fips_surface_dim</item>
+        <item name="colorSurfaceBright">@color/fips_surface_bright</item>
+        <item name="colorSurfaceContainerLowest">@color/fips_surface_container_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/fips_surface_container_low</item>
+        <item name="colorSurfaceContainer">@color/fips_surface_container</item>
+        <item name="colorSurfaceContainerHigh">@color/fips_surface_container_high</item>
+        <item name="colorSurfaceContainerHighest">@color/fips_surface_container_highest</item>
+
         <item name="android:statusBarColor">?attr/colorSurface</item>
+        <!-- Material3.DayNight leaves this off, which put white clock/battery
+             icons on the light surface. -->
+        <item name="android:windowLightStatusBar">?attr/isLightTheme</item>
     </style>
+
+    <style name="Theme.Fips" parent="Base.Theme.Fips" />
 </resources>

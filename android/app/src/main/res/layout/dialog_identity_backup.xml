@@ -20,14 +20,13 @@
 
         <TextView
             android:id="@+id/backup_nsec"
+            style="@style/Widget.Fips.Mono"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:background="?attr/colorSurfaceVariant"
-            android:fontFamily="monospace"
+            android:background="@drawable/bg_field"
             android:padding="12dp"
-            android:textIsSelectable="true"
-            android:textSize="12sp" />
+            android:textIsSelectable="true" />
 
         <TextView
             android:id="@+id/backup_npub"

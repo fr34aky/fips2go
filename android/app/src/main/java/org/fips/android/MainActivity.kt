@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
@@ -185,15 +186,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun disconnect() {
+        connectStartedAt = 0L
         startService(
             Intent(this, FipsVpnService::class.java).setAction(FipsVpnService.ACTION_DISCONNECT)
         )
     }
 
     private fun startVpn() {
+        connectStartedAt = SystemClock.elapsedRealtime()
         startForegroundService(
             Intent(this, FipsVpnService::class.java).setAction(FipsVpnService.ACTION_CONNECT)
         )
     }
 
+    /**
+     * Bridges the moment between the tap and the service picking the intent
+     * up (`FipsVpnService.tunnelActive`, which then carries the state until
+     * the node reports running). Overview's single toggle needs it: in that
+     * gap a second tap has to mean "cancel", not "connect again". Static so a
+     * rotation mid-connect keeps it; a UI hint only, deliberately short, so a
+     * start the service rejected does not read as "Connecting…" for long.
+     */
+    companion object {
+        private const val CONNECT_GRACE_MS = 3_000L
+
+        @Volatile private var connectStartedAt = 0L
+
+        fun isConnecting(): Boolean {
+            val since = connectStartedAt
+            return since != 0L && SystemClock.elapsedRealtime() - since < CONNECT_GRACE_MS
+        }
+
+        /** The node reported running (or was stopped): the gap is over. */
+        fun connectSettled() {
+            connectStartedAt = 0L
+        }
+    }
 }

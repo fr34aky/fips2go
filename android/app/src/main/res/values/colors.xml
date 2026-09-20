@@ -1,13 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- A calm teal/green palette that reads as "mesh / secure". -->
-    <color name="fips_primary">#1F6F5C</color>
+    <!-- Light scheme: the teal "mesh / secure" primary on cool-neutral
+         surfaces, so light and dark (values-night, the logo's navy) read as
+         one family. Every role Theme.Fips maps is defined in both files —
+         add a colour here and it needs a night twin. -->
+    <color name="fips_primary">#006B5A</color>
     <color name="fips_on_primary">#FFFFFF</color>
-    <color name="fips_primary_container">#A6F2DC</color>
-    <color name="fips_on_primary_container">#002019</color>
-    <color name="fips_secondary">#4A635B</color>
+    <color name="fips_primary_container">#9EF2DC</color>
+    <color name="fips_on_primary_container">#00201A</color>
+    <color name="fips_inverse_primary">#82D5C0</color>
+    <color name="fips_secondary">#4B635B</color>
+    <color name="fips_on_secondary">#FFFFFF</color>
+    <color name="fips_secondary_container">#CDE8DE</color>
+    <color name="fips_on_secondary_container">#072019</color>
+    <color name="fips_tertiary">#426277</color>
+    <color name="fips_on_tertiary">#FFFFFF</color>
+    <color name="fips_tertiary_container">#C7E7FF</color>
+    <color name="fips_on_tertiary_container">#001E2E</color>
+    <color name="fips_error">#BA1A1A</color>
+    <color name="fips_on_error">#FFFFFF</color>
+    <color name="fips_error_container">#FFDAD6</color>
+    <color name="fips_on_error_container">#410002</color>
+
+    <color name="fips_surface">#F7F9FC</color>
+    <color name="fips_on_surface">#171C22</color>
+    <color name="fips_surface_variant">#DCE3EA</color>
+    <color name="fips_on_surface_variant">#40484F</color>
+    <color name="fips_outline">#707880</color>
+    <color name="fips_outline_variant">#C0C7CF</color>
+    <color name="fips_inverse_surface">#2C3137</color>
+    <color name="fips_inverse_on_surface">#EEF1F6</color>
+    <color name="fips_surface_dim">#D7DADF</color>
+    <color name="fips_surface_bright">#F7F9FC</color>
+    <color name="fips_surface_container_lowest">#FFFFFF</color>
+    <color name="fips_surface_container_low">#F1F4F8</color>
+    <color name="fips_surface_container">#EBEEF3</color>
+    <color name="fips_surface_container_high">#E5E8ED</color>
+    <color name="fips_surface_container_highest">#DFE3E8</color>
+
+    <!-- Live-state dots (relays, peers, the connection pill). -->
     <color name="status_ok">#2E7D32</color>
-    <color name="status_off">#9E9E9E</color>
+    <color name="status_warn">#B26A00</color>
+    <color name="status_off">#8A9199</color>
+
     <!-- Launcher icon backdrop: the navy from docs/logos/fips_logo.png. -->
     <color name="ic_launcher_background">#00081A</color>
 </resources>

@@ -2,14 +2,14 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
     <item
         android:id="@+id/nav_overview"
-        android:icon="@android:drawable/ic_menu_compass"
+        android:icon="@drawable/ic_nav_overview"
         android:title="Overview" />
     <item
         android:id="@+id/nav_settings"
-        android:icon="@android:drawable/ic_menu_manage"
+        android:icon="@drawable/ic_nav_settings"
         android:title="Settings" />
     <item
         android:id="@+id/nav_troubleshoot"
-        android:icon="@android:drawable/ic_menu_search"
+        android:icon="@drawable/ic_nav_diagnostics"
         android:title="Diagnostics" />
 </menu>

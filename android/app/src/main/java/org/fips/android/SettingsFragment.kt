@@ -13,11 +13,10 @@ import android.widget.LinearLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
-import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
-import com.google.android.material.snackbar.Snackbar
 import org.fips.android.ConfigStore as CS
 
 /**
@@ -42,11 +41,11 @@ class SettingsFragment : Fragment() {
     ) { granted ->
         if (!granted) {
             view?.let {
-                Snackbar.make(
+                Ui.snack(
                     it,
                     "Without location, !FIPS hotspots are only joined once per connect",
-                    Snackbar.LENGTH_LONG
-                ).show()
+                    long = true,
+                )
             }
         }
     }
@@ -82,6 +81,7 @@ class SettingsFragment : Fragment() {
                 HotspotLocation.markAsked(requireContext())
                 ensureLocationPermission()
             }
+            syncSaveButton(view)
         }
         // Merely opening Settings is not a request for anything. The toggle
         // now defaults to on, so prompting off the back of "isChecked" would
@@ -91,10 +91,12 @@ class SettingsFragment : Fragment() {
             HotspotLocation.markAsked(requireContext())
             HotspotLocation.explain(requireContext(), onContinue = { ensureLocationPermission() })
         }
-        view.findViewById<MaterialButton>(R.id.save).setOnClickListener {
+        view.findViewById<View>(R.id.save).setOnClickListener {
             save(view)
-            Snackbar.make(view, "Saved — reconnect to apply", Snackbar.LENGTH_SHORT).show()
+            Ui.snack(view, savedMessage())
+            syncSaveButton(view)
         }
+        watchForEdits(view)
         // Backing out of the activity destroys unsaved edits too.
         requireActivity().onBackPressedDispatcher.addCallback(
             viewLifecycleOwner,
@@ -124,7 +126,7 @@ class SettingsFragment : Fragment() {
             .setMessage("Edits only take effect once saved (and applied on the next connect).")
             .setPositiveButton("Save") { _, _ ->
                 save(v)
-                Snackbar.make(v, "Saved — reconnect to apply", Snackbar.LENGTH_SHORT).show()
+                Ui.snack(v, savedMessage())
                 proceed()
             }
             .setNegativeButton("Discard") { _, _ ->
@@ -134,6 +136,38 @@ class SettingsFragment : Fragment() {
             .setNeutralButton("Cancel", null)
             .show()
         return true
+    }
+
+    /** Settings are read at connect time, so a running node needs a reconnect. */
+    private fun savedMessage() =
+        if (runCatching { FipsNative.isRunning() }.getOrDefault(false)) {
+            "Saved — reconnect to apply"
+        } else {
+            "Saved"
+        }
+
+    /**
+     * The Save button doubles as the unsaved-edits indicator: it is on screen
+     * exactly while [hasUnsavedChanges] holds. Every widget reports into
+     * [syncSaveButton], which re-derives that from scratch rather than
+     * tracking a dirty flag — so flipping a switch back, [load] on Discard,
+     * and the view-state restore after a rotation all come out right.
+     */
+    private fun watchForEdits(view: View) {
+        for (id in SWITCHES) {
+            // The hotspot switch already reports from its own listener.
+            if (id != R.id.hotspot) {
+                sw(view, id).setOnCheckedChangeListener { _, _ -> syncSaveButton(view) }
+            }
+        }
+        // Dropdowns are EditTexts too; a picked item arrives as a text change.
+        for (id in TEXT_FIELDS) edit(view, id).doAfterTextChanged { syncSaveButton(view) }
+        syncSaveButton(view)
+    }
+
+    private fun syncSaveButton(view: View) {
+        val save = view.findViewById<ExtendedFloatingActionButton>(R.id.save)
+        if (hasUnsavedChanges(view)) save.show() else save.hide()
     }
 
     /** Compare widgets against prefs, mirroring save()'s normalization. */
@@ -289,5 +323,15 @@ class SettingsFragment : Fragment() {
 
     private companion object {
         const val STATE_ADVANCED = "advanced_expanded"
+
+        /** Every persisted widget; [watchForEdits] must see all of them. */
+        val SWITCHES = intArrayOf(
+            R.id.inbound_filter, R.id.lan_mdns, R.id.hotspot, R.id.battery_saver,
+            R.id.auto_update, R.id.forward_clearnet,
+        )
+        val TEXT_FIELDS = intArrayOf(
+            R.id.peer_npub, R.id.peer_endpoint, R.id.peer_transport, R.id.inbound_ports,
+            R.id.worker_threads, R.id.log_level,
+        )
     }
 }
