@@ -11,6 +11,10 @@ tunnel with a userspace forwarder).
 |---|---|---|---|
 | ![Overview: connected to the mesh](docs/screenshots/overview.png) | ![Settings](docs/screenshots/settings.png) | ![Diagnostics](docs/screenshots/diagnostics.png) | ![Per-app split tunnel](docs/screenshots/app-picker.png) |
 
+| Dark mode | Nostr relays |
+|---|---|
+| ![Overview in dark mode](docs/screenshots/overview-dark.png) | ![Add and remove Nostr relays](docs/screenshots/relays.png) |
+
 <sub>Captured on the x86_64 emulator, joined to the live public mesh.</sub>
 
 ## Features
@@ -22,7 +26,8 @@ usable on a device you also use for everything else.
   the mesh **and** normal internet — clearnet traffic rides a userspace
   forwarder on sockets protected from the tunnel — and every other app on the
   phone is untouched. With nothing selected the tunnel captures only fips2go
-  itself, so it does nothing.
+  itself, so it does nothing. Change the selection while connected and the
+  mesh reconnects for a moment to apply it — no manual reconnect.
 - **`.fips` names just resolve.** Covered apps' DNS is intercepted in-process:
   `.fips` names are answered by the built-in resolver, everything else goes to
   your normal upstreams. A `.fips` hostname works in the browser with nothing
@@ -49,9 +54,15 @@ usable on a device you also use for everything else.
   reporting the new network (the service pokes fips's medium-change detector
   the moment the callback fires). No restart, no manual reconnect — including
   on IPv4-only CGNAT mobile networks, where extra probe routes keep AAAA
-  lookups (and so `.fips` names) resolving. Only two cases still restart the
-  node: an underlay whose IPv6 status differs from the last one, and a FIPS
-  Hotspot joining or leaving.
+  lookups (and so `.fips` names) resolving. Only two network events still
+  restart the node: an underlay whose IPv6 status differs from the last one,
+  and a FIPS Hotspot joining or leaving. (Changing the mesh apps or the relay
+  list while connected restarts it too, once, because you asked.)
+- **Your choice of Nostr relays.** The node publishes its address to, and looks
+  peers up on, fips's three default relays out of the box. Add your own or
+  remove any of them from Overview; addresses are validated before they are
+  saved, because one the relay client rejects would take the whole rendezvous
+  down with it.
 - **Diagnostics that answer the real questions.** Resolve or ping an npub,
   live peer sessions with byte counts, nearby mDNS sightings, which Nostr
   relays the node is actually connected to, and a log viewer you can expand
