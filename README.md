@@ -62,7 +62,8 @@ usable on a device you also use for everything else.
   the VPN is up. Identity and settings survive.
 - **Zero-config first run.** A fresh install connects without opening
   Settings: a bootstrap peer and working defaults are seeded on first launch.
-  This also covers always-on VPN, where the service starts with no UI at all.
+  (Android's *Always-on VPN* is deliberately not supported: the app declares
+  so, and the toggle is greyed out in system settings. Connect from the app.)
 - **Battery-aware.** A saver profile relaxes the maintenance tick and halves
   heartbeats, measured at ~40% less idle CPU; the packet pump idles at
   essentially zero wakeups.
