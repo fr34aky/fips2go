@@ -274,6 +274,7 @@ fn start_inner(
         upstreams: shim_config.upstream_addrs(),
         writer_tx: writer_tx.clone(),
         protect: engine_protect.clone(),
+        hosts: crate::dns::hosts_reloader(shim_config.hosts_path.as_deref()),
     });
 
     // Clearnet forwarder (split-tunnel): non-mesh packets from the pump go

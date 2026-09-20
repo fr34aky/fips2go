@@ -32,6 +32,11 @@ usable on a device you also use for everything else.
   `.fips` names are answered by the built-in resolver, everything else goes to
   your normal upstreams. A `.fips` hostname works in the browser with nothing
   to configure.
+- **Mesh names.** An address book on Overview maps readable names to npubs —
+  `home.fips` instead of `npub1k3ae….fips` — for every mesh app, like a hosts
+  file (it *is* one: fips's `name npub` format). Names are local to the
+  device, and adding or re-pointing one applies to the next lookup; the mesh
+  does not reconnect.
 - **Default-deny inbound firewall.** Any authorized node on the mesh can
   otherwise reach any port your selected apps listen on, as if you had joined
   a shared LAN. Only replies to connections the phone opened, ICMPv6, and an
@@ -227,7 +232,9 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   userspace forwarder.
 - **DNS**: covered-app DNS is sent to the `fd00::53` sentinel and intercepted
   in the pump. `.fips` names go to the in-process FIPS responder
-  (`[::1]:5354`); everything else is forwarded to upstream resolvers over
+  (`[::1]:5354`) — a name from the app's hosts file (`hosts_path`) is first
+  re-asked as `<npub>.fips`, and the answer re-issued under the name the app
+  used; everything else is forwarded to upstream resolvers over
   protected sockets (SERVFAIL on total failure). Configurable via
   `dns_upstreams`.
 - **Socket protection**: the node announces every underlay socket fd to the

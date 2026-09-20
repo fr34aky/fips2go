@@ -118,6 +118,9 @@ class OverviewFragment : Fragment() {
             startActivity(Intent(requireContext(), RelaysActivity::class.java))
         }
         view.findViewById<View>(R.id.mesh_apps_card).setOnClickListener(pickApps)
+        view.findViewById<View>(R.id.mesh_names_card).setOnClickListener {
+            startActivity(Intent(requireContext(), HostsActivity::class.java))
+        }
         view.findViewById<MaterialButton>(R.id.battery_allow).setOnClickListener {
             requestBatteryExemption()
         }
@@ -324,6 +327,7 @@ class OverviewFragment : Fragment() {
         super.onResume()
         updateBatteryCard()
         updateMeshApps()
+        updateMeshNames()
         poller.post(pollStatus)
     }
 
@@ -336,6 +340,16 @@ class OverviewFragment : Fragment() {
         haloPulse = null
         link = null
         super.onPause()
+    }
+
+    private fun updateMeshNames() {
+        val names = HostsStore.load(requireContext()).map { "${it.name}.fips" }
+        view?.findViewById<TextView>(R.id.mesh_names_summary)?.text = when {
+            names.isEmpty() -> "Name a node — use home.fips instead of its npub1….fips address."
+            names.size <= MAX_MESH_NAMES_SHOWN -> names.joinToString(", ")
+            else -> names.take(MAX_MESH_NAMES_SHOWN).joinToString(", ") +
+                " +${names.size - MAX_MESH_NAMES_SHOWN}"
+        }
     }
 
     private fun updateMeshApps() {
@@ -555,6 +569,7 @@ class OverviewFragment : Fragment() {
         const val HALO_PULSE_MS = 900L
 
         const val MAX_MESH_APP_ICONS = 6
+        const val MAX_MESH_NAMES_SHOWN = 3
         const val MESH_APP_ICON_DP = 32
         const val MESH_APP_ICON_GAP_DP = 8
 

@@ -92,6 +92,14 @@ pub struct ShimConfig {
     /// YAML instead.
     #[serde(default)]
     pub hotspot: Option<HotspotConfig>,
+    /// App-owned hosts file mapping readable names to npubs (`home npub1…`,
+    /// one per line — the format of fips's `/etc/fips/hosts`), so covered
+    /// apps can use `home.fips`. fips only reads its hardcoded system path,
+    /// which an Android app cannot write, so the DNS proxy resolves these
+    /// names itself (see `dns.rs`). The file is re-read when its mtime
+    /// changes: an edit takes effect on the next query, no node restart.
+    #[serde(default)]
+    pub hosts_path: Option<String>,
     /// Advanced: a full `fips.yaml`. When non-empty it becomes the base
     /// `fips::Config` (all fips parameters — transports, node.*, rendezvous,
     /// dns, lookup, …); the shim then forces the non-negotiable Android bits
