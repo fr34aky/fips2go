@@ -749,38 +749,10 @@ class FipsVpnService : VpnService() {
                 .setMtu(MESH_MTU)
                 .addAddress(address, 128)          // mesh IPv6 address
                 .addAddress(TUN_IPV4, 32)          // IPv4 source for clearnet
-                // Capture everything for the selected apps: fd00::/8 goes to the
-                // mesh, the rest reaches the userspace forwarder which sends it
-                // out on protected sockets.
-                .addRoute("fd00::", 8)
-                .addRoute("0.0.0.0", 0)
-                // DNS server = the fd00::/8 sentinel the pump intercepts (NOT our
-                // own tun /128, which the kernel would deliver locally).
-                .addDnsServer(FipsNative.dnsServer())
-            // `::/0` only when the underlay can deliver it (see class doc).
-            if (ipv6Clearnet) {
-                builder.addRoute("::", 0)
-            } else {
-                // Keep the resolver asking AAAA: netd emulates AI_ADDRCONFIG
-                // with a UDP connect() probe to 2000:: and skips AAAA queries
-                // entirely when it fails — which kills `.fips` (AAAA-only
-                // names). A /128 to the probe address flips that check while
-                // claiming no real destination, so apps' global-IPv6 connects
-                // still fail fast and fall back to IPv4.
-                builder.addRoute("2000::", 128)
-                // Chromium (WebView, so most browsers) runs its OWN AAAA
-                // gate above netd: a UDP connect() probe to Google DNS,
-                // cached 60 s. Without this route, `.fips` browsing dies
-                // exactly one minute after landing on a v4-only underlay.
-                // connect() alone sends no packets; an app genuinely
-                // dialing this address gets captured and dropped, which
-                // IPv6-capable apps treat as any unreachable v6 route.
-                builder.addRoute("2001:4860:4860::8888", 128)
-            }
+                .addRoute("fd00::", 8)             // the mesh
 
             // Per-app split tunnel: only the chosen apps are captured; every
-            // other app keeps the normal network untouched. With no selection,
-            // capture only ourselves (a no-op) so nothing else is affected.
+            // other app keeps the normal network untouched.
             var allowed = 0
             for (pkg in meshApps) {
                 try {
@@ -794,7 +766,53 @@ class FipsVpnService : VpnService() {
             // That used to be reachable: select one app, uninstall it, connect
             // — the only entry was skipped above and every app on the phone
             // was captured. Count what was actually added, not what is stored.
-            if (allowed == 0) builder.addAllowedApplication(packageName)
+            val selfOnly = allowed == 0
+            if (selfOnly) builder.addAllowedApplication(packageName)
+
+            if (selfOnly) {
+                // Nothing but fips2go is captured, so claim nothing but the
+                // mesh prefix: no default route and no DNS server. This case
+                // was meant to be a no-op and was not. With the default route
+                // and the sentinel DNS claimed, the app's OWN lookups and relay
+                // sockets went into the tunnel — and during node start nothing
+                // serves it yet (the pump, its DNS proxy and the forwarder only
+                // come up once start returns). Node start dials the bootstrap
+                // peer by hostname, so it sat in the resolver's ~10 s timeout,
+                // the first handshake failed, and the retry took ~15 s more:
+                // up to 25 s to a first link on a fresh install, which is
+                // exactly when nobody has picked an app yet. Selecting an app
+                // rebuilds the tunnel (tunnelMeshApps differs) with the routes
+                // below.
+                Log.i(TAG, "no mesh apps: tunnel carries the mesh prefix only")
+            } else {
+                // Capture everything for the selected apps: fd00::/8 goes to
+                // the mesh, the rest reaches the userspace forwarder which
+                // sends it out on protected sockets.
+                builder.addRoute("0.0.0.0", 0)
+                // DNS server = the fd00::/8 sentinel the pump intercepts (NOT
+                // our own tun /128, which the kernel would deliver locally).
+                builder.addDnsServer(FipsNative.dnsServer())
+                // `::/0` only when the underlay can deliver it (see class doc).
+                if (ipv6Clearnet) {
+                    builder.addRoute("::", 0)
+                } else {
+                    // Keep the resolver asking AAAA: netd emulates AI_ADDRCONFIG
+                    // with a UDP connect() probe to 2000:: and skips AAAA queries
+                    // entirely when it fails — which kills `.fips` (AAAA-only
+                    // names). A /128 to the probe address flips that check while
+                    // claiming no real destination, so apps' global-IPv6 connects
+                    // still fail fast and fall back to IPv4.
+                    builder.addRoute("2000::", 128)
+                    // Chromium (WebView, so most browsers) runs its OWN AAAA
+                    // gate above netd: a UDP connect() probe to Google DNS,
+                    // cached 60 s. Without this route, `.fips` browsing dies
+                    // exactly one minute after landing on a v4-only underlay.
+                    // connect() alone sends no packets; an app genuinely
+                    // dialing this address gets captured and dropped, which
+                    // IPv6-capable apps treat as any unreachable v6 route.
+                    builder.addRoute("2001:4860:4860::8888", 128)
+                }
+            }
             // Recorded only for a tunnel that actually came up, so a failed
             // establish leaves the comparison pointing at the live one.
             builder.establish()?.also { tunnelMeshApps = meshApps }
