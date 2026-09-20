@@ -148,6 +148,14 @@ class FipsVpnService : VpnService() {
     /** Settings changed during the first connect; rebind once it is up. */
     private val rebindAfterConnect = AtomicBoolean(false)
 
+    /** A shutdown's thread is still stopping the engine; see [shutdown]. */
+    private val stopping = AtomicBoolean(false)
+
+    /** A connect arrived during that; [finishShutdown] serves it. */
+    private val connectQueued = AtomicBoolean(false)
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     // FIPS Hotspot ("!FIPS") state — see [startHotspot] for the two join
     // paths. A specifier-joined network is local-only (no INTERNET
     // capability) and never enters [availableNetworks]; a suggestion-joined
@@ -258,37 +266,63 @@ class FipsVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
+                val (nsec, address) = identity() ?: return START_NOT_STICKY
                 // One tunnel per service. The UI tries not to send this twice,
                 // but it cannot be the guard: a second CONNECT landing while
                 // isRunning() is still false (starting, or mid-rebind) used to
                 // establish a second tunnel, get "already running" back from
                 // the shim, and take the error path into shutdown() — killing
                 // the live connection.
-                // Decrypt the Keystore nsec and build the config here so the
-                // secret never rides in an Intent.
-                val nsec = IdentityStore.getOrCreate(this)
-                val identity = JSONObject(FipsNative.deriveIdentity(nsec))
-                if (identity.has("error")) {
-                    Log.e(TAG, "identity error: ${identity.getString("error")}")
-                    return START_NOT_STICKY
-                }
-                val address = identity.getString("address")
                 if (tunnelActive) {
                     Log.w(TAG, "connect ignored: tunnel already active")
                     // Still owed: this start came in via startForegroundService.
                     startForegroundWithNotification(address)
                     return START_STICKY
                 }
-                val config = ConfigStore.buildConfigJson(this, nsec)
-                tunnelActive = true
-                rebindAfterConnect.set(false)
-                val attempt = connectAttempt.incrementAndGet()
-                startForegroundWithNotification(address)
-                thread(name = "fips-connect") { connect(config, address, attempt) }
+                // Disconnect-then-connect. Stopping the engine takes seconds on
+                // a phone (~5 s on a Pixel 9 Pro), Overview offers "tap to
+                // connect" the moment Disconnect is tapped, and a connect that
+                // ran alongside the tail of that shutdown lost: the shutdown
+                // thread closed the NEW tunnel's fd (tunFd had been reassigned;
+                // the old one leaked as an inert tun0) and then stopSelf() took
+                // the new connection down with the service. So it waits its
+                // turn — see finishShutdown().
+                if (stopping.get()) {
+                    Log.i(TAG, "connect queued: the previous shutdown is still stopping the engine")
+                    tunnelActive = true
+                    connectQueued.set(true)
+                    startForegroundWithNotification(address)
+                    return START_STICKY
+                }
+                beginConnect(nsec, address)
                 return START_STICKY
             }
         }
         return START_NOT_STICKY
+    }
+
+    /**
+     * The nsec and the mesh address it derives, or null on an identity error
+     * (logged). Re-read from the Keystore on every use: the secret must not
+     * linger in a field, and never rides in an Intent.
+     */
+    private fun identity(): Pair<String, String>? {
+        val nsec = IdentityStore.getOrCreate(this)
+        val identity = JSONObject(FipsNative.deriveIdentity(nsec))
+        if (identity.has("error")) {
+            Log.e(TAG, "identity error: ${identity.getString("error")}")
+            return null
+        }
+        return nsec to identity.getString("address")
+    }
+
+    private fun beginConnect(nsec: String, address: String) {
+        val config = ConfigStore.buildConfigJson(this, nsec)
+        tunnelActive = true
+        rebindAfterConnect.set(false)
+        val attempt = connectAttempt.incrementAndGet()
+        startForegroundWithNotification(address)
+        thread(name = "fips-connect") { connect(config, address, attempt) }
     }
 
     /**
@@ -331,6 +365,9 @@ class FipsVpnService : VpnService() {
             pfd.close()
             return
         }
+        // Never drop a tunnel fd on the floor: an unclosed one keeps its tun
+        // interface alive for as long as the process lives.
+        tunFd?.let { if (it !== pfd) it.close() }
         tunFd = pfd
         tunnelHasIpv6Clearnet = wantIpv6
 
@@ -1037,18 +1074,44 @@ class FipsVpnService : VpnService() {
 
     private fun shutdown() {
         tunnelActive = false
+        connectQueued.set(false) // a Disconnect outranks a connect still waiting
         connectAttempt.incrementAndGet() // cancels a connect still in flight
         rebindAfterConnect.set(false)
+        // One teardown at a time; a second request is served by the first.
+        if (!stopping.compareAndSet(false, true)) return
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
+        // Take THIS session's fd now. The thread below runs for seconds, and
+        // reading the field at the end is how it came to close a newer
+        // tunnel's fd instead of its own.
+        val fd = tunFd
+        tunFd = null
         thread(name = "fips-disconnect") {
             FipsNative.stop()
-            tunFd?.close()
-            tunFd = null
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            fd?.close()
+            mainHandler.post { finishShutdown() }
         }
+    }
+
+    /**
+     * Main thread, once the engine is down and the tunnel closed: either stop
+     * the service, or — if a connect arrived meanwhile — serve it now, on the
+     * same service instance, with nothing of the old session left to race it.
+     */
+    private fun finishShutdown() {
+        stopping.set(false)
+        if (connectQueued.getAndSet(false)) {
+            val id = identity()
+            if (id != null) {
+                Log.i(TAG, "shutdown complete; serving the queued connect")
+                beginConnect(id.first, id.second)
+                return
+            }
+            tunnelActive = false
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     override fun onDestroy() {
