@@ -95,7 +95,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.1, 2026-04-04
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4, 2026-09-17
         with:
           # Install nothing here. The action's default is 'tools platform-tools', and
           # Google's SDK repository stopped serving the legacy 'tools' package on
