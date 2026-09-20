@@ -679,4 +679,80 @@ mod tests {
             unsafe { libc::close(read_fd) };
         }
     }
+
+    /// The FIPS Hotspot overlay must bring up BOTH UDP transports. The config
+    /// test next door only proves the two instances are *described* on one
+    /// port; nothing bound them, which is how a fips change (reuse flags moved
+    /// after bind) shipped in 0.4.0 unnoticed: on a phone the main transport
+    /// failed with EADDRINUSE, the node started DEGRADED on the hotspot
+    /// transport alone, and joining "!FIPS" took it off the rest of the mesh.
+    /// 127.0.0.1 stands in for the hotspot interface address.
+    #[test]
+    fn hotspot_overlay_starts_both_transports() {
+        let _serial = engine_test_lock();
+        let identity = crate::config::derive_identity("").unwrap();
+        let config = serde_json::json!({
+            "nsec": identity.nsec,
+            "peers": [],
+            "enable_nostr": false,
+            "enable_fips_dns": false,
+            "forward_clearnet": false,
+            "battery_saver": false,
+            "log_level": "warn",
+            "hotspot": { "addr": "127.0.0.1", "prefix_len": 8 },
+        })
+        .to_string();
+
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let [read_fd, write_fd] = fds;
+        start(&config, read_fd, None).expect("start with the hotspot overlay");
+        // Stop the engine however this test ends: a panic that left it running
+        // would fail every other engine test with "already running".
+        struct StopOnDrop(i32, i32);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                stop();
+                unsafe { libc::close(self.1) };
+                unsafe { libc::close(self.0) };
+            }
+        }
+        let _stop = StopOnDrop(read_fd, write_fd);
+
+        // `show_transports` is served from the tick-published snapshot, which
+        // is empty until the first tick (1 s here).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let reply = loop {
+            let reply: serde_json::Value =
+                serde_json::from_str(&query_json("show_transports", "")).unwrap();
+            assert_eq!(reply["status"], "ok", "show_transports: {reply}");
+            let published = reply["data"]["transports"]
+                .as_array()
+                .is_some_and(|t| !t.is_empty());
+            if published || std::time::Instant::now() > deadline {
+                break reply;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let transports = reply["data"]["transports"]
+            .as_array()
+            .unwrap_or_else(|| panic!("transports array: {reply}"));
+        let udp: Vec<_> = transports.iter().filter(|t| t["type"] == "udp").collect();
+        assert_eq!(udp.len(), 2, "main + hotspot must both be up: {reply}");
+        for t in &udp {
+            assert_eq!(t["state"], "up", "every UDP instance must have started: {reply}");
+        }
+
+        let ports: std::collections::HashSet<u16> = udp
+            .iter()
+            .map(|t| {
+                t["local_addr"]
+                    .as_str()
+                    .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+                    .unwrap_or_else(|| panic!("local_addr on a started transport: {t}"))
+                    .port()
+            })
+            .collect();
+        assert_eq!(ports.len(), 1, "one shared port across both instances: {reply}");
+    }
 }

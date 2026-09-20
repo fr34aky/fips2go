@@ -81,8 +81,10 @@ pub struct ShimConfig {
     /// FIPS Hotspot: the device joined a local-only secondary Wi-Fi network
     /// (SSID "!FIPS") and this is our interface address on it. Adds a second,
     /// dial-scoped UDP transport bound to that address on the SAME port as
-    /// the main transport (fips sets SO_REUSEADDR/SO_REUSEPORT before bind,
-    /// and Linux delivers unicast to the most-specific bound socket), so the
+    /// the main transport (both instances set `share_port`, which is what makes
+    /// fips put SO_REUSEPORT/SO_REUSEADDR on BEFORE bind — by default it sets
+    /// them after, and the second instance then fails with EADDRINUSE; Linux
+    /// delivers unicast to the most-specific bound socket), so the
     /// single mDNS-advertised port works on every interface, and forces LAN
     /// mDNS on. The Kotlin side sets this while the hotspot network is up and
     /// `Network.bindSocket`s the matching fd in `protectFd`. Ignored (with a
@@ -105,9 +107,10 @@ pub struct ShimConfig {
 /// The main transport keeps its configured host; the hotspot instance binds
 /// the interface address on the SAME port so the single mDNS-advertised port
 /// is valid on every interface. When the configured port is 0 (the default
-/// pure-client posture), a throwaway wildcard bind picks a free port — the
-/// tiny claim/rebind race is harmless because fips sets SO_REUSEADDR before
-/// its own bind. Returns `(main_bind, hotspot_bind, dial_prefix)`.
+/// pure-client posture), a throwaway wildcard bind picks a free port. The
+/// probe socket is dropped before fips binds, so there is a tiny window in
+/// which another process could take the port; fips would then fail to start
+/// that instance loudly. Returns `(main_bind, hotspot_bind, dial_prefix)`.
 fn hotspot_binds(
     udp_bind: &str,
     hs: &HotspotConfig,
@@ -278,6 +281,10 @@ impl ShimConfig {
                     "main".to_string(),
                     fips::config::UdpConfig {
                         bind_addr: Some(main_bind),
+                        // BOTH instances: whichever binds second is the one
+                        // that needs the flags before its bind, and the start
+                        // order is fips's business, not ours.
+                        share_port: Some(true),
                         ..Default::default()
                     },
                 );
@@ -286,6 +293,7 @@ impl ShimConfig {
                     fips::config::UdpConfig {
                         bind_addr: Some(hotspot_bind),
                         dial_prefixes: Some(vec![dial_prefix]),
+                        share_port: Some(true),
                         ..Default::default()
                     },
                 );
@@ -462,6 +470,10 @@ mod tests {
 
         assert_eq!(instances["hotspot"].dial_prefixes(), ["192.168.49.23/24"]);
         assert!(instances["main"].dial_prefixes().is_empty());
+        // Without it on BOTH, the second bind fails with EADDRINUSE and the
+        // node starts degraded (engine::tests has the end-to-end check).
+        assert!(instances["main"].share_port(), "main must opt in to sharing");
+        assert!(instances["hotspot"].share_port(), "hotspot must opt in to sharing");
         assert!(config.node.rendezvous.lan.enabled, "hotspot forces LAN mDNS");
     }
 
