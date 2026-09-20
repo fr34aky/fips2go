@@ -1,6 +1,5 @@
 package org.fips.android
 
-import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -29,7 +28,8 @@ import org.fips.android.ConfigStore as CS
  * defaults", so an empty editor would be lying about what the node does.
  *
  * Like the mesh-app picker, every edit is persisted immediately and a live
- * tunnel is nudged ONCE, on leaving the screen with a changed list — fips
+ * tunnel is nudged ONCE ([FipsVpnService.requestRebind]), on leaving the
+ * screen with a changed list — fips
  * fixes its relay pool at node start, so applying means a node restart.
  */
 class RelaysActivity : AppCompatActivity() {
@@ -41,7 +41,9 @@ class RelaysActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_relays)
         findViewById<MaterialToolbar>(R.id.toolbar).setNavigationOnClickListener { finish() }
-        appliedRelays = CS.effectiveRelays(this)
+        // Across a rotation "what the node has" is NOT what is stored now.
+        appliedRelays = savedInstanceState?.getStringArrayList(STATE_APPLIED)
+            ?: CS.effectiveRelays(this)
 
         val input = findViewById<EditText>(R.id.relay_input)
         val inputLayout = findViewById<TextInputLayout>(R.id.relay_input_layout)
@@ -109,18 +111,25 @@ class RelaysActivity : AppCompatActivity() {
             if (FipsVpnService.tunnelActive) View.VISIBLE else View.GONE
     }
 
-    /** onPause, not onStop: still in the foreground, so startService is legal. */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putStringArrayList(STATE_APPLIED, ArrayList(appliedRelays))
+    }
+
+    /**
+     * onPause, not onStop: still in the foreground, so startService is legal.
+     * A rotation is not leaving the screen — see AppPickerActivity.onPause.
+     */
     override fun onPause() {
         super.onPause()
+        if (isChangingConfigurations) return
         val now = CS.effectiveRelays(this)
         if (now == appliedRelays) return
         appliedRelays = now
-        if (!FipsVpnService.tunnelActive) return // the next connect reads it
-        runCatching {
-            startService(
-                Intent(this, FipsVpnService::class.java)
-                    .setAction(FipsVpnService.ACTION_CONFIG_CHANGED)
-            )
-        }
+        FipsVpnService.requestRebind(this)
+    }
+
+    private companion object {
+        const val STATE_APPLIED = "applied_relays"
     }
 }

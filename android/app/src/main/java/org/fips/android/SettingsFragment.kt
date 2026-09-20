@@ -140,7 +140,9 @@ class SettingsFragment : Fragment() {
 
     /** Settings are read at connect time, so a running node needs a reconnect. */
     private fun savedMessage() =
-        if (runCatching { FipsNative.isRunning() }.getOrDefault(false)) {
+        if (FipsVpnService.tunnelActive ||
+            runCatching { FipsNative.isRunning() }.getOrDefault(false)
+        ) {
             "Saved — reconnect to apply"
         } else {
             "Saved"

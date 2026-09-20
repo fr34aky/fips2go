@@ -286,7 +286,12 @@ class OverviewFragment : Fragment() {
      * to the old key until the next restart, so make the user disconnect.
      */
     private fun requireDisconnected(): Boolean {
-        if (!runCatching { FipsNative.isRunning() }.getOrDefault(false)) return true
+        // tunnelActive as well: during a rebind the engine reports not-running
+        // for a couple of seconds while the tunnel — built around the CURRENT
+        // identity's address — is still up.
+        val live = FipsVpnService.tunnelActive ||
+            runCatching { FipsNative.isRunning() }.getOrDefault(false)
+        if (!live) return true
         MaterialAlertDialogBuilder(requireContext())
             .setTitle("Disconnect first")
             .setMessage("Disconnect from the mesh before changing this device's identity.")

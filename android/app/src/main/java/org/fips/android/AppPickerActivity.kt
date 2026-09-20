@@ -32,7 +32,7 @@ import com.google.android.material.appbar.MaterialToolbar
  *
  * The tunnel takes this set only when it is (re-)established, so a change made
  * while connected is applied by asking the service for a replacement tunnel
- * ([FipsVpnService.ACTION_APPS_CHANGED]). That restarts the node (~2 s of
+ * ([FipsVpnService.requestRebind]). That restarts the node (~2 s of
  * "Reconnecting…"), so it is sent ONCE, when the screen is left with a
  * selection that differs from the one it was opened with — not per toggle,
  * which would bounce the mesh on every tap. The service compares the stored
@@ -45,6 +45,7 @@ class AppPickerActivity : AppCompatActivity() {
     companion object {
         const val PREFS = "fips"
         const val KEY_MESH_APPS = "mesh_apps"
+        private const val STATE_APPLIED = "applied_selection"
     }
 
     private data class AppEntry(val pkg: String, val label: String, val icon: Drawable)
@@ -77,7 +78,8 @@ class AppPickerActivity : AppCompatActivity() {
         // re-sorted on toggle: a row jumping away under the finger is worse
         // than a list that is only tidy on the next visit.
         val picked = selected.toSet()
-        appliedSelection = picked
+        // Across a rotation "what the tunnel has" is NOT what is stored now.
+        appliedSelection = savedInstanceState?.getStringArrayList(STATE_APPLIED)?.toSet() ?: picked
         val sorted = entries.sortedWith(
             compareBy({ it.pkg !in picked }, { it.label.lowercase() })
         )
@@ -141,23 +143,25 @@ class AppPickerActivity : AppCompatActivity() {
             if (FipsVpnService.tunnelActive) View.VISIBLE else View.GONE
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putStringArrayList(STATE_APPLIED, ArrayList(appliedSelection))
+    }
+
     /**
      * Leaving the screen (Back, or the app going to the background) applies a
      * changed selection to a live tunnel. onPause rather than onStop/onDestroy:
      * the app is still in the foreground here, so startService is always legal.
+     * A rotation is not leaving: restarting the node under someone who is
+     * still choosing is exactly what "once per visit" is meant to avoid.
      */
     override fun onPause() {
         super.onPause()
+        if (isChangingConfigurations) return
         val now = (prefs().getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet()).toSet()
         if (now == appliedSelection) return
         appliedSelection = now
-        if (!FipsVpnService.tunnelActive) return // the next connect reads it
-        runCatching {
-            startService(
-                Intent(this, FipsVpnService::class.java)
-                    .setAction(FipsVpnService.ACTION_APPS_CHANGED)
-            )
-        }
+        FipsVpnService.requestRebind(this)
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
