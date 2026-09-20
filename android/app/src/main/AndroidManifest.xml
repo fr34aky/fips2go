@@ -81,6 +81,18 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Encrypted mesh VPN tunnel" />
+            <!-- Opt out of Always-on VPN (honoured from API 27). The system
+                 starts an always-on service with the bare
+                 android.net.VpnService action, which onStartCommand does not
+                 treat as a connect — so the service sat bound with no tunnel,
+                 and with "Block connections without VPN" on top, the selected
+                 apps lost all connectivity until someone opened the app and
+                 tapped connect. Declaring it unsupported greys both toggles
+                 out in Settings instead of offering a mode that cannot work.
+                 Remove this only together with a real always-on start path. -->
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="false" />
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
