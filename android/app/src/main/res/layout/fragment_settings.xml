@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+<androidx.core.widget.NestedScrollView
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:clipToPadding="false"
     android:paddingHorizontal="16dp"
-    android:paddingTop="16dp"
-    android:paddingBottom="96dp">
+    android:paddingTop="8dp"
+    android:paddingBottom="168dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -16,269 +20,270 @@
         <!-- Bootstrap peer. Seeded to a working public server on first run,
              so this page needs no attention at all to get connected. -->
         <TextView style="@style/SettingsHeader" android:text="Bootstrap peer" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Bootstrap server">
-            <com.google.android.material.textfield.MaterialAutoCompleteTextView
-                android:id="@+id/bootstrap_server"
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Fips.Card">
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="none" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingBottom="6dp"
-            android:text="The public server your phone peers with to join the mesh. Any of them works — pick one near you. Choose “custom” to enter your own."
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?attr/colorOnSurfaceVariant" />
-
-        <!-- Shown only while the dropdown reads "custom": the peer actually in
-             use must be visible and editable here, not buried in Advanced. -->
-        <LinearLayout
-            android:id="@+id/custom_peer_group"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
-
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Peer npub">
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/peer_npub"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="text" />
-            </com.google.android.material.textfield.TextInputLayout>
+                    android:hint="Bootstrap server">
+                    <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                        android:id="@+id/bootstrap_server"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="none" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="The public server your phone peers with to join the mesh. Any of them works — pick one near you. Choose “custom” to enter your own." />
 
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Peer endpoint (host:port)">
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/peer_endpoint"
+                <!-- Shown only while the dropdown reads "custom": the peer
+                     actually in use must be visible and editable here, not
+                     buried in Advanced. -->
+                <LinearLayout
+                    android:id="@+id/custom_peer_group"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="text" />
-            </com.google.android.material.textfield.TextInputLayout>
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Peer npub">
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/peer_npub"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:hint="Peer endpoint (host:port)">
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/peer_endpoint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:hint="Transport">
+                        <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                            android:id="@+id/peer_transport"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="none"
+                            app:simpleItems="@array/peer_transports" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Transport">
-                <com.google.android.material.textfield.MaterialAutoCompleteTextView
-                    android:id="@+id/peer_transport"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="none"
-                    app:simpleItems="@array/peer_transports" />
-            </com.google.android.material.textfield.TextInputLayout>
-        </LinearLayout>
-
-        <!-- Security -->
         <TextView style="@style/SettingsHeader" android:text="Security" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Fips.Card">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/inbound_filter"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="Block unsolicited inbound mesh traffic" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Other mesh nodes can otherwise reach any port your selected apps listen on, like on a shared LAN. With this on, only replies to connections this phone opened, pings, and the ports allowed under Advanced get through — everything else is dropped (blocked ports show up in the Diagnostics log). fips itself needs no inbound ports." />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/inbound_filter"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="Block unsolicited inbound mesh traffic" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingBottom="6dp"
-            android:text="Other mesh nodes can otherwise reach any port your selected apps listen on, like on a shared LAN. With this on, only replies to connections this phone opened, pings, and the ports allowed under Advanced get through — everything else is dropped (blocked ports show up in the Diagnostics log). fips itself needs no inbound ports."
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?attr/colorOnSurfaceVariant" />
-
-        <!-- Connectivity -->
         <TextView style="@style/SettingsHeader" android:text="Connectivity" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Fips.Card">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/lan_mdns"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="LAN discovery (mDNS)" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Finds nearby fips peers on your Wi-Fi for instant local connections. While on, your Wi-Fi chip stops filtering broadcast chatter from other devices (TVs, speakers, printers), and each message briefly wakes the phone — on a busy home network this costs noticeably more battery. No effect when off or on mobile data." />
+                <View style="@style/Widget.Fips.Divider" />
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/hotspot"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="FIPS Hotspot (!FIPS)" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="While connected, automatically joins nearby open hotspots named “!FIPS” — anywhere — and looks for fips peers there. Internet stays on your normal network. Needs the location permission (asked when enabling): Android hides Wi-Fi names without it. When you are already on another Wi-Fi, dual-Wi-Fi phones additionally join “!FIPS” as a second, local-only connection (one-time approval per hotspot). Requires Android 10+, full auto-join Android 12+." />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/lan_mdns"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="LAN discovery (mDNS)" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingBottom="6dp"
-            android:text="Finds nearby fips peers on your Wi-Fi for instant local connections. While on, your Wi-Fi chip stops filtering broadcast chatter from other devices (TVs, speakers, printers), and each message briefly wakes the phone — on a busy home network this costs noticeably more battery. No effect when off or on mobile data."
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?attr/colorOnSurfaceVariant" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/hotspot"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="FIPS Hotspot (!FIPS)" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingBottom="6dp"
-            android:text="While connected, automatically joins nearby open hotspots named “!FIPS” — anywhere — and looks for fips peers there. Internet stays on your normal network. Needs the location permission (asked when enabling): Android hides Wi-Fi names without it. When you are already on another Wi-Fi, dual-Wi-Fi phones additionally join “!FIPS” as a second, local-only connection (one-time approval per hotspot). Requires Android 10+, full auto-join Android 12+."
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?attr/colorOnSurfaceVariant" />
-
-        <!-- Battery -->
-        <TextView style="@style/SettingsHeader" android:text="Battery" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/battery_saver"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="Battery saver (relaxed timers)" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingBottom="6dp"
-            android:text="Slows the mesh's background timers and heartbeats, cutting idle CPU and radio wakeups. Peers notice a dropped link a little later. Recommended on phones."
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?attr/colorOnSurfaceVariant" />
-
-        <!-- Updates -->
-        <TextView style="@style/SettingsHeader" android:text="Updates" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/auto_update"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingVertical="6dp"
-            android:text="Check for updates on start" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingBottom="6dp"
-            android:text="Looks for a new release on GitHub each time the app opens and offers to install it (or postpone). Downloads are verified against the release checksum, and installing keeps your identity and settings. When off, updates are still available manually via Diagnostics → Check for updates."
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?attr/colorOnSurfaceVariant" />
+        <TextView style="@style/SettingsHeader" android:text="Power &amp; updates" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Fips.Card">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/battery_saver"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="Battery saver (relaxed timers)" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Slows the mesh's background timers and heartbeats, cutting idle CPU and radio wakeups. Peers notice a dropped link a little later. Recommended on phones." />
+                <View style="@style/Widget.Fips.Divider" />
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/auto_update"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="Check for updates on start" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Looks for a new release on GitHub each time the app opens and offers to install it (or postpone). Downloads are verified against the release checksum, and installing keeps your identity and settings. When off, updates are still available manually via Diagnostics → Check for updates." />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
         <!-- Advanced: collapsed by default. Nothing in here needs touching
              for a normal connection. -->
-        <LinearLayout
-            android:id="@+id/advanced_header"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="?attr/selectableItemBackground"
-            android:baselineAligned="false"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:minHeight="48dp"
-            android:orientation="horizontal">
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Fips.Card"
+            android:layout_marginTop="12dp">
 
-            <TextView
-                style="@style/SettingsHeader"
-                android:layout_weight="1"
-                android:text="Advanced" />
-
-            <ImageView
-                android:id="@+id/advanced_chevron"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:contentDescription="Expand advanced settings"
-                android:src="@drawable/ic_expand_more"
-                android:tint="?attr/colorPrimary" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/advanced_content"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
-
-            <TextView
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingBottom="8dp"
-                android:text="Defaults are fine for normal use. Change these only if you know why."
-                android:textAppearance="?attr/textAppearanceBodySmall"
-                android:textColor="?attr/colorOnSurfaceVariant" />
+                android:orientation="vertical">
 
-            <TextView style="@style/SettingsSubHeader" android:text="Inbound firewall" />
-
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Allowed inbound ports (comma-separated; blank = none)">
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/inbound_ports"
+                <LinearLayout
+                    android:id="@+id/advanced_header"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="text" />
-            </com.google.android.material.textfield.TextInputLayout>
+                    android:background="?attr/selectableItemBackground"
+                    android:baselineAligned="false"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:minHeight="64dp"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="16dp">
 
-            <TextView style="@style/SettingsSubHeader" android:text="Performance" />
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
 
-            <com.google.android.material.materialswitch.MaterialSwitch
-                android:id="@+id/forward_clearnet"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingVertical="6dp"
-                android:text="Forward non-mesh traffic (split tunnel)" />
+                        <TextView
+                            style="@style/Widget.Fips.CardTitle"
+                            android:text="Advanced" />
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingBottom="6dp"
-                android:text="Keeps normal internet working in the apps you selected. Turning this off leaves them with mesh access only."
-                android:textAppearance="?attr/textAppearanceBodySmall"
-                android:textColor="?attr/colorOnSurfaceVariant" />
+                        <TextView
+                            style="@style/Widget.Fips.Summary"
+                            android:layout_marginTop="2dp"
+                            android:text="Defaults are fine for normal use. Change these only if you know why." />
+                    </LinearLayout>
 
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Worker threads (encrypt/decrypt)">
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/worker_threads"
+                    <ImageView
+                        android:id="@+id/advanced_chevron"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_marginStart="8dp"
+                        android:contentDescription="Expand advanced settings"
+                        android:src="@drawable/ic_expand_more"
+                        app:tint="?attr/colorOnSurfaceVariant" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/advanced_content"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="number" />
-            </com.google.android.material.textfield.TextInputLayout>
+                    android:orientation="vertical"
+                    android:paddingHorizontal="16dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="16dp"
+                    android:visibility="gone">
 
-            <TextView style="@style/SettingsSubHeader" android:text="Logging" />
-
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Log level">
-                <com.google.android.material.textfield.MaterialAutoCompleteTextView
-                    android:id="@+id/log_level"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="none"
-                    app:simpleItems="@array/log_levels" />
-            </com.google.android.material.textfield.TextInputLayout>
-        </LinearLayout>
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/save"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="24dp"
-            android:text="Save settings" />
+                    <TextView style="@style/SettingsSubHeader" android:text="Inbound firewall" />
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="Allowed inbound ports">
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/inbound_ports"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                    <TextView
+                        style="@style/Widget.Fips.Summary"
+                        android:text="Comma-separated, e.g. 22, 8080. Blank allows none." />
+                    <View style="@style/Widget.Fips.Divider" />
+                    <TextView style="@style/SettingsSubHeader" android:text="Performance" />
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/forward_clearnet"
+                        style="@style/Widget.Fips.SettingSwitch"
+                        android:text="Forward non-mesh traffic (split tunnel)" />
+                    <TextView
+                        style="@style/Widget.Fips.Summary"
+                        android:text="Keeps normal internet working in the apps you selected. Turning this off leaves them with mesh access only." />
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Worker threads (encrypt/decrypt)">
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/worker_threads"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="number" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                    <View style="@style/Widget.Fips.Divider" />
+                    <TextView style="@style/SettingsSubHeader" android:text="Logging" />
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="Log level">
+                        <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                            android:id="@+id/log_level"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="none"
+                            app:simpleItems="@array/log_levels" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
-</ScrollView>
+</androidx.core.widget.NestedScrollView>
+
+    <!-- Appears only while something differs from what is stored, so it is
+         both the save action and the "you have unsaved edits" signal. The
+         bottom margin clears the activity's bottom navigation. -->
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/save"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="96dp"
+        android:text="Save changes"
+        android:visibility="gone" />
+</FrameLayout>

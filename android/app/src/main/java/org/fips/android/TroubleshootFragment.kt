@@ -17,7 +17,6 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.snackbar.Snackbar
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.concurrent.thread
@@ -53,26 +52,32 @@ class TroubleshootFragment : Fragment() {
         val result = view.findViewById<TextView>(R.id.probe_result)
         val npubField = view.findViewById<EditText>(R.id.probe_npub)
 
+        // The result well stays out of the layout until it has something in it.
+        val show = { text: String ->
+            result.text = text
+            result.visibility = View.VISIBLE
+        }
         view.findViewById<MaterialButton>(R.id.resolve).setOnClickListener {
             val npub = npubField.text.toString().trim()
             val info = JSONObject(FipsNative.resolveNpub(npub))
-            result.text = if (info.has("error")) {
-                "✗ ${info.getString("error")}"
-            } else {
-                "npub:  ${info.getString("npub")}\naddr:  ${info.getString("address")}"
-            }
+            show(
+                if (info.has("error")) {
+                    "✗ ${info.getString("error")}"
+                } else {
+                    "npub:  ${info.getString("npub")}\naddr:  ${info.getString("address")}"
+                }
+            )
         }
 
         view.findViewById<MaterialButton>(R.id.reachability).setOnClickListener {
-            result.text = checkReachability(npubField.text.toString().trim())
+            show(checkReachability(npubField.text.toString().trim()))
         }
 
         view.findViewById<MaterialButton>(R.id.refresh_logs).setOnClickListener {
             refreshLogs(force = true)
         }
         view.findViewById<MaterialButton>(R.id.copy_logs).setOnClickListener {
-            val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("fips logs", logView.text))
+            Ui.copy(view, "fips logs", logView.text, "Logs copied")
         }
         view.findViewById<MaterialButton>(R.id.expand_logs).setOnClickListener {
             showLogDialog()
@@ -99,22 +104,20 @@ class TroubleshootFragment : Fragment() {
      */
     private fun checkForUpdate(root: View, current: String) {
         val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return
-        Snackbar.make(root, "Checking for updates…", Snackbar.LENGTH_SHORT).show()
+        Ui.snack(root, "Checking for updates…")
         thread {
             val result = runCatching { Updater.check(current, abi) }
             activity?.runOnUiThread {
                 result.fold(
                     onSuccess = { update ->
                         if (update == null) {
-                            Snackbar.make(root, "Up to date (v$current)", Snackbar.LENGTH_SHORT)
-                                .show()
+                            Ui.snack(root, "Up to date (v$current)")
                         } else {
                             offerUpdate(root, update)
                         }
                     },
                     onFailure = {
-                        Snackbar.make(root, "Update check failed: ${it.message}", Snackbar.LENGTH_LONG)
-                            .show()
+                        Ui.snack(root, "Update check failed: ${it.message}", long = true)
                     },
                 )
             }
@@ -209,7 +212,7 @@ class TroubleshootFragment : Fragment() {
         // FIPS Hotspot line: joined state while the service reports one,
         // otherwise a hint that the armed toggle is waiting for the SSID.
         val hotspotJoined = FipsVpnService.hotspotStatus
-        val hotspotArmed = CS.prefs(requireContext()).getBoolean(CS.HOTSPOT, false)
+        val hotspotArmed = CS.hotspotEnabled(requireContext())
         hotspotStatus.visibility =
             if (running && (hotspotJoined != null || hotspotArmed)) View.VISIBLE else View.GONE
         hotspotStatus.text = when {
@@ -221,8 +224,7 @@ class TroubleshootFragment : Fragment() {
         if (rows.isEmpty()) {
             lanEmpty.text = when {
                 !running -> "(node not running)"
-                !CS.prefs(requireContext()).getBoolean(CS.LAN_MDNS, false) &&
-                    hotspotJoined == null ->
+                !CS.lanMdns(requireContext()) && hotspotJoined == null ->
                     "LAN discovery is off — enable \"LAN discovery (mDNS)\" in Settings " +
                         "and reconnect."
                 else -> "Nothing discovered yet — fips peers on this Wi-Fi appear here " +
@@ -246,10 +248,7 @@ class TroubleshootFragment : Fragment() {
                 // (resolve / reachability) and the clipboard.
                 row.setOnClickListener {
                     view?.findViewById<EditText>(R.id.probe_npub)?.setText(peer.npub)
-                    val cm = requireContext()
-                        .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    cm.setPrimaryClip(ClipData.newPlainText("npub", peer.npub))
-                    Snackbar.make(requireView(), "npub copied", Snackbar.LENGTH_SHORT).show()
+                    Ui.copy(requireView(), "npub", peer.npub, "npub copied")
                 }
                 lanList.addView(row)
             }
@@ -284,7 +283,7 @@ class TroubleshootFragment : Fragment() {
 
     private fun connectLanPeer(peer: LanPeer) {
         val root = requireView()
-        Snackbar.make(root, "Connecting to ${shortNpub(peer.npub)}…", Snackbar.LENGTH_SHORT).show()
+        Ui.snack(root, "Connecting to ${shortNpub(peer.npub)}…")
         thread {
             val resp = runCatching { JSONObject(FipsNative.connectPeer(peer.npub, peer.addr)) }
                 .getOrNull()
@@ -295,7 +294,7 @@ class TroubleshootFragment : Fragment() {
                         "Handshake initiated — watch Sessions above"
                     else -> "Connect failed: ${resp.optString("message", "unknown error")}"
                 }
-                Snackbar.make(root, msg, Snackbar.LENGTH_LONG).show()
+                Ui.snack(root, msg, long = true)
             }
         }
     }

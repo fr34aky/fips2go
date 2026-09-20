@@ -1,10 +1,13 @@
 package org.fips.android
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -17,12 +20,14 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.snackbar.Snackbar
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -32,8 +37,26 @@ class OverviewFragment : Fragment() {
     private val poller = Handler(Looper.getMainLooper())
     private lateinit var headline: TextView
     private lateinit var detail: TextView
+    private lateinit var statusDot: View
+    private lateinit var halo: View
+    private lateinit var toggle: MaterialButton
+    private lateinit var statsRow: View
     private lateinit var relaysSummary: TextView
-    private lateinit var relaysList: TextView
+    private lateinit var relaysCount: TextView
+    private lateinit var relaysList: LinearLayout
+
+    /** What the connection card is showing; drives the toggle's meaning. */
+    private enum class Link { OFF, STARTING, UP }
+
+    private var link: Link? = null
+
+    /** STARTING was entered from UP: a rebind (network flip, hotspot,
+     *  changed mesh apps), not a first connect. */
+    private var reconnecting = false
+    private var haloPulse: ObjectAnimator? = null
+
+    /** Structural fingerprint of the rendered relay rows (see [renderRelays]). */
+    private var lastRelaysKey = ""
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -44,16 +67,39 @@ class OverviewFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         headline = view.findViewById(R.id.status_headline)
         detail = view.findViewById(R.id.status_detail)
+        statusDot = view.findViewById(R.id.status_dot)
+        halo = view.findViewById(R.id.power_halo)
+        toggle = view.findViewById(R.id.connect_toggle)
+        statsRow = view.findViewById(R.id.stats_row)
         relaysSummary = view.findViewById(R.id.relays_summary)
+        relaysCount = view.findViewById(R.id.relays_count)
         relaysList = view.findViewById(R.id.relays_list)
+        // A recreated view starts from the layout's defaults.
+        link = null
+        lastRelaysKey = ""
 
         showIdentity()
 
-        view.findViewById<MaterialButton>(R.id.connect).setOnClickListener {
-            (activity as? MainActivity)?.connect()
+        toggle.setOnClickListener {
+            val main = activity as? MainActivity ?: return@setOnClickListener
+            // While starting, the tap means "cancel": only OFF may connect,
+            // so a repeated tap never stacks a second ACTION_CONNECT.
+            // (link is null only if no status has rendered; ask the engine.)
+            val off = link?.let { it == Link.OFF }
+                ?: !(FipsVpnService.tunnelActive ||
+                    runCatching { FipsNative.isRunning() }.getOrDefault(false))
+            if (off) main.connect() else main.disconnect()
+            renderStatus()
+            // The 2 s poll is too slow to acknowledge a tap.
+            for (delay in FOLLOW_UP_POLLS_MS) poller.postDelayed(followUp, delay)
         }
-        view.findViewById<MaterialButton>(R.id.disconnect).setOnClickListener {
-            (activity as? MainActivity)?.disconnect()
+        view.findViewById<MaterialButton>(R.id.copy_npub).setOnClickListener {
+            val npub = view.findViewById<TextView>(R.id.identity_npub).text
+            Ui.copy(view, "npub", npub, "Public key copied")
+        }
+        view.findViewById<MaterialButton>(R.id.copy_address).setOnClickListener {
+            val address = view.findViewById<TextView>(R.id.identity_address).text
+            Ui.copy(view, "fips address", address, "Mesh address copied")
         }
         view.findViewById<MaterialButton>(R.id.backup_identity).setOnClickListener {
             showBackup()
@@ -64,9 +110,14 @@ class OverviewFragment : Fragment() {
         view.findViewById<MaterialButton>(R.id.regenerate).setOnClickListener {
             if (requireDisconnected()) confirmRegenerate()
         }
-        view.findViewById<MaterialButton>(R.id.pick_apps).setOnClickListener {
+        val pickApps = View.OnClickListener {
             startActivity(Intent(requireContext(), AppPickerActivity::class.java))
         }
+        view.findViewById<View>(R.id.pick_apps).setOnClickListener(pickApps)
+        view.findViewById<View>(R.id.manage_relays).setOnClickListener {
+            startActivity(Intent(requireContext(), RelaysActivity::class.java))
+        }
+        view.findViewById<View>(R.id.mesh_apps_card).setOnClickListener(pickApps)
         view.findViewById<MaterialButton>(R.id.battery_allow).setOnClickListener {
             requestBatteryExemption()
         }
@@ -139,7 +190,7 @@ class OverviewFragment : Fragment() {
         val body = layoutInflater.inflate(R.layout.dialog_identity_backup, null)
         body.findViewById<TextView>(R.id.backup_nsec).text = nsec
         body.findViewById<TextView>(R.id.backup_npub).text = "Identity: $npub"
-        AlertDialog.Builder(requireContext())
+        MaterialAlertDialogBuilder(requireContext())
             .setTitle("Back up identity")
             .setView(body)
             .setPositiveButton("Copy") { _, _ -> copySecret(nsec) }
@@ -166,7 +217,7 @@ class OverviewFragment : Fragment() {
     private fun showRestore() {
         val body = layoutInflater.inflate(R.layout.dialog_identity_restore, null)
         val input = body.findViewById<EditText>(R.id.restore_nsec)
-        val dialog = AlertDialog.Builder(requireContext())
+        val dialog = MaterialAlertDialogBuilder(requireContext())
             .setTitle("Restore identity")
             .setView(body)
             .setPositiveButton("Restore", null)
@@ -200,7 +251,7 @@ class OverviewFragment : Fragment() {
         }
         val info = runCatching { JSONObject(FipsNative.deriveIdentity(key)) }.getOrNull()
         if (info == null || info.has("error")) {
-            AlertDialog.Builder(requireContext())
+            MaterialAlertDialogBuilder(requireContext())
                 .setTitle("Not a valid key")
                 .setMessage(
                     info?.optString("error")?.takeIf { it.isNotEmpty() }
@@ -210,7 +261,7 @@ class OverviewFragment : Fragment() {
                 .show()
             return
         }
-        AlertDialog.Builder(requireContext())
+        MaterialAlertDialogBuilder(requireContext())
             .setTitle("Restore this identity?")
             .setMessage(
                 "This device will become:\n\n${info.optString("npub")}\n" +
@@ -235,8 +286,13 @@ class OverviewFragment : Fragment() {
      * to the old key until the next restart, so make the user disconnect.
      */
     private fun requireDisconnected(): Boolean {
-        if (!runCatching { FipsNative.isRunning() }.getOrDefault(false)) return true
-        AlertDialog.Builder(requireContext())
+        // tunnelActive as well: during a rebind the engine reports not-running
+        // for a couple of seconds while the tunnel — built around the CURRENT
+        // identity's address — is still up.
+        val live = FipsVpnService.tunnelActive ||
+            runCatching { FipsNative.isRunning() }.getOrDefault(false)
+        if (!live) return true
+        MaterialAlertDialogBuilder(requireContext())
             .setTitle("Disconnect first")
             .setMessage("Disconnect from the mesh before changing this device's identity.")
             .setPositiveButton("OK", null)
@@ -245,11 +301,11 @@ class OverviewFragment : Fragment() {
     }
 
     private fun toast(message: String) {
-        view?.let { Snackbar.make(it, message, Snackbar.LENGTH_LONG).show() }
+        view?.let { Ui.snack(it, message, long = true) }
     }
 
     private fun confirmRegenerate() {
-        AlertDialog.Builder(requireContext())
+        MaterialAlertDialogBuilder(requireContext())
             .setTitle("Regenerate identity?")
             .setMessage(
                 "This creates a new node identity (npub and .fips address). The " +
@@ -273,18 +329,64 @@ class OverviewFragment : Fragment() {
 
     override fun onPause() {
         poller.removeCallbacks(pollStatus)
+        poller.removeCallbacks(followUp)
+        // An infinite animator on a paused page is pure battery; onResume's
+        // first render restarts it if the node is still starting.
+        haloPulse?.cancel()
+        haloPulse = null
+        link = null
         super.onPause()
     }
 
     private fun updateMeshApps() {
-        val n = ConfigStore.prefs(requireContext())
-            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet())?.size ?: 0
-        view?.findViewById<TextView>(R.id.mesh_apps_summary)?.text = when (n) {
+        val root = view ?: return
+        val selected = ConfigStore.prefs(requireContext())
+            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
+        val n = selected.size
+        root.findViewById<TextView>(R.id.mesh_apps_summary).text = when (n) {
             0 -> "No apps selected — no app can reach the mesh yet."
             1 -> "1 app routes through the mesh."
             else -> "$n apps route through the mesh."
         }
+        root.findViewById<MaterialButton>(R.id.pick_apps).text =
+            if (n == 0) "Select mesh apps" else "Change"
+
+        // Icons of the first few selected apps, then "+N". A package that was
+        // uninstalled since it was picked has no icon and is skipped here; it
+        // still counts above, exactly as the tunnel setup sees the set.
+        val icons = root.findViewById<LinearLayout>(R.id.mesh_apps_icons)
+        icons.removeAllViews()
+        val pm = requireContext().packageManager
+        val size = (MESH_APP_ICON_DP * resources.displayMetrics.density).toInt()
+        val gap = (MESH_APP_ICON_GAP_DP * resources.displayMetrics.density).toInt()
+        var shown = 0
+        for (pkg in selected.sorted()) {
+            if (shown == MAX_MESH_APP_ICONS) break
+            val icon = runCatching { pm.getApplicationIcon(pkg) }.getOrNull() ?: continue
+            icons.addView(
+                ImageView(requireContext()).apply {
+                    setImageDrawable(icon)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                },
+                LinearLayout.LayoutParams(size, size).apply { marginEnd = gap },
+            )
+            shown++
+        }
+        if (n > shown && shown > 0) {
+            icons.addView(
+                TextView(requireContext()).apply {
+                    text = "+${n - shown}"
+                    setTextAppearance(
+                        com.google.android.material.R.style.TextAppearance_Material3_LabelLarge
+                    )
+                }
+            )
+        }
+        icons.visibility = if (shown > 0) View.VISIBLE else View.GONE
     }
+
+    /** One-shot re-render after a tap; the steady poll is [pollStatus]. */
+    private val followUp = Runnable { renderStatus() }
 
     private val pollStatus = object : Runnable {
         override fun run() {
@@ -294,34 +396,90 @@ class OverviewFragment : Fragment() {
     }
 
     private fun renderStatus() {
+        val root = view ?: return
         try {
             val status = JSONObject(FipsNative.status())
             renderRelays(status)
-            if (!status.optBoolean("running")) {
-                headline.text = "Disconnected"
-                detail.text = "The mesh node is not running."
-                return
-            }
-            headline.text = "Connected"
+            val running = status.optBoolean("running")
             val s = status.optJSONObject("status")
-            if (s == null) {
-                detail.text = "Starting…"
-                return
-            }
-            val mesh = s.optInt("estimated_mesh_size", s.optInt("mesh_size", -1))
-            val links = s.optInt("link_count", -1)
-            val leaf = s.optBoolean("is_leaf_only", false)
-            detail.text = buildString {
-                if (mesh >= 0) append("Mesh: $mesh nodes")
-                if (links >= 0) {
-                    if (isNotEmpty()) append("  ·  ")
-                    append("$links link" + if (links == 1) "" else "s")
+            if (running) MainActivity.connectSettled()
+            when {
+                // Running without a snapshot yet is still "starting" to the user.
+                running && s != null -> {
+                    showLink(Link.UP)
+                    val mesh = s.optInt("estimated_mesh_size", s.optInt("mesh_size", -1))
+                    val links = s.optInt("link_count", -1)
+                    root.findViewById<TextView>(R.id.stat_mesh).text =
+                        if (mesh >= 0) mesh.toString() else "–"
+                    root.findViewById<TextView>(R.id.stat_links).text =
+                        if (links >= 0) links.toString() else "–"
+                    root.findViewById<TextView>(R.id.stat_role).text =
+                        if (s.optBoolean("is_leaf_only", false)) "Leaf" else "Interior"
                 }
-                append("\n")
-                append(if (leaf) "Leaf node" else "Interior node")
+                // Not (fully) up, but the service holds a tunnel: a first
+                // start, or a rebind restarting the node on the same tun fd.
+                // Either way the toggle has to mean "disconnect".
+                running || FipsVpnService.tunnelActive || MainActivity.isConnecting() ->
+                    showLink(Link.STARTING)
+                else -> showLink(Link.OFF)
             }
         } catch (e: Exception) {
             detail.text = "status error: ${e.message}"
+        }
+    }
+
+    /**
+     * Put the connection card into [state]. The toggle's colours come from
+     * XML state lists (activated = up, selected = starting). Everything here
+     * is idempotent except the halo animation, which only restarts on an
+     * actual state change — the poll calls this every 2 s.
+     */
+    private fun showLink(state: Link) {
+        if (state != link) reconnecting = state == Link.STARTING && link == Link.UP
+        headline.text = when (state) {
+            Link.OFF -> "Disconnected"
+            Link.STARTING -> if (reconnecting) "Reconnecting…" else "Connecting…"
+            Link.UP -> "Connected"
+        }
+        detail.text = when (state) {
+            Link.OFF -> "Tap to connect to the mesh"
+            Link.STARTING ->
+                if (reconnecting) "Applying changes — restarting the node"
+                else "Starting the mesh node — tap to cancel"
+            Link.UP -> "Tap to disconnect"
+        }
+        statsRow.visibility = if (state == Link.UP) View.VISIBLE else View.GONE
+        if (state == link) return
+        link = state
+
+        toggle.isActivated = state == Link.UP
+        toggle.isSelected = state == Link.STARTING
+        toggle.contentDescription =
+            if (state == Link.OFF) "Connect to the mesh" else "Disconnect from the mesh"
+        statusDot.backgroundTintList = ColorStateList.valueOf(
+            requireContext().getColor(
+                when (state) {
+                    Link.OFF -> R.color.status_off
+                    Link.STARTING -> R.color.status_warn
+                    Link.UP -> R.color.status_ok
+                }
+            )
+        )
+
+        haloPulse?.cancel()
+        haloPulse = null
+        when (state) {
+            Link.OFF -> halo.animate().alpha(0f).setDuration(HALO_FADE_MS).start()
+            Link.UP -> halo.animate().alpha(HALO_ALPHA).setDuration(HALO_FADE_MS).start()
+            Link.STARTING -> {
+                halo.animate().cancel()
+                haloPulse = ObjectAnimator.ofFloat(halo, View.ALPHA, 0.04f, HALO_ALPHA).apply {
+                    duration = HALO_PULSE_MS
+                    repeatMode = ValueAnimator.REVERSE
+                    repeatCount = ValueAnimator.INFINITE
+                    start()
+                }
+            }
         }
     }
 
@@ -335,24 +493,72 @@ class OverviewFragment : Fragment() {
         val running = status.optBoolean("running")
         val relays = status.optJSONArray("relays") ?: JSONArray()
         var connected = 0
-        val lines = ArrayList<String>()
+        val rows = ArrayList<Triple<String, String, Boolean>>()
+        // Not running: there is no pool to report, so show the CONFIGURED
+        // relays, stateless, rather than an empty card — it is what the next
+        // connect will use, and where an edit in the relay editor shows up.
+        if (!running) {
+            for (url in ConfigStore.effectiveRelays(requireContext())) {
+                rows.add(Triple(url.removePrefix("wss://").removePrefix("ws://"), "", false))
+            }
+        }
         for (i in 0 until relays.length()) {
             val r = relays.getJSONObject(i)
-            val url = r.optString("url")
             val up = r.optBoolean("connected")
             if (up) connected++
-            lines.add(
-                (if (up) "● " else "○ ") +
-                    url.removePrefix("wss://").removePrefix("ws://") +
-                    "  " + r.optString("status").lowercase()
+            rows.add(
+                Triple(
+                    r.optString("url").removePrefix("wss://").removePrefix("ws://"),
+                    r.optString("status").lowercase(),
+                    up,
+                )
             )
         }
-        relaysList.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
-        relaysList.text = lines.joinToString("\n")
+        relaysList.visibility = if (rows.isEmpty()) View.GONE else View.VISIBLE
+        relaysCount.visibility = if (running && rows.isNotEmpty()) View.VISIBLE else View.GONE
+        relaysCount.text = "$connected/${rows.size}"
         relaysSummary.text = when {
             !running -> "Relays connect when the node is running."
-            lines.isEmpty() -> "Connecting to relays…"
-            else -> "$connected of ${lines.size} connected."
+            rows.isEmpty() -> "Connecting to relays…"
+            connected == 0 -> "No relay connected yet — peers cannot find this node by npub."
+            else -> "Where peers look up this node's current address."
         }
+
+        // Rebuild only on change: this runs every 2 s.
+        val key = rows.joinToString("|")
+        if (key == lastRelaysKey) return
+        lastRelaysKey = key
+        relaysList.removeAllViews()
+        for ((host, state, up) in rows) {
+            val row = layoutInflater.inflate(R.layout.item_relay, relaysList, false)
+            row.findViewById<TextView>(R.id.relay_host).text = host
+            row.findViewById<TextView>(R.id.relay_state).text = state
+            row.findViewById<View>(R.id.relay_dot).backgroundTintList = ColorStateList.valueOf(
+                requireContext().getColor(
+                    when {
+                        up -> R.color.status_ok
+                        state in RELAY_PENDING_STATES -> R.color.status_warn
+                        else -> R.color.status_off
+                    }
+                )
+            )
+            relaysList.addView(row)
+        }
+    }
+
+    private companion object {
+        /** Extra renders after a toggle tap, until the 2 s poll takes over. */
+        val FOLLOW_UP_POLLS_MS = longArrayOf(400, 1000, 2000, 3500)
+
+        const val HALO_ALPHA = 0.16f
+        const val HALO_FADE_MS = 250L
+        const val HALO_PULSE_MS = 900L
+
+        const val MAX_MESH_APP_ICONS = 6
+        const val MESH_APP_ICON_DP = 32
+        const val MESH_APP_ICON_GAP_DP = 8
+
+        /** nostr-sdk relay states that are on their way up, not down. */
+        val RELAY_PENDING_STATES = setOf("initialized", "pending", "connecting")
     }
 }

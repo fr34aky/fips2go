@@ -1,69 +1,143 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.core.widget.NestedScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:clipToPadding="false"
-    android:paddingHorizontal="12dp"
-    android:paddingTop="12dp"
-    android:paddingBottom="88dp">
+    android:paddingHorizontal="16dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="96dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
-        <!-- Connection status -->
+        <!-- Connection: one toggle that shows the state it is in, replacing a
+             Connect/Disconnect pair that were both always live. While the
+             node is starting, the toggle means "cancel", so a second tap can
+             no longer send a second ACTION_CONNECT (the service only guards
+             on isRunning(), which is still false at that point). -->
         <com.google.android.material.card.MaterialCardView
-            style="@style/Widget.Material3.CardView.Elevated"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
-            app:cardCornerRadius="16dp">
+            style="@style/Widget.Fips.Card.Hero">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
                 android:orientation="vertical"
-                android:padding="16dp">
+                android:paddingHorizontal="16dp"
+                android:paddingTop="20dp"
+                android:paddingBottom="16dp">
 
-                <TextView
-                    android:id="@+id/status_headline"
+                <LinearLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Disconnected"
-                    android:textAppearance="?attr/textAppearanceHeadlineSmall" />
+                    android:background="@drawable/bg_pill"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="14dp"
+                    android:paddingVertical="6dp">
+
+                    <View
+                        android:id="@+id/status_dot"
+                        android:layout_width="8dp"
+                        android:layout_height="8dp"
+                        android:background="@drawable/dot" />
+
+                    <TextView
+                        android:id="@+id/status_headline"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="Disconnected"
+                        android:textAppearance="?attr/textAppearanceLabelLarge"
+                        android:textColor="?attr/colorOnSurface" />
+                </LinearLayout>
+
+                <FrameLayout
+                    android:layout_width="152dp"
+                    android:layout_height="152dp"
+                    android:layout_marginTop="12dp">
+
+                    <View
+                        android:id="@+id/power_halo"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:alpha="0"
+                        android:background="@drawable/bg_halo" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/connect_toggle"
+                        style="@style/Widget.Material3.Button.IconButton.Filled"
+                        android:layout_width="108dp"
+                        android:layout_height="108dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="Connect to the mesh"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        app:backgroundTint="@color/power_bg"
+                        app:icon="@drawable/ic_power"
+                        app:iconGravity="textStart"
+                        app:iconPadding="0dp"
+                        app:iconSize="44dp"
+                        app:iconTint="@color/power_icon"
+                        app:shapeAppearanceOverlay="@style/ShapeAppearance.Fips.Circle"
+                        app:strokeColor="?attr/colorOutlineVariant"
+                        app:strokeWidth="1dp" />
+                </FrameLayout>
 
                 <TextView
                     android:id="@+id/status_detail"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    android:layout_marginTop="8dp"
+                    android:gravity="center_horizontal"
                     android:textAppearance="?attr/textAppearanceBodyMedium"
-                    android:textColor="?android:attr/textColorSecondary" />
+                    android:textColor="?attr/colorOnSurfaceVariant" />
 
+                <!-- Live figures; only while the node reports a status. -->
                 <LinearLayout
+                    android:id="@+id/stats_row"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:orientation="horizontal">
+                    android:layout_marginTop="16dp"
+                    android:baselineAligned="false"
+                    android:orientation="horizontal"
+                    android:visibility="gone">
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/connect"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:layout_marginEnd="6dp"
-                        android:text="Connect" />
+                    <LinearLayout style="@style/Widget.Fips.StatTile">
+                        <TextView
+                            android:id="@+id/stat_mesh"
+                            style="@style/Widget.Fips.StatValue" />
+                        <TextView
+                            style="@style/Widget.Fips.Label"
+                            android:text="Mesh nodes" />
+                    </LinearLayout>
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/disconnect"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:layout_marginStart="6dp"
-                        android:text="Disconnect" />
+                    <LinearLayout
+                        style="@style/Widget.Fips.StatTile"
+                        android:layout_marginHorizontal="8dp">
+                        <TextView
+                            android:id="@+id/stat_links"
+                            style="@style/Widget.Fips.StatValue" />
+                        <TextView
+                            style="@style/Widget.Fips.Label"
+                            android:text="Links" />
+                    </LinearLayout>
+
+                    <LinearLayout style="@style/Widget.Fips.StatTile">
+                        <TextView
+                            android:id="@+id/stat_role"
+                            style="@style/Widget.Fips.StatValue" />
+                        <TextView
+                            style="@style/Widget.Fips.Label"
+                            android:text="Role" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
@@ -73,63 +147,123 @@
              Doze freezes the service and drops the mesh without saying so. -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/battery_card"
-            style="@style/Widget.Material3.CardView.Filled"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
-            android:visibility="gone"
-            app:cardCornerRadius="16dp">
+            style="@style/Widget.Fips.Card.Banner"
+            android:visibility="gone">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
+                android:paddingHorizontal="16dp"
+                android:paddingTop="16dp"
+                android:paddingBottom="4dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Keep the mesh alive in the background"
-                    android:textAppearance="?attr/textAppearanceTitleMedium" />
+                    android:textAppearance="?attr/textAppearanceTitleMedium"
+                    android:textColor="?attr/colorOnTertiaryContainer" />
 
                 <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    style="@style/Widget.Fips.Summary"
                     android:text="Android's battery optimisation freezes this app when the screen is off, which drops the mesh until you open it again. Exempting FIPS keeps the node connected."
-                    android:textAppearance="?attr/textAppearanceBodySmall"
-                    android:textColor="?attr/colorOnSurfaceVariant" />
+                    android:textColor="?attr/colorOnTertiaryContainer" />
 
                 <LinearLayout
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_gravity="end"
                     android:layout_marginTop="4dp"
                     android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/battery_allow"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Allow" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/battery_dismiss"
                         style="@style/Widget.Material3.Button.TextButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Not now" />
+                        android:text="Not now"
+                        android:textColor="?attr/colorOnTertiaryContainer" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/battery_allow"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Allow"
+                        android:textColor="?attr/colorOnTertiaryContainer" />
                 </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Mesh apps: what the tunnel captures. The whole card opens the
+             picker; with nothing selected the tunnel is a no-op, so this sits
+             directly under the connection it qualifies. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/mesh_apps_card"
+            style="@style/Widget.Fips.Card"
+            android:clickable="true"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/Widget.Fips.CardTitle"
+                            android:text="Mesh apps" />
+
+                        <TextView
+                            android:id="@+id/mesh_apps_summary"
+                            style="@style/Widget.Fips.Summary" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_marginStart="8dp"
+                        android:importantForAccessibility="no"
+                        android:src="@drawable/ic_chevron_right"
+                        app:tint="?attr/colorOnSurfaceVariant" />
+                </LinearLayout>
+
+                <!-- Icons of the selected apps; filled in code. -->
+                <LinearLayout
+                    android:id="@+id/mesh_apps_icons"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/pick_apps"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Select mesh apps" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
         <!-- Nostr relays: the node's relay pool with live connection state. -->
         <com.google.android.material.card.MaterialCardView
-            style="@style/Widget.Material3.CardView.Filled"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
-            app:cardCornerRadius="16dp">
+            style="@style/Widget.Fips.Card">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -137,38 +271,55 @@
                 android:orientation="vertical"
                 android:padding="16dp">
 
-                <TextView
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Nostr relays"
-                    android:textAppearance="?attr/textAppearanceTitleMedium" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        style="@style/Widget.Fips.CardTitle"
+                        android:layout_width="0dp"
+                        android:layout_weight="1"
+                        android:text="Nostr relays" />
+
+                    <TextView
+                        android:id="@+id/relays_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_pill"
+                        android:paddingHorizontal="10dp"
+                        android:paddingVertical="3dp"
+                        android:textAppearance="?attr/textAppearanceLabelMedium"
+                        android:textColor="?attr/colorOnSurfaceVariant"
+                        android:visibility="gone" />
+                </LinearLayout>
 
                 <TextView
                     android:id="@+id/relays_summary"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodyMedium"
-                    android:textColor="?android:attr/textColorSecondary" />
+                    style="@style/Widget.Fips.Summary" />
 
-                <TextView
+                <LinearLayout
                     android:id="@+id/relays_list"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:textSize="12sp"
+                    android:orientation="vertical"
                     android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/manage_relays"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Manage relays" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
         <!-- Node identity -->
         <com.google.android.material.card.MaterialCardView
-            style="@style/Widget.Material3.CardView.Filled"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
-            app:cardCornerRadius="16dp">
+            style="@style/Widget.Fips.Card">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -177,94 +328,116 @@
                 android:padding="16dp">
 
                 <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Node identity"
-                    android:textAppearance="?attr/textAppearanceTitleMedium" />
+                    style="@style/Widget.Fips.CardTitle"
+                    android:text="Node identity" />
 
                 <TextView
-                    android:id="@+id/identity_npub"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:textSize="12sp"
-                    android:textIsSelectable="true" />
+                    style="@style/Widget.Fips.Summary"
+                    android:text="How other nodes find this device. The secret key behind it never leaves the phone unless you back it up." />
 
                 <TextView
-                    android:id="@+id/identity_address"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:fontFamily="monospace"
-                    android:textSize="12sp"
-                    android:textIsSelectable="true" />
+                    style="@style/Widget.Fips.Label"
+                    android:layout_marginTop="16dp"
+                    android:layout_marginBottom="6dp"
+                    android:text="Public key" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    android:background="@drawable/bg_field"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingVertical="4dp">
+
+                    <TextView
+                        android:id="@+id/identity_npub"
+                        style="@style/Widget.Fips.Mono"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:paddingVertical="8dp"
+                        android:textIsSelectable="true" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/copy_npub"
+                        style="@style/Widget.Material3.Button.IconButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:contentDescription="Copy public key"
+                        app:icon="@drawable/ic_copy"
+                        app:iconSize="20dp" />
+                </LinearLayout>
+
+                <TextView
+                    style="@style/Widget.Fips.Label"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginBottom="6dp"
+                    android:text="Mesh address" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_field"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingVertical="4dp">
+
+                    <TextView
+                        android:id="@+id/identity_address"
+                        style="@style/Widget.Fips.Mono"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:paddingVertical="8dp"
+                        android:textIsSelectable="true" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/copy_address"
+                        style="@style/Widget.Material3.Button.IconButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:contentDescription="Copy mesh address"
+                        app:icon="@drawable/ic_copy"
+                        app:iconSize="20dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
                     android:orientation="horizontal">
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/backup_identity"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="wrap_content"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
                         android:text="Back up" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/restore_identity"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="wrap_content"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:layout_weight="1"
                         android:text="Restore" />
                 </LinearLayout>
 
+                <!-- Destructive and rare: visually demoted, coloured as such. -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/regenerate"
                     style="@style/Widget.Material3.Button.TextButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Regenerate identity" />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- Mesh apps -->
-        <com.google.android.material.card.MaterialCardView
-            style="@style/Widget.Material3.CardView.Filled"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:cardCornerRadius="16dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Mesh apps"
-                    android:textAppearance="?attr/textAppearanceTitleMedium" />
-
-                <TextView
-                    android:id="@+id/mesh_apps_summary"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textAppearance="?attr/textAppearanceBodyMedium"
-                    android:textColor="?android:attr/textColorSecondary" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/pick_apps"
-                    style="@style/Widget.Material3.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="Select mesh apps" />
+                    android:layout_gravity="center_horizontal"
+                    android:text="Regenerate identity"
+                    android:textColor="?attr/colorError" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
-</ScrollView>
+</androidx.core.widget.NestedScrollView>

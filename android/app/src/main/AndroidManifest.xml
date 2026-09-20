@@ -56,6 +56,12 @@
             android:exported="false"
             android:label="Mesh apps" />
 
+        <activity
+            android:name=".RelaysActivity"
+            android:exported="false"
+            android:label="Nostr relays"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Exposes the downloaded update APK to the package installer. -->
         <provider
             android:name="androidx.core.content.FileProvider"

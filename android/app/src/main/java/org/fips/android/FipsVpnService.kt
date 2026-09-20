@@ -30,6 +30,7 @@ import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import org.json.JSONObject
 
@@ -50,6 +51,31 @@ class FipsVpnService : VpnService() {
     companion object {
         const val ACTION_CONNECT = "org.fips.android.CONNECT"
         const val ACTION_DISCONNECT = "org.fips.android.DISCONNECT"
+
+        /**
+         * Something the tunnel or node only reads when it is (re)built changed
+         * while connected: the mesh-app selection (`addAllowedApplication` is
+         * fixed at `establish()`) or the Nostr relay list (fips fixes its relay
+         * pool at node start). Applying either is an ordinary coalesced rebind:
+         * [rebindOnce] regenerates the config JSON and replaces the tunnel when
+         * the stored selection no longer matches the one it was built with.
+         * Send it through [requestRebind], once per visit — not per edit.
+         */
+        const val ACTION_CONFIG_CHANGED = "org.fips.android.CONFIG_CHANGED"
+
+        /**
+         * Ask a live tunnel to pick up changed settings. A no-op while
+         * disconnected — the next connect reads them itself — so callers need
+         * not check. Must be called while the app is in the foreground.
+         */
+        fun requestRebind(context: Context) {
+            if (!tunnelActive) return
+            runCatching {
+                context.startService(
+                    Intent(context, FipsVpnService::class.java).setAction(ACTION_CONFIG_CHANGED)
+                )
+            }
+        }
         private const val TAG = "FipsVpnService"
         private const val CHANNEL_ID = "fips_vpn"
         private const val NOTIFICATION_ID = 1
@@ -83,6 +109,17 @@ class FipsVpnService : VpnService() {
          */
         @Volatile var hotspotStatus: String? = null
             private set
+
+        /**
+         * UI-visible: the service holds (or is bringing up) a tunnel. Unlike
+         * `FipsNative.isRunning()` this stays true across a rebind, where the
+         * node is torn down and restarted on the same tun fd and the engine
+         * reports "not running" for a couple of seconds. Overview's single
+         * connect toggle keys off it: during that gap a tap must still mean
+         * "disconnect". Written only by the service; changes no behaviour here.
+         */
+        @Volatile var tunnelActive: Boolean = false
+            private set
     }
 
     private var tunFd: ParcelFileDescriptor? = null
@@ -97,6 +134,27 @@ class FipsVpnService : VpnService() {
     @Volatile private var meshAddress: String? = null
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
     @Volatile private var tunnelHasIpv6Clearnet = false
+
+    /**
+     * The mesh-app set the live tunnel was established with; null before the
+     * first establish. [rebindOnce] compares it against the stored selection,
+     * so ANY rebind picks up a changed selection, whatever triggered it.
+     */
+    @Volatile private var tunnelMeshApps: Set<String>? = null
+
+    /** Identifies the connect in flight; see [stillWanted]. */
+    private val connectAttempt = AtomicInteger(0)
+
+    /** Settings changed during the first connect; rebind once it is up. */
+    private val rebindAfterConnect = AtomicBoolean(false)
+
+    /** A shutdown's thread is still stopping the engine; see [shutdown]. */
+    private val stopping = AtomicBoolean(false)
+
+    /** A connect arrived during that; [finishShutdown] serves it. */
+    private val connectQueued = AtomicBoolean(false)
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // FIPS Hotspot ("!FIPS") state — see [startHotspot] for the two join
     // paths. A specifier-joined network is local-only (no INTERNET
@@ -187,26 +245,97 @@ class FipsVpnService : VpnService() {
                 shutdown()
                 return START_NOT_STICKY
             }
-            ACTION_CONNECT -> {
-                // Decrypt the Keystore nsec and build the config here so the
-                // secret never rides in an Intent.
-                val nsec = IdentityStore.getOrCreate(this)
-                val identity = JSONObject(FipsNative.deriveIdentity(nsec))
-                if (identity.has("error")) {
-                    Log.e(TAG, "identity error: ${identity.getString("error")}")
-                    return START_NOT_STICKY
+            ACTION_CONFIG_CHANGED -> {
+                when {
+                    // Nothing to apply it to: the next connect reads the
+                    // settings itself. Do not linger as a started service.
+                    !tunnelActive -> stopSelf()
+                    // The first connect is still establishing. Its config JSON
+                    // was built before this change, so it cannot be skipped —
+                    // but a rebind now would race that connect. It is served
+                    // once the engine is up (see connect()).
+                    tunFd == null || !FipsNative.isRunning() -> {
+                        Log.i(TAG, "settings changed while connecting; rebind deferred")
+                        rebindAfterConnect.set(true)
+                    }
+                    else -> {
+                        Log.i(TAG, "settings changed while connected; rebinding node")
+                        rebindNode()
+                    }
                 }
-                val address = identity.getString("address")
-                val config = ConfigStore.buildConfigJson(this, nsec)
-                startForegroundWithNotification(address)
-                thread(name = "fips-connect") { connect(config, address) }
+                return START_NOT_STICKY
+            }
+            ACTION_CONNECT -> {
+                val (nsec, address) = identity() ?: return START_NOT_STICKY
+                // One tunnel per service. The UI tries not to send this twice,
+                // but it cannot be the guard: a second CONNECT landing while
+                // isRunning() is still false (starting, or mid-rebind) used to
+                // establish a second tunnel, get "already running" back from
+                // the shim, and take the error path into shutdown() — killing
+                // the live connection.
+                if (tunnelActive) {
+                    Log.w(TAG, "connect ignored: tunnel already active")
+                    // Still owed: this start came in via startForegroundService.
+                    startForegroundWithNotification(address)
+                    return START_STICKY
+                }
+                // Disconnect-then-connect. Stopping the engine takes seconds on
+                // a phone (~5 s on a Pixel 9 Pro), Overview offers "tap to
+                // connect" the moment Disconnect is tapped, and a connect that
+                // ran alongside the tail of that shutdown lost: the shutdown
+                // thread closed the NEW tunnel's fd (tunFd had been reassigned;
+                // the old one leaked as an inert tun0) and then stopSelf() took
+                // the new connection down with the service. So it waits its
+                // turn — see finishShutdown().
+                if (stopping.get()) {
+                    Log.i(TAG, "connect queued: the previous shutdown is still stopping the engine")
+                    tunnelActive = true
+                    connectQueued.set(true)
+                    startForegroundWithNotification(address)
+                    return START_STICKY
+                }
+                beginConnect(nsec, address)
                 return START_STICKY
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun connect(config: String, address: String) {
+    /**
+     * The nsec and the mesh address it derives, or null on an identity error
+     * (logged). Re-read from the Keystore on every use: the secret must not
+     * linger in a field, and never rides in an Intent.
+     */
+    private fun identity(): Pair<String, String>? {
+        val nsec = IdentityStore.getOrCreate(this)
+        val identity = JSONObject(FipsNative.deriveIdentity(nsec))
+        if (identity.has("error")) {
+            Log.e(TAG, "identity error: ${identity.getString("error")}")
+            return null
+        }
+        return nsec to identity.getString("address")
+    }
+
+    private fun beginConnect(nsec: String, address: String) {
+        val config = ConfigStore.buildConfigJson(this, nsec)
+        tunnelActive = true
+        rebindAfterConnect.set(false)
+        val attempt = connectAttempt.incrementAndGet()
+        startForegroundWithNotification(address)
+        thread(name = "fips-connect") { connect(config, address, attempt) }
+    }
+
+    /**
+     * True while [attempt] is still the connect the user wants. shutdown()
+     * bumps the counter, so a Disconnect tapped while this thread is inside
+     * establish() or FipsNative.start() — "tap to cancel" on Overview — is
+     * seen here. Without the checks below the thread carried on after
+     * shutdown() had already run: a tunnel and node left up in a stopped
+     * service, with no notification and nothing holding the fd to close it.
+     */
+    private fun stillWanted(attempt: Int) = tunnelActive && connectAttempt.get() == attempt
+
+    private fun connect(config: String, address: String, attempt: Int) {
         if (FipsNative.isRunning()) {
             Log.w(TAG, "already running")
             return
@@ -231,6 +360,14 @@ class FipsVpnService : VpnService() {
             shutdown()
             return
         }
+        if (!stillWanted(attempt)) {
+            Log.i(TAG, "connect cancelled while establishing; closing the tunnel")
+            pfd.close()
+            return
+        }
+        // Never drop a tunnel fd on the floor: an unclosed one keeps its tun
+        // interface alive for as long as the process lives.
+        tunFd?.let { if (it !== pfd) it.close() }
         tunFd = pfd
         tunnelHasIpv6Clearnet = wantIpv6
 
@@ -238,10 +375,18 @@ class FipsVpnService : VpnService() {
         if (error.isNotEmpty()) {
             Log.e(TAG, "engine start failed: $error")
             shutdown()
+        } else if (!stillWanted(attempt)) {
+            // shutdown()'s FipsNative.stop() ran before this start and found
+            // nothing to stop; finish its job.
+            Log.i(TAG, "connect cancelled while the engine started; stopping it")
+            FipsNative.stop()
+            if (tunFd === pfd) tunFd = null
+            pfd.close()
         } else {
             Log.i(TAG, "fips engine running, address $address, ipv6Clearnet=$wantIpv6")
             registerNetworkMonitoring()
             startHotspot()
+            if (rebindAfterConnect.getAndSet(false)) rebindNode()
         }
     }
 
@@ -583,10 +728,13 @@ class FipsVpnService : VpnService() {
         hotspotStatus = null
     }
 
+    /** The stored mesh-app selection, as an immutable copy. */
+    private fun currentMeshApps(): Set<String> =
+        (prefs().getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()).toSet()
+
     /** Build and establish the TUN. `ipv6Clearnet` decides whether `::/0` is claimed. */
     private fun establishTunnel(address: String, ipv6Clearnet: Boolean): ParcelFileDescriptor? {
-        val meshApps = prefs()
-            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
+        val meshApps = currentMeshApps()
         // Logged so a "my app is not captured" report can be settled from
         // logcat alone: this is the set the tunnel is built from, whatever
         // the picker or the Overview card shows (issue #26).
@@ -633,18 +781,23 @@ class FipsVpnService : VpnService() {
             // Per-app split tunnel: only the chosen apps are captured; every
             // other app keeps the normal network untouched. With no selection,
             // capture only ourselves (a no-op) so nothing else is affected.
-            if (meshApps.isEmpty()) {
-                builder.addAllowedApplication(packageName)
-            } else {
-                for (pkg in meshApps) {
-                    try {
-                        builder.addAllowedApplication(pkg)
-                    } catch (e: PackageManager.NameNotFoundException) {
-                        Log.w(TAG, "mesh app not installed, skipping: $pkg")
-                    }
+            var allowed = 0
+            for (pkg in meshApps) {
+                try {
+                    builder.addAllowedApplication(pkg)
+                    allowed++
+                } catch (e: PackageManager.NameNotFoundException) {
+                    Log.w(TAG, "mesh app not installed, skipping: $pkg")
                 }
             }
-            builder.establish()
+            // A builder with NO allowed application is a whole-device VPN.
+            // That used to be reachable: select one app, uninstall it, connect
+            // — the only entry was skipped above and every app on the phone
+            // was captured. Count what was actually added, not what is stored.
+            if (allowed == 0) builder.addAllowedApplication(packageName)
+            // Recorded only for a tunnel that actually came up, so a failed
+            // establish leaves the comparison pointing at the live one.
+            builder.establish()?.also { tunnelMeshApps = meshApps }
         } catch (e: Exception) {
             Log.e(TAG, "establish failed", e)
             null
@@ -855,11 +1008,16 @@ class FipsVpnService : VpnService() {
 
     /**
      * One rebind pass. When the IPv6-clearnet decision no longer matches the
-     * tunnel's routes, establish a replacement tunnel first (Android tears the
-     * old session down when the new one comes up) and move the engine onto the
-     * fresh fd.
+     * tunnel's routes, or the mesh-app selection no longer matches its allowed
+     * apps, establish a replacement tunnel first (Android tears the old session
+     * down when the new one comes up) and move the engine onto the fresh fd.
      */
     private fun rebindOnce() {
+        // A pass can be queued (REBIND_SETTLE_MS) or running when the user
+        // disconnects. shutdown() leaves tunFd set until its thread has
+        // stopped the engine, so without this a late pass could establish a
+        // replacement tunnel — the VPN coming back after Disconnect.
+        if (!tunnelActive) return
         // Regenerate the config so the rebuilt node reflects current
         // per-network state (the FIPS Hotspot transport overlay). The nsec
         // is re-decrypted from the Keystore — it must not linger in a field.
@@ -872,12 +1030,22 @@ class FipsVpnService : VpnService() {
             ""
         }
         val wantIpv6 = hasIpv6Internet(currentUnderlying)
-        if (wantIpv6 != tunnelHasIpv6Clearnet) {
+        // A replacement tunnel is needed when its routes are wrong (IPv6
+        // decision flipped) or its allowed-app list is (selection changed).
+        // Only ever REPLACE a tunnel: while the first connect is still
+        // establishing (tunFd null) it reads the current selection itself.
+        val appsChanged = tunFd != null && currentMeshApps() != tunnelMeshApps
+        if (wantIpv6 != tunnelHasIpv6Clearnet || appsChanged) {
             val address = meshAddress ?: return
-            Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6")
+            Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6 appsChanged=$appsChanged")
             val fresh = establishTunnel(address, wantIpv6)
             if (fresh == null) {
-                Log.e(TAG, "re-establish for route change failed; keeping old tunnel")
+                Log.e(TAG, "re-establish failed; keeping old tunnel")
+                return
+            }
+            if (!tunnelActive) {
+                // Disconnected while establish() ran: do not adopt it.
+                fresh.close()
                 return
             }
             val old = tunFd
@@ -905,19 +1073,49 @@ class FipsVpnService : VpnService() {
     }
 
     private fun shutdown() {
+        tunnelActive = false
+        connectQueued.set(false) // a Disconnect outranks a connect still waiting
+        connectAttempt.incrementAndGet() // cancels a connect still in flight
+        rebindAfterConnect.set(false)
+        // One teardown at a time; a second request is served by the first.
+        if (!stopping.compareAndSet(false, true)) return
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
+        // Take THIS session's fd now. The thread below runs for seconds, and
+        // reading the field at the end is how it came to close a newer
+        // tunnel's fd instead of its own.
+        val fd = tunFd
+        tunFd = null
         thread(name = "fips-disconnect") {
             FipsNative.stop()
-            tunFd?.close()
-            tunFd = null
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            fd?.close()
+            mainHandler.post { finishShutdown() }
         }
     }
 
+    /**
+     * Main thread, once the engine is down and the tunnel closed: either stop
+     * the service, or — if a connect arrived meanwhile — serve it now, on the
+     * same service instance, with nothing of the old session left to race it.
+     */
+    private fun finishShutdown() {
+        stopping.set(false)
+        if (connectQueued.getAndSet(false)) {
+            val id = identity()
+            if (id != null) {
+                Log.i(TAG, "shutdown complete; serving the queued connect")
+                beginConnect(id.first, id.second)
+                return
+            }
+            tunnelActive = false
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
     override fun onDestroy() {
+        tunnelActive = false
         stopHotspot()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
