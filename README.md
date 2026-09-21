@@ -52,7 +52,12 @@ usable on a device you also use for everything else.
   connection without giving up the Wi-Fi you are already on.
 - **LAN discovery (mDNS).** Finds fips peers on your Wi-Fi and dials them
   directly, with no relay or mesh hop. The tunnel's own addresses are kept out
-  of the adverts, so the mesh ULA is never broadcast on the LAN.
+  of the adverts, so the mesh ULA is never broadcast on the LAN. It also works
+  the other way round: a device **tethered to this phone's own hotspot** that
+  runs fips is found and linked over the hotspot LAN, with nothing to set up —
+  which is how tethered devices get the mesh. (Android gives an app no way to
+  route a tethered client's traffic into the tunnel: the kernel forwards it,
+  no app owns it, and tethering never uses a VPN as its upstream.)
 - **Survives network changes.** A Wi-Fi↔cellular hand-over keeps the node
   running: sessions, tree position and routes are all kept, and the peers
   whose path moved are re-pinned within about half a second of Android
@@ -294,7 +299,11 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   the underlay is Wi-Fi, or a FIPS Hotspot is joined (which forces LAN
   discovery on for that link) — and never on cellular: the lock disables the
   chip's hardware multicast filtering, so every LAN multicast frame wakes the
-  CPU and chatty LANs cost battery. The tunnel's own addresses are excluded
+  CPU and chatty LANs cost battery. Discovery over the phone's **own**
+  hotspot needs no lock: with the phone as the access point (underlay
+  cellular, lock not held) a laptop running fips on the hotspot was
+  discovered and the link came up (Pixel, 0.6.0) — so do not widen the lock
+  to cover tethering, it would only cost battery. The tunnel's own addresses are excluded
   from the adverts so the mesh ULA is not broadcast on the LAN. mDNS sockets
   cannot be socket-protected (no fd access) — fine for the per-app split
   tunnel, non-functional under "Block connections without VPN". BLE/Ethernet
