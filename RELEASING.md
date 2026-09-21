@@ -214,10 +214,16 @@ Quickest check, with `nak` (the release event is kind 30063, addressed by the
 package id; the file event it references is kind 1063):
 
 ```bash
-nak req -k 30063 -i org.fips.android --limit 3 wss://relay.zapstore.dev \
+nak req -k 30063 -t i=org.fips.android --limit 3 wss://relay.zapstore.dev \
   | python3 -c "import json,sys; [print([t for t in json.loads(l)['tags'] if t[0] in ('d','e')]) for l in sys.stdin]"
 nak req --id <e-tag> wss://relay.zapstore.dev    # → filename, x (sha256), size, version_code
 ```
+
+The filter is `-t i=…` (a tag filter), not `-i`: in `nak` `-i` means `--id`, so
+`-i org.fips.android` matches no event and prints **nothing** — which reads
+exactly like "not published" (seen with nak v0.20.7 while releasing 0.6.0).
+An empty result from this check is only meaningful if the same command shows
+the previous release.
 
 Or the longer script below, which walks the same events:
 
