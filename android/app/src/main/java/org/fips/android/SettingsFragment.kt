@@ -186,6 +186,8 @@ class SettingsFragment : Fragment() {
             sw(view, R.id.battery_saver).isChecked !=
             p.getBoolean(CS.BATTERY_SAVER, CS.DEF_BATTERY_SAVER) ||
             sw(view, R.id.lan_mdns).isChecked != CS.lanMdns(requireContext()) ||
+            sw(view, R.id.bootstrap_fallbacks).isChecked !=
+            p.getBoolean(CS.BOOTSTRAP_FALLBACKS, CS.DEF_BOOTSTRAP_FALLBACKS) ||
             sw(view, R.id.hotspot).isChecked != CS.hotspotEnabled(requireContext()) ||
             sw(view, R.id.auto_update).isChecked !=
             p.getBoolean(CS.AUTO_UPDATE, CS.DEF_AUTO_UPDATE) ||
@@ -285,6 +287,8 @@ class SettingsFragment : Fragment() {
         sw(view, R.id.battery_saver).isChecked =
             p.getBoolean(CS.BATTERY_SAVER, CS.DEF_BATTERY_SAVER)
         sw(view, R.id.lan_mdns).isChecked = CS.lanMdns(requireContext())
+        sw(view, R.id.bootstrap_fallbacks).isChecked =
+            p.getBoolean(CS.BOOTSTRAP_FALLBACKS, CS.DEF_BOOTSTRAP_FALLBACKS)
         sw(view, R.id.hotspot).isChecked = CS.hotspotEnabled(requireContext())
         sw(view, R.id.auto_update).isChecked = p.getBoolean(CS.AUTO_UPDATE, CS.DEF_AUTO_UPDATE)
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
@@ -312,6 +316,7 @@ class SettingsFragment : Fragment() {
             .putString(CS.INBOUND_PORTS, edit(view, R.id.inbound_ports).text.toString().trim())
             .putBoolean(CS.BATTERY_SAVER, sw(view, R.id.battery_saver).isChecked)
             .putBoolean(CS.LAN_MDNS, sw(view, R.id.lan_mdns).isChecked)
+            .putBoolean(CS.BOOTSTRAP_FALLBACKS, sw(view, R.id.bootstrap_fallbacks).isChecked)
             .putBoolean(CS.HOTSPOT, sw(view, R.id.hotspot).isChecked)
             .putBoolean(CS.AUTO_UPDATE, sw(view, R.id.auto_update).isChecked)
             .putBoolean(CS.FORWARD_CLEARNET, sw(view, R.id.forward_clearnet).isChecked)
@@ -329,6 +334,7 @@ class SettingsFragment : Fragment() {
         /** Every persisted widget; [watchForEdits] must see all of them. */
         val SWITCHES = intArrayOf(
             R.id.inbound_filter, R.id.lan_mdns, R.id.hotspot, R.id.battery_saver,
+            R.id.bootstrap_fallbacks,
             R.id.auto_update, R.id.forward_clearnet,
         )
         val TEXT_FIELDS = intArrayOf(

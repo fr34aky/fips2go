@@ -358,11 +358,17 @@ impl ShimConfig {
             );
         }
         for peer in &self.peers {
-            config.peers.push(fips::config::PeerConfig::new(
+            let mut peer_config = fips::config::PeerConfig::new(
                 peer.npub.clone(),
                 peer.transport.clone(),
                 peer.endpoint.clone(),
-            ));
+            );
+            // The static address is still dialed first; the peer's Nostr
+            // advert is appended as a fallback, so a bootstrap that moves to
+            // a new IP or port is found again without a config change. fips
+            // rejects `via_nostr` on a peer while Nostr is off, hence the tie.
+            peer_config.via_nostr = self.enable_nostr;
+            config.peers.push(peer_config);
         }
         config
             .validate()
@@ -396,6 +402,24 @@ mod tests {
         assert_eq!(generated.npub, rederived.npub);
         assert_eq!(generated.address, rederived.address);
         assert!(generated.address.starts_with("fd"), "fips fd::/8 address");
+    }
+
+    /// Every configured peer follows its Nostr advert as a fallback once
+    /// Nostr is on — and never while it is off, which fips's validation
+    /// would reject.
+    #[test]
+    fn peers_follow_their_nostr_advert_when_nostr_is_on() {
+        let nsec = derive_identity("").unwrap().nsec;
+        let peer = derive_identity("").unwrap().npub;
+        for (nostr, expect) in [(true, true), (false, false)] {
+            let json = format!(
+                r#"{{"nsec": "{nsec}", "enable_nostr": {nostr}, "enable_fips_dns": false,
+                     "peers": [{{"npub": "{peer}", "endpoint": "boot.example:2121"}}]}}"#
+            );
+            let config = ShimConfig::from_json(&json).unwrap().to_fips_config().unwrap();
+            assert_eq!(config.peers.len(), 1);
+            assert_eq!(config.peers[0].via_nostr, expect, "enable_nostr={nostr}");
+        }
     }
 
     #[test]
