@@ -18,6 +18,19 @@ pub struct ShimConfig {
     /// Enable Nostr rendezvous (relay discovery + NAT traversal).
     #[serde(default)]
     pub enable_nostr: bool,
+    /// Open peer discovery over Nostr (fips `policy: open`): dial nodes that
+    /// advertise in the app namespace, not only configured ones. Off by
+    /// default. fips's own bounds are server-sized (a queue of 64, links up
+    /// to `max_peers` = 128), so the shim ceilings the overlay pool at
+    /// [`Self::nostr_discovery_max_peers`] — every link is a heartbeat every
+    /// 20 s on a phone. Needs `enable_nostr`.
+    #[serde(default)]
+    pub nostr_discovery: bool,
+    /// Ceiling on peers found by open discovery (queued, connecting or
+    /// connected), see [`Self::nostr_discovery`]. `0` falls back to the
+    /// default rather than "unlimited".
+    #[serde(default = "default_nostr_discovery_max_peers")]
+    pub nostr_discovery_max_peers: usize,
     /// Run the in-process FIPS DNS responder on `[::1]:5354` (the `.fips`
     /// half of the DNS proxy). On by default; the host test suite turns it
     /// off to avoid colliding with a daemon on the same machine.
@@ -193,6 +206,13 @@ fn default_worker_threads() -> usize {
     1
 }
 
+/// Three open-discovery links on top of the configured bootstraps: enough
+/// that the mesh is reachable when every bootstrap is down, small enough
+/// that the heartbeats do not show on the battery graph.
+fn default_nostr_discovery_max_peers() -> usize {
+    3
+}
+
 fn default_dns_upstreams() -> Vec<String> {
     vec!["1.1.1.1:53".to_string(), "9.9.9.9:53".to_string()]
 }
@@ -257,6 +277,12 @@ impl ShimConfig {
                      UDP instance in the YAML instead"
                 );
             }
+            if self.nostr_discovery {
+                tracing::warn!(
+                    "nostr_discovery is ignored in fips_yaml mode — set \
+                     node.rendezvous.nostr.policy: open in the YAML instead"
+                );
+            }
             config
                 .validate()
                 .map_err(|e| format!("config validate: {e}"))?;
@@ -264,6 +290,7 @@ impl ShimConfig {
         }
 
         let mut config = fips::Config::new();
+        let own_address = identity.address;
         config.node.identity.nsec = Some(identity.nsec);
         let udp_bind = self
             .udp_bind
@@ -319,6 +346,22 @@ impl ShimConfig {
         config.dns.enabled = self.enable_fips_dns; // in-process responder, [::1]:5354
         config.node.control.enabled = false;
         config.node.rendezvous.nostr.enabled = self.enable_nostr;
+        if self.nostr_discovery && !self.enable_nostr {
+            tracing::warn!("nostr_discovery needs enable_nostr; ignored");
+        }
+        if self.enable_nostr && self.nostr_discovery {
+            let cap = match self.nostr_discovery_max_peers {
+                0 => default_nostr_discovery_max_peers(),
+                n => n,
+            };
+            let nostr = &mut config.node.rendezvous.nostr;
+            nostr.policy = fips::config::NostrRendezvousPolicy::Open;
+            // Both bounds: the queue can never hold more than the pool may
+            // grow by, and the pool itself is ceilinged (fips fork knob).
+            nostr.open_discovery_max_pending = cap;
+            nostr.open_discovery_max_peers = cap;
+            tracing::info!(max_peers = cap, "Nostr open peer discovery enabled");
+        }
         // Joining a FIPS Hotspot without LAN discovery would be pointless, so
         // the hotspot overlay forces mDNS on for the duration of the join
         // (the Kotlin side holds the MulticastLock accordingly).
@@ -329,8 +372,7 @@ impl ShimConfig {
             // the node's mesh ULA is an identity disclosure on the LAN, and
             // the clearnet-source IPv4 (TUN_IPV4 in FipsVpnService.kt — keep
             // in sync) is unreachable from other hosts anyway.
-            let own_addr: std::net::IpAddr = derive_identity(&self.nsec)?
-                .address
+            let own_addr: std::net::IpAddr = own_address
                 .parse()
                 .map_err(|e| format!("own address unparseable: {e}"))?;
             config.node.rendezvous.lan.exclude_addrs =
@@ -416,10 +458,63 @@ mod tests {
                 r#"{{"nsec": "{nsec}", "enable_nostr": {nostr}, "enable_fips_dns": false,
                      "peers": [{{"npub": "{peer}", "endpoint": "boot.example:2121"}}]}}"#
             );
-            let config = ShimConfig::from_json(&json).unwrap().to_fips_config().unwrap();
+            let config = ShimConfig::from_json(&json)
+                .unwrap()
+                .to_fips_config()
+                .unwrap();
             assert_eq!(config.peers.len(), 1);
             assert_eq!(config.peers[0].via_nostr, expect, "enable_nostr={nostr}");
         }
+    }
+
+    /// The discovery toggle flips fips to `policy: open` with BOTH bounds
+    /// set to the phone-sized cap; off (the default) leaves fips's
+    /// `configured_only` policy and its server-sized bounds untouched.
+    #[test]
+    fn nostr_discovery_toggle_sets_open_policy_with_a_capped_pool() {
+        use fips::config::NostrRendezvousPolicy;
+        let nsec = derive_identity("").unwrap().nsec;
+        let build = |nostr: bool, extra: &str| {
+            let json = format!(
+                r#"{{"nsec": "{nsec}", "enable_nostr": {nostr}, "enable_fips_dns": false{extra}}}"#
+            );
+            let config = ShimConfig::from_json(&json)
+                .unwrap()
+                .to_fips_config()
+                .unwrap();
+            config.node.rendezvous.nostr
+        };
+        let off = build(true, "");
+        assert_eq!(off.policy, NostrRendezvousPolicy::ConfiguredOnly);
+        assert_eq!(off.open_discovery_max_peers, 0);
+        let server_sized =
+            fips::config::NostrRendezvousConfig::default().open_discovery_max_pending;
+        assert_eq!(
+            off.open_discovery_max_pending, server_sized,
+            "fips's own queue bound kept"
+        );
+
+        let on = build(true, r#", "nostr_discovery": true"#);
+        assert_eq!(on.policy, NostrRendezvousPolicy::Open);
+        assert_eq!(on.open_discovery_max_peers, 3);
+        assert_eq!(on.open_discovery_max_pending, 3);
+
+        let five = build(
+            true,
+            r#", "nostr_discovery": true, "nostr_discovery_max_peers": 5"#,
+        );
+        assert_eq!(five.open_discovery_max_peers, 5);
+        let zero = build(
+            true,
+            r#", "nostr_discovery": true, "nostr_discovery_max_peers": 0"#,
+        );
+        assert_eq!(zero.open_discovery_max_peers, 3, "0 is not unlimited");
+
+        // Without Nostr there is nothing to discover through: inert.
+        let no_nostr = build(false, r#", "nostr_discovery": true"#);
+        assert_eq!(no_nostr.policy, NostrRendezvousPolicy::ConfiguredOnly);
+        assert_eq!(no_nostr.open_discovery_max_peers, 0);
+        assert_eq!(no_nostr.open_discovery_max_pending, server_sized);
     }
 
     #[test]

@@ -40,6 +40,15 @@ object ConfigStore {
     const val BOOTSTRAP_FALLBACKS = "bootstrap_fallbacks"
 
     /**
+     * Open peer discovery over Nostr: also dial nodes that advertise
+     * themselves, not only the configured bootstraps. The shim ceilings it at
+     * a few links (see `nostr_discovery_max_peers` there). Off by default:
+     * three bootstraps already make the mesh redundant, and every link is a
+     * standing heartbeat.
+     */
+    const val NOSTR_DISCOVERY = "nostr_discovery"
+
+    /**
      * User-edited Nostr relay list, one URL per line. ABSENT means "never
      * customised": nothing is passed to the shim and fips uses its built-in
      * relays — so an untouched install keeps following fips's defaults across
@@ -80,6 +89,15 @@ object ConfigStore {
     const val DEF_WORKER_THREADS = 1
     const val DEF_LOG_LEVEL = "info"
     const val DEF_BOOTSTRAP_FALLBACKS = true
+    const val DEF_NOSTR_DISCOVERY = false
+
+    /**
+     * Ceiling on links found by Nostr discovery, sent to the shim as
+     * `nostr_discovery_max_peers` and quoted in the Settings summary — one
+     * constant, so the promise on screen and the bound in the node cannot
+     * drift apart.
+     */
+    const val DEF_NOSTR_DISCOVERY_MAX_PEERS = 3
 
     /**
      * Settings the app no longer exposes. Nostr rendezvous and the in-app
@@ -228,6 +246,7 @@ object ConfigStore {
         if (!p.contains(BOOTSTRAP_FALLBACKS)) {
             e.putBoolean(BOOTSTRAP_FALLBACKS, DEF_BOOTSTRAP_FALLBACKS)
         }
+        if (!p.contains(NOSTR_DISCOVERY)) e.putBoolean(NOSTR_DISCOVERY, DEF_NOSTR_DISCOVERY)
         RETIRED_KEYS.filter { p.contains(it) }.forEach { e.remove(it) }
         e.apply()
     }
@@ -288,6 +307,8 @@ object ConfigStore {
             // behind CGNAT reach peers it has no route to, and the in-app
             // resolver is the only thing that answers .fips names.
             .put("enable_nostr", true)
+            .put("nostr_discovery", p.getBoolean(NOSTR_DISCOVERY, DEF_NOSTR_DISCOVERY))
+            .put("nostr_discovery_max_peers", DEF_NOSTR_DISCOVERY_MAX_PEERS)
             .put("enable_fips_dns", true)
             .put("worker_threads", p.getInt(WORKER_THREADS, DEF_WORKER_THREADS))
             .put("forward_clearnet", p.getBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET))

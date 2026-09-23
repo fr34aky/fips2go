@@ -12,7 +12,7 @@ publish = false
 #   full binary link with the NDK toolchain.
 [dependencies]
 # fips with the Android embedder hooks — fr34aky/fips @ android-hooks, pinned.
-fips = { git = "https://github.com/fr34aky/fips", rev = "657886c", default-features = false }
+fips = { git = "https://github.com/fr34aky/fips", rev = "f4a811e", default-features = false }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
