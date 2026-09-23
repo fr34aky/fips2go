@@ -50,6 +50,11 @@ usable on a device you also use for everything else.
   `!FIPS`, anywhere, to reach fips peers on it — your internet stays on your
   normal network. On dual-Wi-Fi phones it joins as a *second*, local-only
   connection without giving up the Wi-Fi you are already on.
+- **Three links into the mesh, not one.** Besides the bootstrap server you
+  picked, the node peers with two more public servers in other regions
+  (Settings → *Fallback bootstrap peers*, on by default), so one server
+  going down does not take the mesh with it. Every configured peer is also
+  re-found through its Nostr advert if it moves to a new address.
 - **LAN discovery (mDNS).** Finds fips peers on your Wi-Fi and dials them
   directly, with no relay or mesh hop. The tunnel's own addresses are kept out
   of the adverts, so the mesh ULA is never broadcast on the LAN. It also works

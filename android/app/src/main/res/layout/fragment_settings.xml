@@ -88,6 +88,15 @@
                             app:simpleItems="@array/peer_transports" />
                     </com.google.android.material.textfield.TextInputLayout>
                 </LinearLayout>
+
+                <View style="@style/Widget.Fips.Divider" />
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/bootstrap_fallbacks"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="Fallback bootstrap peers" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Also peer with two other public servers, so the mesh stays reachable when your bootstrap server is down. Each extra link costs a short heartbeat every 20 seconds." />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

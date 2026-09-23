@@ -31,6 +31,15 @@ object ConfigStore {
     const val LOG_LEVEL = "log_level"
 
     /**
+     * Also peer with two more public bootstrap servers ([FALLBACK_BOOTSTRAPS])
+     * besides the configured one. With a single peer the phone has exactly
+     * one link into the mesh — everything else is routed through it — so
+     * that server going down means no mesh until it is back. Two more links
+     * cost a heartbeat every 20 s each.
+     */
+    const val BOOTSTRAP_FALLBACKS = "bootstrap_fallbacks"
+
+    /**
      * User-edited Nostr relay list, one URL per line. ABSENT means "never
      * customised": nothing is passed to the shim and fips uses its built-in
      * relays — so an untouched install keeps following fips's defaults across
@@ -70,6 +79,7 @@ object ConfigStore {
     const val DEF_FORWARD_CLEARNET = true
     const val DEF_WORKER_THREADS = 1
     const val DEF_LOG_LEVEL = "info"
+    const val DEF_BOOTSTRAP_FALLBACKS = true
 
     /**
      * Settings the app no longer exposes. Nostr rendezvous and the in-app
@@ -114,6 +124,26 @@ object ConfigStore {
 
     /** Dropdown entry for a manually configured peer. */
     const val BOOTSTRAP_CUSTOM = "custom"
+
+    /**
+     * Candidates for the extra links when [BOOTSTRAP_FALLBACKS] is on, in
+     * order; the first [FALLBACK_COUNT] whose npub differs from the configured
+     * peer are used. Spread across regions on purpose, so the default
+     * (`test-de01`) plus these do not share one hosting failure.
+     */
+    val FALLBACK_BOOTSTRAPS = listOf("test-uk01", "test-us01", "test-es01", "test-de01")
+    const val FALLBACK_COUNT = 2
+
+    /** The extra bootstrap peers the next node start will dial, if any. */
+    fun fallbackPeers(context: Context): List<BootstrapPeer> {
+        val p = prefs(context)
+        if (!p.getBoolean(BOOTSTRAP_FALLBACKS, DEF_BOOTSTRAP_FALLBACKS)) return emptyList()
+        val primary = p.getString(PEER_NPUB, "")?.trim() ?: ""
+        return FALLBACK_BOOTSTRAPS
+            .mapNotNull { name -> BOOTSTRAP_PEERS.firstOrNull { it.name == name } }
+            .filter { it.npub != primary }
+            .take(FALLBACK_COUNT)
+    }
 
     /**
      * What an uncustomised node uses — a DISPLAY mirror of fips's built-in
@@ -195,6 +225,9 @@ object ConfigStore {
         if (!p.contains(FORWARD_CLEARNET)) e.putBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET)
         if (!p.contains(WORKER_THREADS)) e.putInt(WORKER_THREADS, DEF_WORKER_THREADS)
         if (!p.contains(LOG_LEVEL)) e.putString(LOG_LEVEL, DEF_LOG_LEVEL)
+        if (!p.contains(BOOTSTRAP_FALLBACKS)) {
+            e.putBoolean(BOOTSTRAP_FALLBACKS, DEF_BOOTSTRAP_FALLBACKS)
+        }
         RETIRED_KEYS.filter { p.contains(it) }.forEach { e.remove(it) }
         e.apply()
     }
@@ -234,6 +267,17 @@ object ConfigStore {
                     .put("npub", npub)
                     .put("endpoint", endpoint)
                     .put("transport", p.getString(PEER_TRANSPORT, DEF_PEER_TRANSPORT))
+            )
+        }
+        // Extra links so one bootstrap outage does not empty the mesh; the
+        // public servers all speak UDP on the default port. Every peer is
+        // also marked via_nostr by the shim, so one that moves is re-found.
+        for (fallback in fallbackPeers(context)) {
+            peers.put(
+                JSONObject()
+                    .put("npub", fallback.npub)
+                    .put("endpoint", fallback.endpoint)
+                    .put("transport", DEF_PEER_TRANSPORT)
             )
         }
 
