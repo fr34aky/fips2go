@@ -277,6 +277,12 @@ impl ShimConfig {
                      UDP instance in the YAML instead"
                 );
             }
+            if self.nostr_discovery {
+                tracing::warn!(
+                    "nostr_discovery is ignored in fips_yaml mode — set \
+                     node.rendezvous.nostr.policy: open in the YAML instead"
+                );
+            }
             config
                 .validate()
                 .map_err(|e| format!("config validate: {e}"))?;
@@ -284,6 +290,7 @@ impl ShimConfig {
         }
 
         let mut config = fips::Config::new();
+        let own_address = identity.address;
         config.node.identity.nsec = Some(identity.nsec);
         let udp_bind = self
             .udp_bind
@@ -339,6 +346,9 @@ impl ShimConfig {
         config.dns.enabled = self.enable_fips_dns; // in-process responder, [::1]:5354
         config.node.control.enabled = false;
         config.node.rendezvous.nostr.enabled = self.enable_nostr;
+        if self.nostr_discovery && !self.enable_nostr {
+            tracing::warn!("nostr_discovery needs enable_nostr; ignored");
+        }
         if self.enable_nostr && self.nostr_discovery {
             let cap = match self.nostr_discovery_max_peers {
                 0 => default_nostr_discovery_max_peers(),
@@ -362,8 +372,7 @@ impl ShimConfig {
             // the node's mesh ULA is an identity disclosure on the LAN, and
             // the clearnet-source IPv4 (TUN_IPV4 in FipsVpnService.kt — keep
             // in sync) is unreachable from other hosts anyway.
-            let own_addr: std::net::IpAddr = derive_identity(&self.nsec)?
-                .address
+            let own_addr: std::net::IpAddr = own_address
                 .parse()
                 .map_err(|e| format!("own address unparseable: {e}"))?;
             config.node.rendezvous.lan.exclude_addrs =
@@ -478,6 +487,12 @@ mod tests {
         let off = build(true, "");
         assert_eq!(off.policy, NostrRendezvousPolicy::ConfiguredOnly);
         assert_eq!(off.open_discovery_max_peers, 0);
+        let server_sized =
+            fips::config::NostrRendezvousConfig::default().open_discovery_max_pending;
+        assert_eq!(
+            off.open_discovery_max_pending, server_sized,
+            "fips's own queue bound kept"
+        );
 
         let on = build(true, r#", "nostr_discovery": true"#);
         assert_eq!(on.policy, NostrRendezvousPolicy::Open);
@@ -498,6 +513,8 @@ mod tests {
         // Without Nostr there is nothing to discover through: inert.
         let no_nostr = build(false, r#", "nostr_discovery": true"#);
         assert_eq!(no_nostr.policy, NostrRendezvousPolicy::ConfiguredOnly);
+        assert_eq!(no_nostr.open_discovery_max_peers, 0);
+        assert_eq!(no_nostr.open_discovery_max_pending, server_sized);
     }
 
     #[test]

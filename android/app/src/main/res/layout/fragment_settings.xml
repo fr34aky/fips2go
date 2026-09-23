@@ -96,7 +96,7 @@
                     android:text="Fallback bootstrap peers" />
                 <TextView
                     style="@style/Widget.Fips.Summary"
-                    android:text="Also peer with two other public servers, so the mesh stays reachable when your bootstrap server is down. Each extra link costs a short heartbeat every 20 seconds." />
+                    android:text="Also peer with two other public servers, so the mesh stays reachable when your bootstrap server is down. Each extra link costs a short heartbeat every 20 seconds (10 with Battery saver off)." />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -136,9 +136,11 @@
                     android:id="@+id/nostr_discovery"
                     style="@style/Widget.Fips.SettingSwitch"
                     android:text="Discover peers via Nostr" />
+                <!-- Text set in code: the link cap comes from
+                     ConfigStore.DEF_NOSTR_DISCOVERY_MAX_PEERS. -->
                 <TextView
-                    style="@style/Widget.Fips.Summary"
-                    android:text="Also link to a few nodes that announce themselves on the Nostr relays, not only the bootstrap servers — the mesh then stays reachable even with every bootstrap server down. Capped at three extra links; each is a short heartbeat every 20 seconds." />
+                    android:id="@+id/nostr_discovery_summary"
+                    style="@style/Widget.Fips.Summary" />
                 <View style="@style/Widget.Fips.Divider" />
                 <com.google.android.material.materialswitch.MaterialSwitch
                     android:id="@+id/hotspot"

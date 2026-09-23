@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.TextView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import androidx.activity.OnBackPressedCallback
@@ -279,6 +280,13 @@ class SettingsFragment : Fragment() {
 
     private fun load(view: View) {
         val p = CS.prefs(requireContext())
+        view.findViewById<TextView>(R.id.nostr_discovery_summary).text =
+            "Also try to link to nodes that announce themselves on the Nostr relays, not " +
+                "only the bootstrap servers, so the mesh can stay reachable with every " +
+                "bootstrap server down. At most ${CS.DEF_NOSTR_DISCOVERY_MAX_PEERS} such " +
+                "links, each a short heartbeat every 20 seconds (10 with Battery saver " +
+                "off) — and often fewer: many announcements are from nodes that no longer " +
+                "answer."
         edit(view, R.id.peer_npub).setText(p.getString(CS.PEER_NPUB, ""))
         edit(view, R.id.peer_endpoint).setText(p.getString(CS.PEER_ENDPOINT, ""))
         drop(view, R.id.peer_transport)

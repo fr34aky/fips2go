@@ -92,6 +92,14 @@ object ConfigStore {
     const val DEF_NOSTR_DISCOVERY = false
 
     /**
+     * Ceiling on links found by Nostr discovery, sent to the shim as
+     * `nostr_discovery_max_peers` and quoted in the Settings summary — one
+     * constant, so the promise on screen and the bound in the node cannot
+     * drift apart.
+     */
+    const val DEF_NOSTR_DISCOVERY_MAX_PEERS = 3
+
+    /**
      * Settings the app no longer exposes. Nostr rendezvous and the in-app
      * `.fips` resolver are now always on, transports/DNS/relays/STUN use the
      * fips built-in defaults, and the raw-YAML escape hatch is gone. They are
@@ -300,6 +308,7 @@ object ConfigStore {
             // resolver is the only thing that answers .fips names.
             .put("enable_nostr", true)
             .put("nostr_discovery", p.getBoolean(NOSTR_DISCOVERY, DEF_NOSTR_DISCOVERY))
+            .put("nostr_discovery_max_peers", DEF_NOSTR_DISCOVERY_MAX_PEERS)
             .put("enable_fips_dns", true)
             .put("worker_threads", p.getInt(WORKER_THREADS, DEF_WORKER_THREADS))
             .put("forward_clearnet", p.getBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET))
