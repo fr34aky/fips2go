@@ -55,6 +55,10 @@ usable on a device you also use for everything else.
   (Settings → *Fallback bootstrap peers*, on by default), so one server
   going down does not take the mesh with it. Every configured peer is also
   re-found through its Nostr advert if it moves to a new address.
+- **Peer discovery via Nostr** (Settings, off by default). The node also links
+  to a few nodes that announce themselves on the relays — capped at three, so
+  the mesh survives every bootstrap server being down without the phone
+  collecting links the way a server would.
 - **LAN discovery (mDNS).** Finds fips peers on your Wi-Fi and dials them
   directly, with no relay or mesh hop. The tunnel's own addresses are kept out
   of the adverts, so the mesh ULA is never broadcast on the LAN. It also works

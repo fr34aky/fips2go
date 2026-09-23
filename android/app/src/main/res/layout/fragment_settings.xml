@@ -133,6 +133,14 @@
                     android:text="Finds nearby fips peers on your Wi-Fi for instant local connections. While on, your Wi-Fi chip stops filtering broadcast chatter from other devices (TVs, speakers, printers), and each message briefly wakes the phone — on a busy home network this costs noticeably more battery. No effect when off or on mobile data." />
                 <View style="@style/Widget.Fips.Divider" />
                 <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/nostr_discovery"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="Discover peers via Nostr" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Also link to a few nodes that announce themselves on the Nostr relays, not only the bootstrap servers — the mesh then stays reachable even with every bootstrap server down. Capped at three extra links; each is a short heartbeat every 20 seconds." />
+                <View style="@style/Widget.Fips.Divider" />
+                <com.google.android.material.materialswitch.MaterialSwitch
                     android:id="@+id/hotspot"
                     style="@style/Widget.Fips.SettingSwitch"
                     android:text="FIPS Hotspot (!FIPS)" />
