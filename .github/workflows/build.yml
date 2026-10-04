@@ -142,7 +142,7 @@ jobs:
           echo "armeabi-v7a LOAD alignment: $got"
           [ "$got" = "0x1000" ] || { echo "::error::armeabi-v7a must stay 4 KB aligned"; exit 1; }
 
-      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0, 2026-08-02
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.3.0, 2026-08-02
         with:
           gradle-version: '8.7'
 
