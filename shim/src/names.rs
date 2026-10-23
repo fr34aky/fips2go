@@ -208,17 +208,48 @@ impl Names {
                 Arc::new(PhoneMesh { link }),
             )
         });
-        Ok(Arc::new(Self {
+        let names = Arc::new(Self {
             rt: Some(rt),
             resolver: Arc::new(resolver),
             _relays: proxies,
-        }))
+        });
+        names.warm_soon();
+        Ok(names)
     }
 
     /// The network moved: what was "unreachable" may answer now, and vice
     /// versa. Pins are untouched.
     pub fn network_changed(&self) {
         self.resolver.flush_caches();
+    }
+
+    /// Start the mesh path to the pinned servers (`Resolver::warm`) soon
+    /// after the resolver starts — a connect or a node restart — so the
+    /// first lookup finds it up: on a Pixel 9 Pro, discovery of a server
+    /// three hops away took 14 s after a connect, past the lookup budget,
+    /// and the app got the public address. Twice, at `WARM_AT`: a
+    /// discovery started before the first peers' filters arrive fails on
+    /// the spot ("no tree peers with bloom match", a second after a start),
+    /// and on a slow link the first may come too early.
+    ///
+    /// Not on a network change: the node, its links and its sessions
+    /// survive one (netmon re-pins them, a new tunnel swaps the pump's fd),
+    /// so the path is already up, and a hand-over's burst of hints would
+    /// each send a round of echoes to every pinned server over a waking
+    /// radio.
+    fn warm_soon(&self) {
+        let Some(rt) = self.rt.as_ref() else {
+            return;
+        };
+        let resolver = self.resolver.clone();
+        rt.spawn(async move {
+            let mut waited = Duration::ZERO;
+            for at in WARM_AT {
+                tokio::time::sleep(at - waited).await;
+                waited = at;
+                resolver.warm().await;
+            }
+        });
     }
 
     /// What the VpnService knows and the resolver cannot: whether a
@@ -252,6 +283,10 @@ impl Names {
         self.resolver.flush_caches();
     }
 }
+
+/// When after the names resolver starts the pinned servers are warmed
+/// ([`Names::warm_soon`]).
+const WARM_AT: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
 
 /// The library's TXT wait while a validated Internet network exists.
 const TXT_TIMEOUT_ONLINE: Duration = Duration::from_millis(1500);
