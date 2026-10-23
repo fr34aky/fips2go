@@ -24,7 +24,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fips::upper::hosts::{HostMap, HostMapReloader};
+use fips::hosts::{HostMap, HostMapReloader};
 
 use crate::packet;
 
@@ -544,9 +544,12 @@ mod tests {
         std::thread::spawn(move || {
             let mut buf = [0u8; 512];
             while let Ok((n, from)) = socket.recv_from(&mut buf) {
-                if let Some((reply, _)) =
-                    fips::upper::dns::handle_dns_packet(&buf[..n], 300, &HostMap::new())
-                {
+                if let Some((reply, _)) = fips::ipv6tun::dns::handle_dns_packet(
+                    &buf[..n],
+                    from.port(),
+                    300,
+                    &HostMap::new(),
+                ) {
                     let _ = socket.send_to(&reply, from);
                 }
             }

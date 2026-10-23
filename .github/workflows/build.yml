@@ -39,7 +39,7 @@ jobs:
           # A bumped Cargo.toml with a stale Cargo.lock builds the OLD fips.
           for lock in shim/Cargo.lock smoke/Cargo.lock; do
             if ! grep -q "rev=$shim#" "$lock"; then
-              echo "::error::$lock does not reference rev $shim — run cargo update -p fips"
+              echo "::error::$lock does not reference rev $shim — run cargo update -p fips-mesh"
               exit 1
             fi
             echo "$lock OK"
