@@ -16,9 +16,9 @@ hooks under the same license).
 
 ## fips-pub-domains
 
-[fips-pub-domains](https://github.com/fr34aky/fips-pub-domains) v0.2.8
-(`pubdom-core`, `pubdom-resolve`; git dependency at rev e41d24e, the
-commit tagged v0.2.8) — MIT License, Copyright (c) fr34aky. Public
+[fips-pub-domains](https://github.com/fr34aky/fips-pub-domains) v0.2.9
+(`pubdom-core`, `pubdom-resolve`; git dependency at rev 6438289, the
+commit tagged v0.2.9) — MIT License, Copyright (c) fr34aky. Public
 domain names over fips: the verification policy and the resolver this
 app's DNS proxy runs.
 
