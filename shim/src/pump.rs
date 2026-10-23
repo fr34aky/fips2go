@@ -303,13 +303,10 @@ fn spawn_io(
                 let live = writer_live;
                 while running.load(Ordering::Relaxed) && live.load(Ordering::Relaxed) {
                     match writer_rx.recv() {
-                        Ok(pkt) if pkt.is_empty() => {
-                            // A stop sentinel: ours, or one a previous
-                            // generation left behind, which is not.
-                            if !live.load(Ordering::Relaxed) || !running.load(Ordering::Relaxed) {
-                                break;
-                            }
-                        }
+                        // A stop sentinel: ours (the loop head then sees the
+                        // flags cleared), or one a previous generation left
+                        // behind, which is not.
+                        Ok(pkt) if pkt.is_empty() => continue,
                         Ok(pkt) => {
                             let n = unsafe {
                                 libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len())
@@ -332,8 +329,10 @@ fn spawn_io(
             Err(e) => {
                 // The reader is already up: retire it, or it would read a
                 // fd nothing writes.
+                // Joined before the caller may close the fd under it.
                 live.store(false, Ordering::Relaxed);
                 wake(&wake_fd);
+                let _ = reader.join();
                 return Err(e);
             }
         }

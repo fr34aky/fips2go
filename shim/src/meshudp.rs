@@ -18,7 +18,9 @@ use fips::{TunPacketAction, TunPacketProcessor};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::socket::{icmp, udp};
-use smoltcp::wire::{HardwareAddress, Icmpv6Message, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint};
+use smoltcp::wire::{
+    HardwareAddress, Icmpv6Message, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint,
+};
 
 use crate::meshhttp::{Device, FetchError, MeshLink, is_icmp_unreachable, random_u64};
 
@@ -130,7 +132,9 @@ fn exchange<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
         }
         let socket = sockets.get_mut::<udp::Socket>(handle);
         while socket.can_recv() {
-            let Ok((n, meta)) = socket.recv_slice(&mut buf) else { break };
+            let Ok((n, meta)) = socket.recv_slice(&mut buf) else {
+                break;
+            };
             // Only the server we asked; anything else on this port is noise.
             if meta.endpoint == endpoint {
                 return Ok(buf[..n].to_vec());
@@ -201,7 +205,15 @@ pub fn ping(link: &MeshLink, addr: Ipv6Addr, timeout: Duration) -> Result<bool, 
             TunPacketAction::Drop => Ok(()),
         }
     };
-    echo(egress, &flow.rx, link.our_addr, addr, ident, Instant::now() + timeout, &link.running)
+    echo(
+        egress,
+        &flow.rx,
+        link.our_addr,
+        addr,
+        ident,
+        Instant::now() + timeout,
+        &link.running,
+    )
 }
 
 fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
@@ -244,7 +256,12 @@ fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
         };
         let mut buf = vec![0u8; repr.buffer_len()];
         // The socket recomputes the checksum on dispatch.
-        repr.emit(&local, &remote, &mut Icmpv6Packet::new_unchecked(&mut buf), &ChecksumCapabilities::ignored());
+        repr.emit(
+            &local,
+            &remote,
+            &mut Icmpv6Packet::new_unchecked(&mut buf),
+            &ChecksumCapabilities::ignored(),
+        );
         sockets
             .get_mut::<icmp::Socket>(handle)
             .send_slice(&buf, IpAddress::Ipv6(remote))
@@ -263,7 +280,9 @@ fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
         }
         let socket = sockets.get_mut::<icmp::Socket>(handle);
         while socket.can_recv() {
-            let Ok((n, from)) = socket.recv_slice(&mut buf) else { break };
+            let Ok((n, from)) = socket.recv_slice(&mut buf) else {
+                break;
+            };
             if from == IpAddress::Ipv6(remote)
                 && let Ok(p) = Icmpv6Packet::new_checked(&buf[..n])
                 && p.msg_type() == Icmpv6Message::EchoReply
@@ -363,7 +382,9 @@ mod tests {
             got
         });
 
-        let query = vec![0xbe, 0xef, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'w', b'w', b'w', 0, 0, 28, 0, 1];
+        let query = vec![
+            0xbe, 0xef, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'w', b'w', b'w', 0, 0, 28, 0, 1,
+        ];
         let reply = exchange(
             move |p| {
                 let _ = to_server.send(p);
@@ -408,7 +429,8 @@ mod tests {
                 let _ = a.push(IpCidr::new(IpAddress::Ipv6(server_addr), 8));
             });
             let mut sockets = SocketSet::new(Vec::new());
-            while !stop_server.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(10) {
+            while !stop_server.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(10)
+            {
                 while let Ok(p) = server_rx.try_recv() {
                     device.rx.push_back(p);
                 }

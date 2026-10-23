@@ -657,7 +657,10 @@ mod tests {
         assert!(divert.claim(reply.clone()).is_none());
         assert!(echo_flow.rx.try_recv().is_ok());
         reply[44..46].copy_from_slice(&[0, 1]);
-        assert!(divert.claim(reply).is_some(), "another identifier passes through");
+        assert!(
+            divert.claim(reply).is_some(),
+            "another identifier passes through"
+        );
         drop(echo_flow);
 
         // An ICMPv6 unreachable quoting our SYN reaches the flow too.

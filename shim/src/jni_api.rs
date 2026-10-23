@@ -123,13 +123,12 @@ pub extern "system" fn Java_org_fips_android_FipsNative_isRunning(
     crate::engine::is_running() as jboolean
 }
 
-/// `onNetworkChanged(tunFd, configJson)` — rebuild the node on the given TUN
-/// fd after the underlying network switched (Wi-Fi ↔ cellular) or the FIPS
-/// Hotspot came/went. `tunFd` is usually the fd from `start`, but may be a
-/// replacement when the tunnel was re-established with different routes.
-/// `configJson` is the freshly regenerated shim config for the rebuilt node
-/// (empty/null keeps the previous one). Blocking; call off the main thread.
-/// No-op when not running.
+/// `onNetworkChanged(tunFd, configJson)` — follow a rebind: a tunnel
+/// re-established with different routes or allowed apps (same config: the
+/// pump moves onto `tunFd`, the node keeps running) or a FIPS Hotspot that
+/// came or went (changed config: the node restarts on `tunFd`). `configJson`
+/// is the freshly regenerated shim config (empty/null keeps the previous
+/// one). Blocking; call off the main thread. No-op when not running.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_onNetworkChanged(
     mut env: JNIEnv,

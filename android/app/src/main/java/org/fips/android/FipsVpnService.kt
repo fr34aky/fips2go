@@ -1039,11 +1039,12 @@ class FipsVpnService : VpnService() {
     }
 
     /**
-     * Request a node restart: needed when the tunnel must be re-established
-     * on a new fd (the `::/0` route decision flipped) or the transport set
-     * changed (FIPS Hotspot joined/left) — never for a plain underlying-
-     * network switch, which the node absorbs on its own (see
-     * onUnderlyingNetwork). A restart takes seconds while a hand-over emits
+     * Request a rebind: needed when the tunnel must be re-established on a
+     * new fd (the `::/0` route decision flipped; the node keeps running and
+     * the shim moves its pump onto the new tunnel) or the transport set
+     * changed (FIPS Hotspot joined/left; the node restarts) — never for a
+     * plain underlying-network switch, which the node absorbs on its own
+     * (see onUnderlyingNetwork). A rebind takes seconds while a hand-over emits
      * callbacks for many more, so requests are queued on [rebindRequested]
      * and served by a single worker that re-checks after every pass — the
      * last callback in a burst always results in a rebind against final

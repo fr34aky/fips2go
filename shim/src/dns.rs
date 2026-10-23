@@ -156,12 +156,18 @@ impl DnsProxy {
                 // over fips must not fail for a slow lookup.
                 pubdom_core::synth::clamp_ttls(&legacy, cap).unwrap_or(legacy)
             };
-            let forward = |prefetched: Option<std::sync::mpsc::Receiver<Option<Vec<u8>>>>| match prefetched {
-                // A dead fetching thread must not cost the answer.
-                Some(rx) => rx.recv().unwrap_or_else(|_| self.forward_upstreams(query.payload)),
-                None => self.forward_upstreams(query.payload),
-            };
-            let outcome = self.names.as_ref().map(|n| n.lookup(query.payload, &start_prefetch));
+            let forward =
+                |prefetched: Option<std::sync::mpsc::Receiver<Option<Vec<u8>>>>| match prefetched {
+                    // A dead fetching thread must not cost the answer.
+                    Some(rx) => rx
+                        .recv()
+                        .unwrap_or_else(|_| self.forward_upstreams(query.payload)),
+                    None => self.forward_upstreams(query.payload),
+                };
+            let outcome = self
+                .names
+                .as_ref()
+                .map(|n| n.lookup(query.payload, &start_prefetch));
             let prefetched = slot.into_inner();
             match outcome {
                 Some(Outcome::Answer(a)) => {
@@ -201,7 +207,9 @@ impl DnsProxy {
                                             continue;
                                         }
                                         // The fetching thread died: ask here.
-                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => self.forward_upstreams(query.payload),
+                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                            self.forward_upstreams(query.payload)
+                                        }
                                     },
                                     None => self.forward_upstreams(query.payload),
                                 });
@@ -226,7 +234,9 @@ impl DnsProxy {
                         }
                         None => {
                             tracing::debug!(qname = %qname, "public name released on an upstream's denial; legacy answer for a few seconds");
-                            legacy.flatten().map(|l| clamp_to(l, pubdom_core::OVERRUN_TTL_SECS))
+                            legacy
+                                .flatten()
+                                .map(|l| clamp_to(l, pubdom_core::OVERRUN_TTL_SECS))
                         }
                     }
                 }
@@ -640,7 +650,11 @@ mod tests {
                 if q.name != "www.example.org" {
                     return Outcome::Legacy;
                 }
-                match pubdom_core::synth::build_answer(&q, pubdom_core::Npub::from_bytes([7; 32]), 30) {
+                match pubdom_core::synth::build_answer(
+                    &q,
+                    pubdom_core::Npub::from_bytes([7; 32]),
+                    30,
+                ) {
                     Some(a) => Outcome::Answer(a),
                     None => Outcome::Legacy,
                 }
@@ -667,13 +681,30 @@ mod tests {
             hosts: None,
             names: Some(Arc::new(Bound)),
         });
-        let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", TYPE_AAAA));
-        assert_eq!(reply[3] & 0x0f, 0, "answered over fips, not by the upstream");
+        let reply = ask(
+            &proxy,
+            &replies,
+            &typed_query_for("www.example.org", TYPE_AAAA),
+        );
+        assert_eq!(
+            reply[3] & 0x0f,
+            0,
+            "answered over fips, not by the upstream"
+        );
         assert_eq!(reply[6..8], [0, 2], "CNAME + AAAA");
         let fd: [u8; 16] = reply[reply.len() - 16..].try_into().unwrap();
-        assert_eq!(fd, pubdom_core::Npub::from_bytes([7; 32]).fips_address().octets());
+        assert_eq!(
+            fd,
+            pubdom_core::Npub::from_bytes([7; 32])
+                .fips_address()
+                .octets()
+        );
 
-        let reply = ask(&proxy, &replies, &typed_query_for("www.example.net", TYPE_AAAA));
+        let reply = ask(
+            &proxy,
+            &replies,
+            &typed_query_for("www.example.net", TYPE_AAAA),
+        );
         assert_eq!(reply[3] & 0x0f, 3, "not over fips: the upstream's answer");
     }
 
@@ -718,9 +749,17 @@ mod tests {
         assert_eq!(reply[3] & 0x0f, 0);
         assert_eq!(reply[6..8], [0, 1], "the upstream's one A record");
         let n = reply.len();
-        assert_eq!(&reply[n - 4..], &[217, 26, 48, 101], "the upstream's address");
+        assert_eq!(
+            &reply[n - 4..],
+            &[217, 26, 48, 101],
+            "the upstream's address"
+        );
         let ttl = u32::from_be_bytes(reply[n - 10..n - 6].try_into().unwrap());
-        assert_eq!(ttl, pubdom_core::OVERRUN_TTL_SECS, "TTL capped while the lookup is pending");
+        assert_eq!(
+            ttl,
+            pubdom_core::OVERRUN_TTL_SECS,
+            "TTL capped while the lookup is pending"
+        );
     }
 
     /// An upstream answering every question with one A record, TTL 300,
@@ -773,7 +812,14 @@ mod tests {
                     Some(if let Some(cap) = capped {
                         Decided::Capped(cap)
                     } else if over_fips {
-                        Decided::Answer(pubdom_core::synth::build_answer(&q, pubdom_core::Npub::from_bytes([7; 32]), 30).unwrap())
+                        Decided::Answer(
+                            pubdom_core::synth::build_answer(
+                                &q,
+                                pubdom_core::Npub::from_bytes([7; 32]),
+                                30,
+                            )
+                            .unwrap(),
+                        )
                     } else {
                         Decided::Legacy
                     })
@@ -792,39 +838,86 @@ mod tests {
             });
             (proxy, replies)
         };
-        let ttl = |reply: &[u8]| u32::from_be_bytes(reply[reply.len() - 10..reply.len() - 6].try_into().unwrap());
+        let ttl = |reply: &[u8]| {
+            u32::from_be_bytes(reply[reply.len() - 10..reply.len() - 6].try_into().unwrap())
+        };
         let query = typed_query_for("www.example.org", 1);
 
         // Never decided: the upstream's answer, TTL capped.
-        let (proxy, replies) = proxy_for(slow_upstream(Duration::ZERO), Released { after: usize::MAX, over_fips: false, capped: None });
+        let (proxy, replies) = proxy_for(
+            slow_upstream(Duration::ZERO),
+            Released {
+                after: usize::MAX,
+                over_fips: false,
+                capped: None,
+            },
+        );
         let reply = ask(&proxy, &replies, &query);
         assert_eq!(&reply[reply.len() - 4..], &[217, 26, 48, 101]);
         assert_eq!(ttl(&reply), pubdom_core::OVERRUN_TTL_SECS);
 
         // Decided "not over fips" at once (a cached decision): as the
         // upstream sent it.
-        let (proxy, replies) = proxy_for(slow_upstream(Duration::from_millis(50)), Released { after: 0, over_fips: false, capped: None });
+        let (proxy, replies) = proxy_for(
+            slow_upstream(Duration::from_millis(50)),
+            Released {
+                after: 0,
+                over_fips: false,
+                capped: None,
+            },
+        );
         let reply = ask(&proxy, &replies, &query);
         assert_eq!(ttl(&reply), 300);
 
         // Decided "over fips" while the upstream is still thinking: the
         // fips answer, long before the upstream's.
-        let (proxy, replies) = proxy_for(slow_upstream(Duration::from_secs(2)), Released { after: 2, over_fips: true, capped: None });
+        let (proxy, replies) = proxy_for(
+            slow_upstream(Duration::from_secs(2)),
+            Released {
+                after: 2,
+                over_fips: true,
+                capped: None,
+            },
+        );
         let started = std::time::Instant::now();
         let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", 28));
-        assert!(started.elapsed() < Duration::from_secs(1), "waited for the upstream");
-        assert_eq!(reply[6..8], [0, 2], "our CNAME and AAAA, not the upstream's one A");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited for the upstream"
+        );
+        assert_eq!(
+            reply[6..8],
+            [0, 2],
+            "our CNAME and AAAA, not the upstream's one A"
+        );
 
         // No upstream answers at all: the decision is waited for, and an
         // answer over fips still arrives instead of SERVFAIL.
-        let dead = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let (proxy, replies) = proxy_for(dead, Released { after: 40, over_fips: true, capped: None });
+        let dead = UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let (proxy, replies) = proxy_for(
+            dead,
+            Released {
+                after: 40,
+                over_fips: true,
+                capped: None,
+            },
+        );
         let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", 28));
         assert_eq!(reply[6..8], [0, 2]);
 
         // Decided "unavailable" after the release: the legacy answer, TTL
         // capped at the time to the retry.
-        let (proxy, replies) = proxy_for(slow_upstream(Duration::ZERO), Released { after: 0, over_fips: false, capped: Some(60) });
+        let (proxy, replies) = proxy_for(
+            slow_upstream(Duration::ZERO),
+            Released {
+                after: 0,
+                over_fips: false,
+                capped: Some(60),
+            },
+        );
         let reply = ask(&proxy, &replies, &query);
         assert_eq!(ttl(&reply), 60);
     }
@@ -851,8 +944,15 @@ mod tests {
         });
         let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", 1));
         let n = reply.len();
-        assert_eq!(&reply[n - 4..], &[217, 26, 48, 101], "the upstream's address");
-        assert_eq!(u32::from_be_bytes(reply[n - 10..n - 6].try_into().unwrap()), 20);
+        assert_eq!(
+            &reply[n - 4..],
+            &[217, 26, 48, 101],
+            "the upstream's address"
+        );
+        assert_eq!(
+            u32::from_be_bytes(reply[n - 10..n - 6].try_into().unwrap()),
+            20
+        );
     }
 
     /// The legacy fetch is started by the lookup, or not at all: a lookup
@@ -905,9 +1005,16 @@ mod tests {
             let before = asked.load(Ordering::SeqCst);
             let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", 1));
             let n = reply.len();
-            assert_eq!(u32::from_be_bytes(reply[n - 10..n - 6].try_into().unwrap()), expect_ttl);
+            assert_eq!(
+                u32::from_be_bytes(reply[n - 10..n - 6].try_into().unwrap()),
+                expect_ttl
+            );
             std::thread::sleep(Duration::from_millis(100));
-            assert_eq!(asked.load(Ordering::SeqCst) - before, 1, "one upstream query, asks={asks}");
+            assert_eq!(
+                asked.load(Ordering::SeqCst) - before,
+                1,
+                "one upstream query, asks={asks}"
+            );
         }
     }
 

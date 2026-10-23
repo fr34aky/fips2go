@@ -90,7 +90,11 @@ fn parse(packet: &[u8]) -> Option<Parsed> {
 }
 
 fn idle_limit(proto: u8) -> Duration {
-    if proto == PROTO_TCP { TCP_IDLE } else { UDP_IDLE }
+    if proto == PROTO_TCP {
+        TCP_IDLE
+    } else {
+        UDP_IDLE
+    }
 }
 
 /// See the module docs. One instance per engine start, shared by the pump's

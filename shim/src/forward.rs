@@ -255,26 +255,35 @@ async fn forward_tcp(
     protect_fd(&socket, &protect);
     let mut server = match tokio::time::timeout(TCP_CONNECT_TIMEOUT, socket.connect(dst)).await {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timeout")),
+        Ok(Err(e)) => return Err(close_app_side(client, e).await),
+        Err(_) => {
+            let e = io::Error::new(io::ErrorKind::TimedOut, "connect timeout");
+            return Err(close_app_side(client, e).await);
+        }
     };
     match tokio::io::copy_bidirectional(&mut client, &mut server).await {
         Ok(_) => Ok(()),
-        Err(e) => {
-            // The server side failed — on a phone most often because the
-            // network it was dialed on went away (Android aborts a protected
-            // socket when its network is lost). Dropping the app-side stream
-            // alone tells the app nothing: ipstack forgets the session and
-            // answers only the app's next segment, and an app that has sent
-            // its request and is waiting for the answer sends none, so it
-            // waited out its own timeout — DuckDuckGo a full minute after a
-            // Wi-Fi to LTE switch, holding the page reload behind it. A FIN
-            // ends the connection on the app's side now, and it reconnects.
-            use tokio::io::AsyncWriteExt;
-            let _ = tokio::time::timeout(APP_CLOSE_TIMEOUT, client.shutdown()).await;
-            Err(e)
-        }
+        Err(e) => Err(close_app_side(client, e).await),
     }
+}
+
+/// The server side of a forwarded connection failed — on a phone most often
+/// because the network it was dialed on went away (Android aborts a protected
+/// socket when its network is lost), or, for a new connection, because the
+/// dial itself failed. ipstack has already accepted the app's connection.
+/// Dropping the app-side stream alone tells the app nothing: ipstack forgets
+/// the session and answers only the app's next segment, and an app that has
+/// sent its request and waits for the answer sends none, so it waited out its
+/// own timeout — DuckDuckGo a full minute after a Wi-Fi to LTE switch,
+/// holding a page reload behind it. A FIN ends the connection on the app's
+/// side now and it reconnects. ipstack offers no reset, which would say
+/// "aborted" rather than "closed"; and it sends the FIN only from an open,
+/// idle connection, otherwise the timeout passes and the old silent drop
+/// remains.
+async fn close_app_side(mut client: ipstack::IpStackTcpStream, error: io::Error) -> io::Error {
+    use tokio::io::AsyncWriteExt;
+    let _ = tokio::time::timeout(APP_CLOSE_TIMEOUT, client.shutdown()).await;
+    error
 }
 
 async fn forward_udp(
@@ -325,8 +334,7 @@ mod tests {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let (to_tun, _to_tun_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let running = Arc::new(AtomicBool::new(true));
-        let forwarder =
-            Forwarder::spawn(inbound_rx, to_tun, None, running.clone(), 1280).unwrap();
+        let forwarder = Forwarder::spawn(inbound_rx, to_tun, None, running.clone(), 1280).unwrap();
 
         running.store(false, Ordering::Relaxed);
         let (done_tx, done_rx) = std::sync::mpsc::channel();

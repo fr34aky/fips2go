@@ -27,11 +27,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pubdom_core::Npub;
+use pubdom_resolve::FilePinStore;
 use pubdom_resolve::config::MaybeTxt;
 use pubdom_resolve::mesh::MeshDns;
 use pubdom_resolve::relay::RelayClient;
 use pubdom_resolve::resolver::{LookupResult, Probe, Resolver, ResolverConfig, TxtSource};
-use pubdom_resolve::FilePinStore;
 
 use crate::config::ShimConfig;
 use crate::meshhttp::MeshLink;
@@ -78,7 +78,6 @@ pub enum Decided {
     Capped(u32),
 }
 
-
 pub trait Lookup: Send + Sync {
     /// Resolve `query`. `pending` is called, at most once, when the lookup
     /// did not settle at its first poll and the legacy answer may be
@@ -100,7 +99,10 @@ fn decided(result: LookupResult) -> Decided {
         LookupResult::Answer(a) => Decided::Answer(a),
         LookupResult::Passthrough => Decided::Legacy,
         LookupResult::Unavailable { retry_in } => {
-            tracing::debug!(retry_in_s = retry_in.as_secs(), "public name's server unreachable; legacy answer until the retry");
+            tracing::debug!(
+                retry_in_s = retry_in.as_secs(),
+                "public name's server unreachable; legacy answer until the retry"
+            );
             Decided::Capped(pubdom_core::unavailable_ttl(retry_in))
         }
     }
@@ -127,7 +129,11 @@ pub struct Names {
 impl Names {
     /// Build the resolver over `link`; `pins_path` is the app-private JSON
     /// pin file (shared schema with the desktop daemon).
-    pub fn start(config: &ShimConfig, link: Arc<MeshLink>, pins_path: &str) -> Result<Arc<Self>, String> {
+    pub fn start(
+        config: &ShimConfig,
+        link: Arc<MeshLink>,
+        pins_path: &str,
+    ) -> Result<Arc<Self>, String> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("fips-names")
@@ -192,10 +198,21 @@ impl Names {
         // at run time here.
         let txt = MaybeTxt::new(&upstreams, rc.dnssec, rc.txt_timeout)?;
         let resolver = rt.block_on(async {
-            let relays = RelayClient::new(&rc.public_relays, &rc.mesh_relays, rc.relay_timeout).await;
-            Resolver::new(rc, Arc::new(pins), PhoneTxt(txt), relays, Arc::new(PhoneMesh { link }))
+            let relays =
+                RelayClient::new(&rc.public_relays, &rc.mesh_relays, rc.relay_timeout).await;
+            Resolver::new(
+                rc,
+                Arc::new(pins),
+                PhoneTxt(txt),
+                relays,
+                Arc::new(PhoneMesh { link }),
+            )
         });
-        Ok(Arc::new(Self { rt: Some(rt), resolver: Arc::new(resolver), _relays: proxies }))
+        Ok(Arc::new(Self {
+            rt: Some(rt),
+            resolver: Arc::new(resolver),
+            _relays: proxies,
+        }))
     }
 
     /// The network moved: what was "unreachable" may answer now, and vice
@@ -215,11 +232,19 @@ impl Names {
     /// It also decides whether a domain with no pin is probed plainly first
     /// ([`PhoneTxt`]).
     pub fn set_internet_validated(&self, validated: bool) {
-        let want = if validated { TXT_TIMEOUT_ONLINE } else { TXT_TIMEOUT_UNVALIDATED };
+        let want = if validated {
+            TXT_TIMEOUT_ONLINE
+        } else {
+            TXT_TIMEOUT_UNVALIDATED
+        };
         if self.resolver.txt().0.timeout() == want {
             return;
         }
-        tracing::info!(validated, txt_timeout_ms = want.as_millis(), "public names: internet validation changed");
+        tracing::info!(
+            validated,
+            txt_timeout_ms = want.as_millis(),
+            "public names: internet validation changed"
+        );
         if let Err(e) = self.resolver.txt().0.set_timeout(want) {
             tracing::warn!(error = %e, "could not change the TXT verifier's timeout");
             return;
@@ -321,7 +346,9 @@ impl Lookup for Names {
                 Outcome::Legacy
             }
             Some(Err(_)) => {
-                tracing::info!("public-name lookup still running after its budget; using the legacy answer briefly");
+                tracing::info!(
+                    "public-name lookup still running after its budget; using the legacy answer briefly"
+                );
                 Outcome::Capped(pubdom_core::OVERRUN_TTL_SECS)
             }
             None => {
@@ -329,7 +356,9 @@ impl Lookup for Names {
                 let mut task = Some(task);
                 Outcome::Early(Box::new(move |wait| {
                     let running = task.as_mut()?;
-                    let joined = handle.block_on(async { tokio::time::timeout(wait, running).await }).ok()?;
+                    let joined = handle
+                        .block_on(async { tokio::time::timeout(wait, running).await })
+                        .ok()?;
                     task = None;
                     Some(match joined {
                         Ok(result) => decided(result),
@@ -360,7 +389,12 @@ struct PhoneMesh {
 }
 
 impl MeshDns for PhoneMesh {
-    fn query_udp(&self, server: SocketAddrV6, msg: &[u8], timeout: Duration) -> std::io::Result<Vec<u8>> {
+    fn query_udp(
+        &self,
+        server: SocketAddrV6,
+        msg: &[u8],
+        timeout: Duration,
+    ) -> std::io::Result<Vec<u8>> {
         crate::meshudp::query(&self.link, *server.ip(), server.port(), msg, timeout)
             .map_err(|e| std::io::Error::other(e.message))
     }
@@ -368,7 +402,9 @@ impl MeshDns for PhoneMesh {
     fn query_tcp(&self, _: SocketAddrV6, _: &[u8], _: Duration) -> std::io::Result<Vec<u8>> {
         // A step 3 answer is one CNAME; nothing truncates it. The TCP
         // fallback rides on meshhttp's stack in a later milestone.
-        Err(std::io::Error::other("TCP fallback not available on the phone"))
+        Err(std::io::Error::other(
+            "TCP fallback not available on the phone",
+        ))
     }
 
     fn reachable(&self, npub: Npub, timeout: Duration) -> bool {
@@ -378,7 +414,11 @@ impl MeshDns for PhoneMesh {
     fn register(&self, npub: Npub, timeout: Duration) -> bool {
         // Same exchange as meshhttp::register_identity, but the outcome
         // matters here: it doubles as the reachability signal (spec §7).
-        let Ok(socket) = UdpSocket::bind(if self.link.responder.is_ipv6() { "[::1]:0" } else { "127.0.0.1:0" }) else {
+        let Ok(socket) = UdpSocket::bind(if self.link.responder.is_ipv6() {
+            "[::1]:0"
+        } else {
+            "127.0.0.1:0"
+        }) else {
             return false;
         };
         let _ = socket.set_read_timeout(Some(timeout));
@@ -404,12 +444,21 @@ mod tests {
     /// lookup before the mesh path.
     #[test]
     fn the_plain_probe_needs_a_validated_internet() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let txt = PhoneTxt(MaybeTxt::new(&[], true, TXT_TIMEOUT_UNVALIDATED).unwrap());
-        assert_eq!(rt.block_on(txt.probe("example.org", &|| {})), Probe::Unknown);
+        assert_eq!(
+            rt.block_on(txt.probe("example.org", &|| {})),
+            Probe::Unknown
+        );
         // Validated: the library's probe answers (no upstreams here, so
         // "unreachable" — the point is that it was asked).
         txt.0.set_timeout(TXT_TIMEOUT_ONLINE).unwrap();
-        assert_eq!(rt.block_on(txt.probe("example.org", &|| {})), Probe::Unreachable);
+        assert_eq!(
+            rt.block_on(txt.probe("example.org", &|| {})),
+            Probe::Unreachable
+        );
     }
 }
