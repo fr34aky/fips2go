@@ -247,13 +247,13 @@ fn default_worker_threads() -> usize {
     1
 }
 
-/// Three open-discovery links on top of the configured bootstraps: enough
-/// that the mesh is reachable when every bootstrap is down, small enough
-/// that the heartbeats do not show on the battery graph.
 fn default_names_server_peers() -> usize {
     2
 }
 
+/// Three open-discovery links on top of the configured bootstraps: enough
+/// that the mesh is reachable when every bootstrap is down, small enough
+/// that the heartbeats do not show on the battery graph.
 fn default_nostr_discovery_max_peers() -> usize {
     3
 }
@@ -497,34 +497,47 @@ impl ShimConfig {
 }
 
 /// Up to `max` distinct servers of the domains pinned in `path`, the most
-/// recently verified first, leaving out this node and peers configured
-/// already. A pin file that cannot be read gives none: the extra links are
-/// a convenience, never a reason not to start.
+/// recently verified first (ties by key, so a restart picks the same set),
+/// leaving out this node and peers configured already (compared by key, so
+/// a peer given in hex is still recognised). Only pins verified by DNSSEC or
+/// by several agreeing resolvers count: a single resolver's answer or
+/// attestations are enough to resolve a name, not to keep a link to its
+/// server — a hostile resolver could otherwise make its own node a
+/// permanent peer of the phone. A pin file that cannot be read gives none:
+/// the extra links are a convenience, never a reason not to start.
 fn pinned_servers(path: &str, max: usize, own: &str, configured: &[&str]) -> Vec<String> {
-    use pubdom_core::PinStore;
+    use pubdom_core::{Method, Npub, PinStore};
     if max == 0 {
         return Vec::new();
     }
-    let pins = match pubdom_resolve::FilePinStore::open(path) {
+    let mut pins = match pubdom_resolve::FilePinStore::open(path) {
         Ok(p) => p.list(),
         Err(e) => {
             tracing::warn!(error = %e, "pin file unreadable; no direct links to pinned servers");
             return Vec::new();
         }
     };
-    let mut pins = pins;
-    pins.sort_by(|a, b| b.verified_at.cmp(&a.verified_at));
-    let mut out: Vec<String> = Vec::new();
+    pins.retain(|p| matches!(p.method, Method::Dnssec | Method::Dns));
+    pins.sort_by(|a, b| {
+        b.verified_at
+            .cmp(&a.verified_at)
+            .then_with(|| a.npub.to_string().cmp(&b.npub.to_string()))
+    });
+    let known: Vec<Npub> = configured
+        .iter()
+        .chain(std::iter::once(&own))
+        .filter_map(|n| Npub::parse_any(n).ok())
+        .collect();
+    let mut out: Vec<Npub> = Vec::new();
     for pin in pins {
-        let npub = pin.npub.to_string();
-        if npub != own && !configured.contains(&npub.as_str()) && !out.contains(&npub) {
-            out.push(npub);
+        if !known.contains(&pin.npub) && !out.contains(&pin.npub) {
+            out.push(pin.npub);
         }
         if out.len() == max {
             break;
         }
     }
-    out
+    out.iter().map(Npub::to_string).collect()
 }
 
 #[cfg(test)]
@@ -599,25 +612,27 @@ mod tests {
         use pubdom_core::{Binding, Method, Npub, PinStore};
         let me = derive_identity("").unwrap();
         let boot = derive_identity("").unwrap().npub;
-        let [a, b, c] = std::array::from_fn(|_| derive_identity("").unwrap().npub);
+        let [a, b, c, weak] = std::array::from_fn(|_| derive_identity("").unwrap().npub);
         let dir = std::env::temp_dir().join(format!("pins-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("names-pins.json");
         {
             let store = pubdom_resolve::FilePinStore::open(&path).unwrap();
-            for (domain, npub, at) in [
-                ("old.example", &c, 10),
-                ("new.example", &a, 30),
-                ("also-a.example", &a, 25),
-                ("mid.example", &b, 20),
-                ("boot.example", &boot, 40),
-                ("me.example", &me.npub, 50),
+            for (domain, npub, at, method) in [
+                ("old.example", &c, 10, Method::Dns),
+                ("new.example", &a, 30, Method::Dnssec),
+                ("also-a.example", &a, 25, Method::Dnssec),
+                ("mid.example", &b, 20, Method::Dnssec),
+                ("boot.example", &boot, 40, Method::Dnssec),
+                ("me.example", &me.npub, 50, Method::Dnssec),
+                // The newest, but one resolver's word: no link for it.
+                ("weak.example", &weak, 60, Method::DnsSingle),
             ] {
                 store.put(Binding {
                     domain: domain.into(),
                     npub: Npub::parse(npub).unwrap(),
                     port: 5355,
-                    method: Method::Dnssec,
+                    method,
                     verified_at: at,
                 });
             }
@@ -642,6 +657,12 @@ mod tests {
         assert_eq!(build(true, r#", "names_server_peers": 0"#).peers.len(), 1, "off");
         assert_eq!(build(true, r#", "names_server_peers": 9"#).peers.len(), 4, "all three");
         assert_eq!(build(false, "").peers.len(), 1, "no Nostr, no advert to dial from");
+        // A configured peer given in hex is the same key as its pin.
+        let a_hex = Npub::parse(&a).unwrap().to_hex();
+        let picked = pinned_servers(path.to_str().unwrap(), 9, &me.npub, &[a_hex.as_str()]);
+        assert_eq!(picked, [boot.clone(), b.clone(), c.clone()], "newest first, a and weak left out");
+        assert!(!picked.contains(&a), "the hex peer's pin is left out");
+        assert!(!picked.contains(&weak), "a single resolver's pin is left out");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -149,6 +149,14 @@
                 <TextView
                     style="@style/Widget.Fips.Summary"
                     android:text="A website like www.example.ch can point its name at a fips node with a DNS record and a signed Nostr claim. With this on, such names reach the node over the mesh — even without internet once verified once — and every other name works exactly as before. Names are verified before use; nothing resolves on a claim alone." />
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/names_direct_servers"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:layout_marginTop="8dp"
+                    android:text="Link directly to the servers of domains you use" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Keeps a direct link to the servers of the two public domains you verified most recently, so their names resolve right after you connect instead of after the mesh finds the server — which can take half a minute. Each server\'s operator can then see this phone\'s public IP address and when it comes online, and the public Nostr relays which servers it links to. Applies at the next connect." />
                 <com.google.android.material.textfield.TextInputLayout
                     android:id="@+id/names_mesh_relays_layout"
                     style="@style/Widget.Material3.TextInputLayout.OutlinedBox"

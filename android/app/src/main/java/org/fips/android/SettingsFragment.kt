@@ -288,6 +288,8 @@ class SettingsFragment : Fragment() {
             sw(view, R.id.lan_mdns).isChecked != CS.lanMdns(requireContext()) ||
             sw(view, R.id.public_names).isChecked != CS.publicNames(requireContext()) ||
             sw(view, R.id.names_dnssec).isChecked != CS.namesDnssec(requireContext()) ||
+            sw(view, R.id.names_direct_servers).isChecked !=
+            CS.namesDirectServers(requireContext()) ||
             sw(view, R.id.names_witnesses_from_hosts).isChecked !=
             CS.namesWitnessesFromHosts(requireContext()) ||
             e(R.id.names_mesh_relays) != p.getString(CS.NAMES_MESH_RELAYS, "") ||
@@ -411,6 +413,7 @@ class SettingsFragment : Fragment() {
         sw(view, R.id.lan_mdns).isChecked = CS.lanMdns(requireContext())
         sw(view, R.id.public_names).isChecked = CS.publicNames(requireContext())
         sw(view, R.id.names_dnssec).isChecked = CS.namesDnssec(requireContext())
+        sw(view, R.id.names_direct_servers).isChecked = CS.namesDirectServers(requireContext())
         sw(view, R.id.names_witnesses_from_hosts).isChecked =
             CS.namesWitnessesFromHosts(requireContext())
         sw(view, R.id.nostr_discovery).isChecked =
@@ -450,6 +453,7 @@ class SettingsFragment : Fragment() {
             .putBoolean(CS.LAN_MDNS, sw(view, R.id.lan_mdns).isChecked)
             .putBoolean(CS.PUBLIC_NAMES, sw(view, R.id.public_names).isChecked)
             .putBoolean(CS.NAMES_DNSSEC, sw(view, R.id.names_dnssec).isChecked)
+            .putBoolean(CS.NAMES_DIRECT_SERVERS, sw(view, R.id.names_direct_servers).isChecked)
             .putBoolean(
                 CS.NAMES_WITNESSES_FROM_HOSTS,
                 sw(view, R.id.names_witnesses_from_hosts).isChecked
@@ -487,7 +491,7 @@ class SettingsFragment : Fragment() {
         val SWITCHES = intArrayOf(
             R.id.inbound_filter, R.id.lan_mdns, R.id.hotspot, R.id.battery_saver,
             R.id.bootstrap_fallbacks, R.id.nostr_discovery, R.id.public_names, R.id.names_dnssec,
-            R.id.names_witnesses_from_hosts,
+            R.id.names_witnesses_from_hosts, R.id.names_direct_servers,
             R.id.auto_update, R.id.forward_clearnet,
         )
         val TEXT_FIELDS = intArrayOf(
