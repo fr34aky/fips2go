@@ -461,7 +461,25 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
             None => Ok(()),
             Some((stored_config, protect)) => {
                 let config_json = config_json.unwrap_or(&stored_config);
-                tracing::info!("underlying network changed; restarting node on the tun fd");
+                // Same config: what changed is the tunnel (its IPv6 route or
+                // its allowed apps, both fixed at `establish()`), which the
+                // node never sees — it exchanges packets with the pump. Move
+                // the pump onto the new fd and keep the node, its links and
+                // sessions. A changed config (a FIPS Hotspot joined or left)
+                // still rebuilds the node, and so does a swap that fails.
+                if config_json == stored_config {
+                    match swap_tun_locked(tun_fd) {
+                        Ok(()) => {
+                            REBINDING.store(false, Ordering::SeqCst);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "tunnel swap failed; restarting node on the tun fd");
+                        }
+                    }
+                } else {
+                    tracing::info!("config changed; restarting node on the tun fd");
+                }
                 stop_locked();
                 start_locked(config_json, tun_fd, protect).map(|_| ())
             }
@@ -472,6 +490,32 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
         tracing::error!(error = %e, "node rebuild after network change failed");
     }
     result
+}
+
+/// Move the running engine's pump onto `tun_fd` (dup'd here) and close the
+/// old dup. The node keeps running; its medium-change detector and the names
+/// resolver are told the network moved, since a new tunnel usually comes
+/// with a new underlying network. Holds `LIFECYCLE` (caller) and `ENGINE`.
+fn swap_tun_locked(tun_fd: RawFd) -> Result<(), String> {
+    let mut slot = ENGINE.lock().unwrap();
+    let engine = slot.as_mut().ok_or("not running")?;
+    let pump = engine.pump.as_mut().ok_or("no pump")?;
+    let owned_fd = unsafe { libc::fcntl(tun_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if owned_fd < 0 {
+        return Err(format!("dup tun fd: {}", std::io::Error::last_os_error()));
+    }
+    if let Err(e) = pump.swap_fd(owned_fd) {
+        unsafe { libc::close(owned_fd) };
+        return Err(e);
+    }
+    let old_fd = std::mem::replace(&mut engine.tun_fd, owned_fd);
+    unsafe { libc::close(old_fd) };
+    engine.netmon.poke();
+    if let Some(names) = &engine.names {
+        names.network_changed();
+    }
+    tracing::info!("tunnel replaced; node kept running");
+    Ok(())
 }
 
 /// Wake the node's medium-change detector now: Kotlin calls this from the
@@ -795,6 +839,77 @@ mod tests {
             stop(); // idempotent
             unsafe { libc::close(write_fd) };
             unsafe { libc::close(read_fd) };
+        }
+    }
+
+    /// A new tunnel with the same config (an IPv6-route flip, a changed app
+    /// selection) moves the pump onto the new fd and keeps the node: same
+    /// engine, and traffic flows through the new fd both ways — a packet
+    /// read from it reaches the node, whose ICMPv6 answer is written back to
+    /// it. A changed config still rebuilds the node.
+    #[test]
+    fn a_new_tunnel_with_the_same_config_keeps_the_node() {
+        let _serial = engine_test_lock();
+        let identity = crate::config::derive_identity("").unwrap();
+        let config = serde_json::json!({
+            "nsec": identity.nsec,
+            "peers": [],
+            "enable_nostr": false,
+            "enable_fips_dns": false,
+            "forward_clearnet": false,
+            "battery_saver": false,
+            "log_level": "warn",
+        })
+        .to_string();
+        let pair = || {
+            let mut fds = [0i32; 2];
+            assert_eq!(
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) },
+                0
+            );
+            (fds[0], fds[1])
+        };
+        let engine_id = || {
+            let slot = ENGINE.lock().unwrap();
+            Arc::as_ptr(&slot.as_ref().expect("running").running) as usize
+        };
+
+        let (old_tun, old_app) = pair();
+        start(&config, old_tun, None).unwrap_or_else(|e| panic!("start: {e}"));
+        let first = engine_id();
+
+        let (new_tun, new_app) = pair();
+        network_changed(new_tun, None).expect("swap");
+        assert_eq!(engine_id(), first, "same node after the swap");
+
+        // A mesh destination nobody serves: the node answers Destination
+        // Unreachable from its own address, on the new fd.
+        let src: std::net::Ipv6Addr = identity.address.parse().unwrap();
+        let dst: std::net::Ipv6Addr = "fd12:3456::1".parse().unwrap();
+        let probe = crate::packet::build_ipv6_udp(src.octets(), dst.octets(), 40000, 9, b"swap");
+        let sent = unsafe { libc::write(new_app, probe.as_ptr().cast(), probe.len()) };
+        assert_eq!(sent, probe.len() as isize);
+        let mut pfd = libc::pollfd {
+            fd: new_app,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut pfd, 1, 5000) }, 1, "an answer on the new fd");
+        let mut buf = [0u8; 2048];
+        let n = unsafe { libc::read(new_app, buf.as_mut_ptr().cast(), buf.len()) };
+        assert!(n >= 40, "an IPv6 packet");
+        assert_eq!(buf[6], 58, "ICMPv6");
+        assert_eq!(buf[40], 1, "Destination Unreachable");
+
+        // A changed config rebuilds the node.
+        let changed = config.replace("\"log_level\":\"warn\"", "\"log_level\":\"error\"");
+        assert_ne!(changed, config);
+        network_changed(new_tun, Some(&changed)).expect("restart");
+        assert_ne!(engine_id(), first, "a new node for a new config");
+
+        stop();
+        for fd in [old_tun, old_app, new_tun, new_app] {
+            unsafe { libc::close(fd) };
         }
     }
 
