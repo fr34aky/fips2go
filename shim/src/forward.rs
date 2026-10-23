@@ -29,6 +29,9 @@ use tokio::sync::Notify;
 use fips::SocketProtect;
 
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the app side gets to take the FIN that tells it its server is
+/// gone (see [`forward_tcp`]).
+const APP_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_MAX_DATAGRAM: usize = 65535;
 
@@ -255,9 +258,23 @@ async fn forward_tcp(
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timeout")),
     };
-    tokio::io::copy_bidirectional(&mut client, &mut server)
-        .await
-        .map(|_| ())
+    match tokio::io::copy_bidirectional(&mut client, &mut server).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // The server side failed — on a phone most often because the
+            // network it was dialed on went away (Android aborts a protected
+            // socket when its network is lost). Dropping the app-side stream
+            // alone tells the app nothing: ipstack forgets the session and
+            // answers only the app's next segment, and an app that has sent
+            // its request and is waiting for the answer sends none, so it
+            // waited out its own timeout — DuckDuckGo a full minute after a
+            // Wi-Fi to LTE switch, holding the page reload behind it. A FIN
+            // ends the connection on the app's side now, and it reconnects.
+            use tokio::io::AsyncWriteExt;
+            let _ = tokio::time::timeout(APP_CLOSE_TIMEOUT, client.shutdown()).await;
+            Err(e)
+        }
+    }
 }
 
 async fn forward_udp(
