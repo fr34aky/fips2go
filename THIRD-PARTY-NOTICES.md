@@ -8,10 +8,11 @@ listed for completeness, though they run at build time and do not ship).
 
 ## fips
 
-[fips](https://github.com/jmcorgan/fips) v0.6.0-dev — MIT License,
-Copyright (c) Johnathan Corgan. The mesh daemon this app embeds (via the
-`fr34aky/fips` fork, branch `android-hooks`, git dependency at rev f4a811e,
-which adds the embedder hooks under the same license).
+[fips](https://github.com/jmcorgan/fips) v0.6.0-dev (crates `fips-mesh`
+and `fips-core`) — MIT License, Copyright (c) Johnathan Corgan. The mesh
+daemon this app embeds (via the `fr34aky/fips` fork, branch
+`android-hooks`, git dependency at rev a4f4816, which adds the embedder
+hooks under the same license).
 
 ## fips-pub-domains
 
@@ -37,6 +38,7 @@ crates.io per MPL §3.2(b).
 
 | Crate | Version | License |
 |---|---|---|
+| aead | 0.5.2 | MIT OR Apache-2.0 |
 | ahash | 0.8.12 | MIT OR Apache-2.0 |
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 |
 | anstream | 1.0.0 | MIT OR Apache-2.0 |
@@ -64,8 +66,9 @@ crates.io per MPL §3.2(b).
 | castaway | 0.2.4 | MIT |
 | cesu8 | 1.1.0 | Apache-2.0/MIT |
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 |
-| chacha20 | 0.10.1 | MIT OR Apache-2.0 |
 | chacha20 | 0.9.1 | Apache-2.0 OR MIT |
+| chacha20 | 0.10.1 | MIT OR Apache-2.0 |
+| chacha20poly1305 | 0.10.1 | Apache-2.0 OR MIT |
 | cipher | 0.4.4 | MIT OR Apache-2.0 |
 | clap | 4.6.6 | MIT OR Apache-2.0 |
 | clap_builder | 4.6.6 | MIT OR Apache-2.0 |
@@ -195,11 +198,13 @@ crates.io per MPL §3.2(b).
 | num-traits | 0.2.19 | MIT OR Apache-2.0 |
 | num_threads | 0.1.7 | MIT OR Apache-2.0 |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 |
+| opaque-debug | 0.3.1 | MIT OR Apache-2.0 |
 | option-ext | 0.2.0 | MPL-2.0 |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT |
+| poly1305 | 0.8.0 | Apache-2.0 OR MIT |
 | portable-atomic | 1.14.0 | Apache-2.0 OR MIT |
 | potential_utf | 0.1.5 | Unicode-3.0 |
 | powerfmt | 0.2.0 | MIT OR Apache-2.0 |
@@ -209,14 +214,14 @@ crates.io per MPL §3.2(b).
 | psl | 2.1.238 | MIT/Apache-2.0 |
 | psl-types | 2.0.11 | MIT/Apache-2.0 |
 | quote | 1.0.47 | MIT OR Apache-2.0 |
-| rand | 0.10.2 | MIT OR Apache-2.0 |
 | rand | 0.8.7 | MIT OR Apache-2.0 |
 | rand | 0.9.5 | MIT OR Apache-2.0 |
+| rand | 0.10.2 | MIT OR Apache-2.0 |
 | rand_chacha | 0.3.1 | MIT OR Apache-2.0 |
 | rand_chacha | 0.9.0 | MIT OR Apache-2.0 |
-| rand_core | 0.10.1 | MIT OR Apache-2.0 |
 | rand_core | 0.6.4 | MIT OR Apache-2.0 |
 | rand_core | 0.9.5 | MIT OR Apache-2.0 |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 |
 | ratatui | 0.30.2 | MIT |
 | ratatui-core | 0.1.2 | MIT |
 | ratatui-crossterm | 0.1.2 | MIT |
@@ -251,6 +256,7 @@ crates.io per MPL §3.2(b).
 | simd_cesu8 | 1.2.0 | Apache-2.0 OR MIT |
 | simdutf8 | 0.1.5 | MIT OR Apache-2.0 |
 | simple-dns | 0.11.3 | MIT |
+| siphasher | 1.0.3 | MIT/Apache-2.0 |
 | slab | 0.4.12 | MIT |
 | smallvec | 1.15.2 | MIT OR Apache-2.0 |
 | smoltcp | 0.14.0 | 0BSD |
@@ -295,6 +301,7 @@ crates.io per MPL §3.2(b).
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 |
 | unicode-truncate | 2.0.1 | MIT OR Apache-2.0 |
 | unicode-width | 0.2.2 | MIT OR Apache-2.0 |
+| universal-hash | 0.5.1 | MIT OR Apache-2.0 |
 | unsafe-libyaml | 0.2.11 | MIT |
 | untrusted | 0.9.0 | ISC |
 | url | 2.5.8 | MIT OR Apache-2.0 |

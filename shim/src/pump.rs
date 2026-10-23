@@ -270,7 +270,7 @@ impl Pump {
 }
 
 /// IPv6 mesh prefix (`fd00::/8`); anything else is clearnet.
-const MESH_PREFIX: u8 = fips::identity::FIPS_ADDRESS_PREFIX;
+const MESH_PREFIX: u8 = fips::identity::IPV6_ADDRESS_PREFIX;
 
 /// Destination address of an IPv6 packet, for log lines (`::` if too short).
 fn dst_of(packet: &[u8]) -> std::net::Ipv6Addr {
