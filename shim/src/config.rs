@@ -121,6 +121,17 @@ pub struct ShimConfig {
     /// exactly as before.
     #[serde(default)]
     pub names_pins_path: Option<String>,
+    /// Keep a direct link to up to this many servers of pinned public
+    /// domains (the most recently verified first), dialed from their Nostr
+    /// adverts like a bootstrap. A domain's server is usually several hops
+    /// away, and after a connect the mesh took up to 30 s to find one
+    /// (Pixel 9 Pro, 2026-10-24) — past the 3.5 s lookup budget, so the app
+    /// got the public address. A direct peer needs no discovery: its
+    /// identity arrives with the handshake and the link is the route. Each
+    /// costs one kept-alive link. 0 = off; needs `names_pins_path` and
+    /// `enable_nostr`.
+    #[serde(default = "default_names_server_peers")]
+    pub names_server_peers: usize,
     /// Nostr relays reachable over the mesh (`ws://[fd…]:port`), asked for
     /// claims when the legacy DNS is unreachable. Empty: offline lookups
     /// resolve only pinned domains.
@@ -239,6 +250,10 @@ fn default_worker_threads() -> usize {
 /// Three open-discovery links on top of the configured bootstraps: enough
 /// that the mesh is reachable when every bootstrap is down, small enough
 /// that the heartbeats do not show on the battery graph.
+fn default_names_server_peers() -> usize {
+    2
+}
+
 fn default_nostr_discovery_max_peers() -> usize {
     3
 }
@@ -442,6 +457,24 @@ impl ShimConfig {
             peer_config.via_nostr = self.enable_nostr;
             config.peers.push(peer_config);
         }
+        if self.enable_nostr
+            && let Some(pins) = self.names_pins_path.as_deref()
+        {
+            let configured: Vec<&str> = config.peers.iter().map(|p| p.npub.as_str()).collect();
+            let servers = pinned_servers(pins, self.names_server_peers, &identity.npub, &configured);
+            if !servers.is_empty() {
+                tracing::info!(servers = ?servers, "peering directly with the servers of pinned public domains");
+            }
+            for npub in servers {
+                // No address: fips dials the server from its Nostr advert
+                // (allowed with `via_nostr`), as it re-finds a bootstrap.
+                config.peers.push(fips::config::PeerConfig {
+                    npub,
+                    via_nostr: true,
+                    ..Default::default()
+                });
+            }
+        }
         config
             .validate()
             .map_err(|e| format!("config validate: {e}"))?;
@@ -461,6 +494,37 @@ impl ShimConfig {
             })
             .collect()
     }
+}
+
+/// Up to `max` distinct servers of the domains pinned in `path`, the most
+/// recently verified first, leaving out this node and peers configured
+/// already. A pin file that cannot be read gives none: the extra links are
+/// a convenience, never a reason not to start.
+fn pinned_servers(path: &str, max: usize, own: &str, configured: &[&str]) -> Vec<String> {
+    use pubdom_core::PinStore;
+    if max == 0 {
+        return Vec::new();
+    }
+    let pins = match pubdom_resolve::FilePinStore::open(path) {
+        Ok(p) => p.list(),
+        Err(e) => {
+            tracing::warn!(error = %e, "pin file unreadable; no direct links to pinned servers");
+            return Vec::new();
+        }
+    };
+    let mut pins = pins;
+    pins.sort_by(|a, b| b.verified_at.cmp(&a.verified_at));
+    let mut out: Vec<String> = Vec::new();
+    for pin in pins {
+        let npub = pin.npub.to_string();
+        if npub != own && !configured.contains(&npub.as_str()) && !out.contains(&npub) {
+            out.push(npub);
+        }
+        if out.len() == max {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -524,6 +588,61 @@ mod tests {
             assert_eq!(config.peers.len(), 1);
             assert_eq!(config.peers[0].via_nostr, expect, "enable_nostr={nostr}");
         }
+    }
+
+    /// Servers of pinned public domains join the configured peers, dialed
+    /// from their adverts: the most recently verified first, up to the
+    /// knob, without this node, a peer configured already, or a server
+    /// twice. Never without Nostr (fips rejects `via_nostr` then).
+    #[test]
+    fn pinned_servers_become_peers_found_by_their_adverts() {
+        use pubdom_core::{Binding, Method, Npub, PinStore};
+        let me = derive_identity("").unwrap();
+        let boot = derive_identity("").unwrap().npub;
+        let [a, b, c] = std::array::from_fn(|_| derive_identity("").unwrap().npub);
+        let dir = std::env::temp_dir().join(format!("pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("names-pins.json");
+        {
+            let store = pubdom_resolve::FilePinStore::open(&path).unwrap();
+            for (domain, npub, at) in [
+                ("old.example", &c, 10),
+                ("new.example", &a, 30),
+                ("also-a.example", &a, 25),
+                ("mid.example", &b, 20),
+                ("boot.example", &boot, 40),
+                ("me.example", &me.npub, 50),
+            ] {
+                store.put(Binding {
+                    domain: domain.into(),
+                    npub: Npub::parse(npub).unwrap(),
+                    port: 5355,
+                    method: Method::Dnssec,
+                    verified_at: at,
+                });
+            }
+        }
+        let build = |nostr: bool, extra: &str| {
+            let json = format!(
+                r#"{{"nsec": "{}", "enable_nostr": {nostr}, "enable_fips_dns": false,
+                     "peers": [{{"npub": "{boot}", "endpoint": "boot.example:2121"}}],
+                     "names_pins_path": "{}"{extra}}}"#,
+                me.nsec,
+                path.display()
+            );
+            ShimConfig::from_json(&json).unwrap().to_fips_config().unwrap()
+        };
+
+        let config = build(true, "");
+        let npubs: Vec<&str> = config.peers.iter().map(|p| p.npub.as_str()).collect();
+        assert_eq!(npubs, [boot.as_str(), a.as_str(), b.as_str()], "newest two, deduplicated");
+        for server in &config.peers[1..] {
+            assert!(server.addresses.is_empty() && server.via_nostr, "{server:?}");
+        }
+        assert_eq!(build(true, r#", "names_server_peers": 0"#).peers.len(), 1, "off");
+        assert_eq!(build(true, r#", "names_server_peers": 9"#).peers.len(), 4, "all three");
+        assert_eq!(build(false, "").peers.len(), 1, "no Nostr, no advert to dial from");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The discovery toggle flips fips to `policy: open` with BOTH bounds
