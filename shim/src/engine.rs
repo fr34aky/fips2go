@@ -6,7 +6,7 @@
 //! all and closes the dup'd fd last.
 
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -75,6 +75,9 @@ static LIFECYCLE: Mutex<()> = Mutex::new(());
 static STARTING: AtomicBool = AtomicBool::new(false);
 
 struct Engine {
+    /// Which start this is (see [`STARTS`]); read by the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    start: u64,
     running: Arc<AtomicBool>,
     stop_tx: Option<tokio::sync::oneshot::Sender<()>>,
     node_thread: Option<std::thread::JoinHandle<()>>,
@@ -88,8 +91,8 @@ struct Engine {
     address: String,
     /// Our dup of the VpnService TUN fd; closed after the pump joins.
     tun_fd: RawFd,
-    /// Kept so [`network_changed`] can rebuild the node (fresh, re-protected
-    /// underlay socket on the new network) on the same TUN fd.
+    /// Kept so [`network_changed`] can tell a new tunnel (same config: swap
+    /// the pump's fd) from a changed config (restart the node).
     config_json: String,
     protect: Option<fips::SocketProtect>,
     /// Wakes the node's medium-change detector (`node.netmon.*`) — see
@@ -369,6 +372,7 @@ fn start_inner(
 
     tracing::info!(npub = %npub, address = %address, "fips engine started");
     let engine = Engine {
+        start: STARTS.fetch_add(1, Ordering::SeqCst),
         running,
         stop_tx: Some(stop_tx),
         node_thread: Some(node_thread),
@@ -423,20 +427,23 @@ fn stop_locked() {
     tracing::info!("fips engine stopped");
 }
 
+/// Numbers each engine start, so a test can tell a kept node from a new one.
+static STARTS: AtomicU64 = AtomicU64::new(0);
+
 /// Guards against overlapping / re-entrant rebuilds from a burst of network
 /// callbacks.
 static REBINDING: AtomicBool = AtomicBool::new(false);
 
-/// Rebuild the node after an underlying-network change (Wi-Fi ↔ cellular).
+/// Follow a rebind from Kotlin: a new tunnel (its `::/0` route or allowed
+/// apps changed, both fixed at `establish()`) or a changed config (the FIPS
+/// Hotspot transport overlay).
 ///
-/// The node has no runtime socket-rebind hook and, as observed on-device, does
-/// not recover on its own: its UDP socket keeps a stale source/NAT binding and
-/// the mesh silently black-holes. So we restart the node on the given TUN fd:
-/// usually the same fd passed to [`start`], but Kotlin may pass a replacement
-/// when it re-established the tunnel with different routes (e.g. dropping or
-/// adding `::/0` as underlay IPv6 comes and goes) — we dup whatever we get.
-/// The fd is owned by the Kotlin `ParcelFileDescriptor` either way. No-op when
-/// not running.
+/// With the config unchanged only the tunnel is new, and the node never sees
+/// it: the pump's reader and writer move onto `tun_fd` ([`Pump::swap_fd`])
+/// and the node, its links and sessions carry on. A changed config, or a swap
+/// that fails, restarts the node on `tun_fd` — fips has no runtime way to add
+/// or drop a transport. Either way we dup the fd; the Kotlin
+/// `ParcelFileDescriptor` keeps owning it. No-op when not running.
 ///
 /// `config_json`: when `Some`, replaces the stored config for the rebuilt
 /// node — Kotlin regenerates it on every rebind so per-network state (the
@@ -461,9 +468,28 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
             None => Ok(()),
             Some((stored_config, protect)) => {
                 let config_json = config_json.unwrap_or(&stored_config);
-                tracing::info!("underlying network changed; restarting node on the tun fd");
-                stop_locked();
-                start_locked(config_json, tun_fd, protect).map(|_| ())
+                // Same config: what changed is the tunnel (its IPv6 route or
+                // its allowed apps, both fixed at `establish()`), which the
+                // node never sees — it exchanges packets with the pump. Move
+                // the pump onto the new fd and keep the node, its links and
+                // sessions. A changed config (a FIPS Hotspot joined or left)
+                // still rebuilds the node, and so does a swap that fails.
+                let swapped = if config_json == stored_config {
+                    swap_tun_locked(tun_fd)
+                        .map_err(|e| {
+                            tracing::warn!(error = %e, "tunnel swap failed; restarting node on the tun fd");
+                        })
+                        .is_ok()
+                } else {
+                    tracing::info!("config changed; restarting node on the tun fd");
+                    false
+                };
+                if swapped {
+                    Ok(())
+                } else {
+                    stop_locked();
+                    start_locked(config_json, tun_fd, protect).map(|_| ())
+                }
             }
         }
     };
@@ -472,6 +498,47 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
         tracing::error!(error = %e, "node rebuild after network change failed");
     }
     result
+}
+
+/// Move the running engine's pump onto `tun_fd` (dup'd here) and close the
+/// old dup. The node keeps running; its medium-change detector and the names
+/// resolver are told the network moved, since a new tunnel usually comes
+/// with a new underlying network. Holds `LIFECYCLE` (caller) and `ENGINE`.
+fn swap_tun_locked(tun_fd: RawFd) -> Result<(), String> {
+    let owned_fd = unsafe { libc::fcntl(tun_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if owned_fd < 0 {
+        return Err(format!("dup tun fd: {}", std::io::Error::last_os_error()));
+    }
+    // The swap waits for the old reader and writer (up to SWAP_TIMEOUT), so
+    // it runs with the pump taken out of the slot: the UI thread's
+    // isRunning/status and the network callback's hint read ENGINE, and
+    // must not wait for it. LIFECYCLE (held by the caller) keeps start and
+    // stop out meanwhile; nothing else touches the pump.
+    let mut pump = {
+        let mut slot = ENGINE.lock().unwrap();
+        let Some(pump) = slot.as_mut().and_then(|e| e.pump.take()) else {
+            unsafe { libc::close(owned_fd) };
+            return Err("not running".into());
+        };
+        pump
+    };
+    let swapped = pump.swap_fd(owned_fd);
+    let mut slot = ENGINE.lock().unwrap();
+    let engine = slot.as_mut().expect("held by LIFECYCLE");
+    // Back in the slot either way: after a failed swap the restart joins it.
+    engine.pump = Some(pump);
+    if let Err(e) = swapped {
+        unsafe { libc::close(owned_fd) };
+        return Err(e);
+    }
+    let old_fd = std::mem::replace(&mut engine.tun_fd, owned_fd);
+    unsafe { libc::close(old_fd) };
+    engine.netmon.poke();
+    if let Some(names) = &engine.names {
+        names.network_changed();
+    }
+    tracing::info!("tunnel replaced; node kept running");
+    Ok(())
 }
 
 /// Wake the node's medium-change detector now: Kotlin calls this from the
@@ -571,7 +638,11 @@ pub fn query_json(command: &str, params_json: &str) -> String {
 /// thread. The `ENGINE` lock is dropped before the round-trip so status
 /// polls never queue behind a slow handshake initiation.
 pub fn connect_peer_json(npub: &str, address: &str) -> String {
-    let handle = ENGINE.lock().unwrap().as_ref().map(|e| e.cmd_handle.clone());
+    let handle = ENGINE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|e| e.cmd_handle.clone());
     let Some(handle) = handle else {
         return r#"{"status":"error","message":"not running"}"#.to_string();
     };
@@ -617,7 +688,11 @@ pub fn mesh_http_get_json(
     if port == 0 || !path.starts_with('/') {
         return error("bad port or path".into(), false);
     }
-    let headers_json = if headers_json.trim().is_empty() { "{}" } else { headers_json };
+    let headers_json = if headers_json.trim().is_empty() {
+        "{}"
+    } else {
+        headers_json
+    };
     let headers: Vec<(String, String)> =
         match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_json) {
             Ok(map) => map
@@ -781,7 +856,10 @@ mod tests {
             let lan = query_json("show_lan_peers", "");
             let lan: serde_json::Value = serde_json::from_str(&lan).unwrap();
             assert_eq!(lan["status"], "ok");
-            assert!(lan["data"]["lan_peers"].is_array(), "lan_peers array: {lan}");
+            assert!(
+                lan["data"]["lan_peers"].is_array(),
+                "lan_peers array: {lan}"
+            );
 
             // Command round-trip through the rx_loop: a bad npub must come
             // back as a structured error — proves the embedder command
@@ -795,6 +873,94 @@ mod tests {
             stop(); // idempotent
             unsafe { libc::close(write_fd) };
             unsafe { libc::close(read_fd) };
+        }
+    }
+
+    /// A new tunnel with the same config (an IPv6-route flip, a changed app
+    /// selection) moves the pump onto the new fd and keeps the node: same
+    /// engine, and traffic flows through the new fd both ways — a packet
+    /// read from it reaches the node, whose ICMPv6 answer is written back to
+    /// it. A changed config still rebuilds the node.
+    #[test]
+    fn a_new_tunnel_with_the_same_config_keeps_the_node() {
+        let _serial = engine_test_lock();
+        let identity = crate::config::derive_identity("").unwrap();
+        let config = serde_json::json!({
+            "nsec": identity.nsec,
+            "peers": [],
+            "enable_nostr": false,
+            "enable_fips_dns": false,
+            "forward_clearnet": false,
+            "battery_saver": false,
+            "log_level": "warn",
+        })
+        .to_string();
+        let pair = || {
+            let mut fds = [0i32; 2];
+            assert_eq!(
+                unsafe {
+                    libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr())
+                },
+                0
+            );
+            (fds[0], fds[1])
+        };
+        let engine_id = || ENGINE.lock().unwrap().as_ref().expect("running").start;
+
+        let (old_tun, old_app) = pair();
+        start(&config, old_tun, None).unwrap_or_else(|e| panic!("start: {e}"));
+        let first = engine_id();
+
+        let (new_tun, new_app) = pair();
+        network_changed(new_tun, None).expect("swap");
+        assert_eq!(engine_id(), first, "same node after the swap");
+
+        // A mesh destination nobody serves: the node answers Destination
+        // Unreachable from its own address, on the new fd.
+        let src: std::net::Ipv6Addr = identity.address.parse().unwrap();
+        let dst: std::net::Ipv6Addr = "fd12:3456::1".parse().unwrap();
+        let probe = crate::packet::build_ipv6_udp(src.octets(), dst.octets(), 40000, 9, b"swap");
+        let sent = unsafe { libc::write(new_app, probe.as_ptr().cast(), probe.len()) };
+        assert_eq!(sent, probe.len() as isize);
+        let mut pfd = libc::pollfd {
+            fd: new_app,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut pfd, 1, 5000) },
+            1,
+            "an answer on the new fd"
+        );
+        let mut buf = [0u8; 2048];
+        let n = unsafe { libc::read(new_app, buf.as_mut_ptr().cast(), buf.len()) };
+        assert!(n >= 40, "an IPv6 packet");
+        assert_eq!(buf[6], 58, "ICMPv6");
+        assert_eq!(buf[40], 1, "Destination Unreachable");
+
+        // The old fd is no longer served: a probe written to it gets nothing.
+        let sent = unsafe { libc::write(old_app, probe.as_ptr().cast(), probe.len()) };
+        assert_eq!(sent, probe.len() as isize);
+        let mut old = libc::pollfd {
+            fd: old_app,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut old, 1, 500) },
+            0,
+            "nothing on the old fd"
+        );
+
+        // A changed config rebuilds the node.
+        let changed = config.replace("\"log_level\":\"warn\"", "\"log_level\":\"error\"");
+        assert_ne!(changed, config);
+        network_changed(new_tun, Some(&changed)).expect("restart");
+        assert_ne!(engine_id(), first, "a new node for a new config");
+
+        stop();
+        for fd in [old_tun, old_app, new_tun, new_app] {
+            unsafe { libc::close(fd) };
         }
     }
 
@@ -858,7 +1024,10 @@ mod tests {
         let udp: Vec<_> = transports.iter().filter(|t| t["type"] == "udp").collect();
         assert_eq!(udp.len(), 2, "main + hotspot must both be up: {reply}");
         for t in &udp {
-            assert_eq!(t["state"], "up", "every UDP instance must have started: {reply}");
+            assert_eq!(
+                t["state"], "up",
+                "every UDP instance must have started: {reply}"
+            );
         }
 
         let ports: std::collections::HashSet<u16> = udp
@@ -871,6 +1040,10 @@ mod tests {
                     .port()
             })
             .collect();
-        assert_eq!(ports.len(), 1, "one shared port across both instances: {reply}");
+        assert_eq!(
+            ports.len(),
+            1,
+            "one shared port across both instances: {reply}"
+        );
     }
 }

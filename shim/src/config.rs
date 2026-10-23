@@ -165,10 +165,7 @@ pub struct ShimConfig {
 /// probe socket is dropped before fips binds, so there is a tiny window in
 /// which another process could take the port; fips would then fail to start
 /// that instance loudly. Returns `(main_bind, hotspot_bind, dial_prefix)`.
-fn hotspot_binds(
-    udp_bind: &str,
-    hs: &HotspotConfig,
-) -> Result<(String, String, String), String> {
+fn hotspot_binds(udp_bind: &str, hs: &HotspotConfig) -> Result<(String, String, String), String> {
     let addr: std::net::IpAddr = hs
         .addr
         .trim()
@@ -491,7 +488,11 @@ mod tests {
         assert_eq!(c.names_dnssec, Some(false));
         assert_eq!(c.names_pins_path.as_deref(), Some("/p/pins.json"));
         assert_eq!(c.names_mesh_relays, vec!["ws://x.fips:80"]);
-        assert_eq!(c.names_witnesses.len(), 2, "validated by names.rs, not here");
+        assert_eq!(
+            c.names_witnesses.len(),
+            2,
+            "validated by names.rs, not here"
+        );
         assert_eq!(c.names_attestation_threshold, Some(1));
     }
 
@@ -649,17 +650,33 @@ mod tests {
         let main: std::net::SocketAddr = instances["main"].bind_addr().parse().unwrap();
         let hotspot: std::net::SocketAddr = instances["hotspot"].bind_addr().parse().unwrap();
         assert!(main.ip().is_unspecified(), "main stays wildcard");
-        assert_eq!(hotspot.ip(), "192.168.49.23".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(
+            hotspot.ip(),
+            "192.168.49.23".parse::<std::net::IpAddr>().unwrap()
+        );
         assert_ne!(main.port(), 0, "shared port must be concrete");
-        assert_eq!(main.port(), hotspot.port(), "one mDNS-advertised port for all interfaces");
+        assert_eq!(
+            main.port(),
+            hotspot.port(),
+            "one mDNS-advertised port for all interfaces"
+        );
 
         assert_eq!(instances["hotspot"].dial_prefixes(), ["192.168.49.23/24"]);
         assert!(instances["main"].dial_prefixes().is_empty());
         // Without it on BOTH, the second bind fails with EADDRINUSE and the
         // node starts degraded (engine::tests has the end-to-end check).
-        assert!(instances["main"].share_port(), "main must opt in to sharing");
-        assert!(instances["hotspot"].share_port(), "hotspot must opt in to sharing");
-        assert!(config.node.rendezvous.lan.enabled, "hotspot forces LAN mDNS");
+        assert!(
+            instances["main"].share_port(),
+            "main must opt in to sharing"
+        );
+        assert!(
+            instances["hotspot"].share_port(),
+            "hotspot must opt in to sharing"
+        );
+        assert!(
+            config.node.rendezvous.lan.enabled,
+            "hotspot forces LAN mDNS"
+        );
     }
 
     /// An explicit udp_bind port is adopted verbatim by both instances.

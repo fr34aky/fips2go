@@ -31,12 +31,12 @@ pub mod pump;
 pub fn init_logging(level: Option<&str>) {
     use std::sync::OnceLock;
     use tracing_subscriber::{
-        layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter, Registry,
+        EnvFilter, Registry, layer::SubscriberExt, reload, util::SubscriberInitExt,
     };
     static FILTER: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
 
-    let filter = EnvFilter::try_new(level.unwrap_or("info"))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_new(level.unwrap_or("info")).unwrap_or_else(|_| EnvFilter::new("info"));
 
     if let Some(handle) = FILTER.get() {
         let _ = handle.reload(filter);

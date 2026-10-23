@@ -32,10 +32,11 @@ import com.google.android.material.appbar.MaterialToolbar
  *
  * The tunnel takes this set only when it is (re-)established, so a change made
  * while connected is applied by asking the service for a replacement tunnel
- * ([FipsVpnService.requestRebind]). That restarts the node (~2 s of
- * "Reconnecting…"), so it is sent ONCE, when the screen is left with a
+ * ([FipsVpnService.requestRebind]). The node keeps running across it (the
+ * shim moves its pump onto the new tunnel), but every app's connections move
+ * to a new interface, so it is sent ONCE, when the screen is left with a
  * selection that differs from the one it was opened with — not per toggle,
- * which would bounce the mesh on every tap. The service compares the stored
+ * which would replace the tunnel on every tap. The service compares the stored
  * set against the live tunnel's itself, so a redundant nudge is a no-op. While
  * connected the picker shows a note saying so, recomputed on every resume
  * rather than latched, so it disappears once the user disconnects.

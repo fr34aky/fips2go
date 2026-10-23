@@ -31,7 +31,9 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
-use crate::meshhttp::{is_icmp_unreachable, random_u64, register_identity, Device, FetchError, MeshLink};
+use crate::meshhttp::{
+    Device, FetchError, MeshLink, is_icmp_unreachable, random_u64, register_identity,
+};
 
 /// How long a connection may take to be accepted by the far node.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -92,7 +94,8 @@ impl MeshRelayProxy {
     pub fn start(link: Arc<MeshLink>, url: &str) -> Result<Self, String> {
         let (npub, port, path) =
             parse_mesh_relay(url).ok_or_else(|| format!("{url}: not a ws://<npub>.fips relay"))?;
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("{url}: listen: {e}"))?;
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|e| format!("{url}: listen: {e}"))?;
         let local = listener.local_addr().map_err(|e| e.to_string())?;
         let token = format!("{:016x}{:016x}", random_u64(), random_u64());
         let stop = Arc::new(AtomicBool::new(false));
@@ -169,7 +172,9 @@ fn accept_loop(listener: TcpListener, relay: Arc<Relay>) {
 fn admit(head: &[u8], token: &str, path: &str) -> Option<Vec<u8>> {
     head.windows(4).position(|w| w == b"\r\n\r\n")?;
     let line_end = head.iter().position(|b| *b == b'\n')?;
-    let line = std::str::from_utf8(&head[..line_end]).ok()?.trim_end_matches('\r');
+    let line = std::str::from_utf8(&head[..line_end])
+        .ok()?
+        .trim_end_matches('\r');
     let target = line.strip_prefix("GET ")?.strip_suffix(" HTTP/1.1")?;
     let rest = target.strip_prefix('/')?.strip_prefix(token)?;
     if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('?')) {
@@ -245,7 +250,8 @@ fn pipe(relay: &Relay, mut local: TcpStream) -> Result<(), FetchError> {
         return Err(FetchError::other("that is this node's own address"));
     }
     // The token first: nothing reaches the mesh for a caller without it.
-    let Some(first) = read_head(&mut local).and_then(|h| admit(&h, &relay.token, &relay.path)) else {
+    let Some(first) = read_head(&mut local).and_then(|h| admit(&h, &relay.token, &relay.path))
+    else {
         tracing::debug!(relay = %relay.name, "refused a loopback connection without the token");
         return Ok(());
     };
@@ -272,7 +278,9 @@ fn pipe(relay: &Relay, mut local: TcpStream) -> Result<(), FetchError> {
         });
     }
     {
-        let mut reader = local.try_clone().map_err(|e| FetchError::other(e.to_string()))?;
+        let mut reader = local
+            .try_clone()
+            .map_err(|e| FetchError::other(e.to_string()))?;
         let (tx, backlog, done) = (tx.clone(), backlog.clone(), done.clone());
         std::thread::spawn(move || {
             let mut buf = vec![0u8; 16 * 1024];
@@ -282,7 +290,12 @@ fn pipe(relay: &Relay, mut local: TcpStream) -> Result<(), FetchError> {
                         let _ = tx.send(Event::LocalClosed);
                         break;
                     }
-                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                        ) =>
+                    {
                         continue;
                     }
                     Err(_) => {
@@ -290,7 +303,9 @@ fn pipe(relay: &Relay, mut local: TcpStream) -> Result<(), FetchError> {
                         break;
                     }
                     Ok(n) => {
-                        if !backlog.add(n, &done) || tx.send(Event::Local(buf[..n].to_vec())).is_err() {
+                        if !backlog.add(n, &done)
+                            || tx.send(Event::Local(buf[..n].to_vec())).is_err()
+                        {
                             break;
                         }
                     }
@@ -304,9 +319,13 @@ fn pipe(relay: &Relay, mut local: TcpStream) -> Result<(), FetchError> {
     let outbound = link.outbound_tx.clone();
     let egress = move |mut packet: Vec<u8>| -> Result<(), FetchError> {
         match processor.process(&mut packet) {
-            TunPacketAction::Forward => outbound.blocking_send(packet).map_err(|_| FetchError::restarted()),
+            TunPacketAction::Forward => outbound
+                .blocking_send(packet)
+                .map_err(|_| FetchError::restarted()),
             TunPacketAction::Hairpin => Err(FetchError::other("that is this node's own address")),
-            TunPacketAction::Respond(_) => Err(FetchError::unreachable(format!("the node refused to send to {addr}"))),
+            TunPacketAction::Respond(_) => Err(FetchError::unreachable(format!(
+                "the node refused to send to {addr}"
+            ))),
             TunPacketAction::Drop => Ok(()),
         }
     };
@@ -357,12 +376,18 @@ fn run<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
         tcp::SocketBuffer::new(vec![0; 64 * 1024]),
         tcp::SocketBuffer::new(vec![0; 64 * 1024]),
     );
-    socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(KEEPALIVE.as_secs())));
+    socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(
+        KEEPALIVE.as_secs(),
+    )));
     let mut sockets = SocketSet::new(Vec::new());
     let handle = sockets.add(socket);
     sockets
         .get_mut::<tcp::Socket>(handle)
-        .connect(iface.context(), (IpAddress::Ipv6(remote.0), remote.1), local_addr.1)
+        .connect(
+            iface.context(),
+            (IpAddress::Ipv6(remote.0), remote.1),
+            local_addr.1,
+        )
         .map_err(|e| FetchError::other(format!("connect: {e}")))?;
 
     let where_ = format!("[{}]:{}", remote.0, remote.1);
@@ -437,7 +462,12 @@ fn run<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
                 Ok(n) => {
                     to_local.drain(..n);
                 }
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) =>
+                {
                     break;
                 }
                 Err(_) => {
@@ -450,7 +480,12 @@ fn run<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
         let socket = sockets.get_mut::<tcp::Socket>(handle);
         // The relay finished sending: pass that on once everything it sent
         // is delivered, and close our side once ours is out (below).
-        if established && !socket.may_recv() && !socket.can_recv() && to_local.is_empty() && !local_shut {
+        if established
+            && !socket.may_recv()
+            && !socket.can_recv()
+            && to_local.is_empty()
+            && !local_shut
+        {
             let _ = local.shutdown(Shutdown::Write);
             local_shut = true;
             if !close_sent && to_mesh.is_empty() {
@@ -522,7 +557,11 @@ mod tests {
             parse_mesh_relay(&format!("ws://{}.FIPS", npub.to_string().to_uppercase())),
             Some((npub, 80, String::new()))
         );
-        assert_eq!(parse_mesh_relay(&format!("wss://{npub}.fips")), None, "no TLS on the mesh");
+        assert_eq!(
+            parse_mesh_relay(&format!("wss://{npub}.fips")),
+            None,
+            "no TLS on the mesh"
+        );
         assert_eq!(parse_mesh_relay("ws://relay.example.org"), None);
         assert_eq!(parse_mesh_relay("ws://[fd00::1]:80"), None);
         assert_eq!(parse_mesh_relay(&format!("ws://{npub}.fips:0")), None);
@@ -530,10 +569,15 @@ mod tests {
 
     #[test]
     fn only_the_token_holder_is_admitted() {
-        let head = |target: &str| format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:1\r\nUpgrade: websocket\r\n\r\nrest");
+        let head = |target: &str| {
+            format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:1\r\nUpgrade: websocket\r\n\r\nrest")
+        };
         let ok = admit(head("/abc").as_bytes(), "abc", "").unwrap();
         assert!(ok.starts_with(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:1\r\n"));
-        assert!(ok.ends_with(b"\r\n\r\nrest"), "bytes after the head pass through");
+        assert!(
+            ok.ends_with(b"\r\n\r\nrest"),
+            "bytes after the head pass through"
+        );
         // The relay's own path replaces the token.
         let ok = admit(head("/abc/nostr").as_bytes(), "abc", "/nostr").unwrap();
         assert!(ok.starts_with(b"GET /nostr HTTP/1.1\r\n"));
@@ -541,7 +585,10 @@ mod tests {
             assert!(admit(head(bad).as_bytes(), "abc", "").is_none(), "{bad}");
         }
         assert!(admit(b"POST /abc HTTP/1.1\r\n\r\n", "abc", "").is_none());
-        assert!(admit(b"GET /abc HTTP/1.1\r\n", "abc", "").is_none(), "incomplete head");
+        assert!(
+            admit(b"GET /abc HTTP/1.1\r\n", "abc", "").is_none(),
+            "incomplete head"
+        );
     }
 
     /// The pipe between a real loopback socket and a smoltcp echo server on
