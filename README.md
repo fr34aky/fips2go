@@ -125,6 +125,123 @@ mDNS-sightings query, dial-scoped UDP instances for the hotspot, and a
 `NetmonTrigger` to wake the medium-change detector), so it clones and builds
 without a sibling fips checkout.
 
+## Ecosystem: fips2go, fips-ui and fips-pub-domains
+
+fips2go is the phone end of three projects built around the same fips mesh.
+The other two run on nodes you (or a site owner) operate — a home server, a
+VPS, a router — and offer services that the phone uses over the mesh. None of
+them is required: a fresh fips2go install joins the public mesh on its own,
+and each service below is an addition.
+
+```
+  phone                                    nodes on the mesh
+ ┌─────────────────────┐  names sync,      ┌─────────────────────────────────┐
+ │ fips2go             │  dashboard :8321  │ your node (Linux, FreeBSD)      │
+ │                     │ ────────────────► │ fips-ui                         │
+ │ DNS proxy with      │                   │   │ manages, on this node only  │
+ │ pubdom-core +       │                   │   ▼                             │
+ │ pubdom-resolve      │                   │ fips-pubdom-server (optional)   │
+ │                     │                   └─────────────────────────────────┘
+ │                     │  DNS over the     ┌─────────────────────────────────┐
+ │                     │  mesh (port from  │ a site's node                   │
+ │                     │ ────────────────► │ fips-pubdom-server              │
+ │                     │  its TXT record)  └─────────────────────────────────┘
+ │                     │  Nostr, offline   ┌─────────────────────────────────┐
+ │                     │ ────────────────► │ a relay on a fips node          │
+ └─────────────────────┘                   └─────────────────────────────────┘
+        every arrow runs over the fips mesh: fd00::/8, end-to-end encrypted
+```
+
+| Project | Runs on | What it gives fips2go |
+|---|---|---|
+| **fips2go** (this repo) | Android | The mesh node, per-app tunnel and DNS proxy. Consumes the two services below; links the `pubdom-*` crates directly. |
+| **[fips-ui](https://github.com/fr34aky/fips-ui)** | a fips node; the features the phone uses need Linux, NixOS or FreeBSD (macOS experimental) | A web dashboard for a fips node. Serves the phone its **Mesh names** and its **dashboard** over the mesh, and is where an operator **manages fips-pub-domains** on that same node. |
+| **[fips-pub-domains](https://github.com/fr34aky/fips-pub-domains)** | the node serving a domain (`fips-pubdom-server`); desktops (`fips-pubdomd`); fips2go (the library crates) | **Public domain names over fips**: `www.example.org` reached over the mesh by its ordinary name, verified and pinned, also with no Internet. |
+
+### fips-ui → fips2go: names and a dashboard
+
+Both uses go through fips-ui's *Web UI over the mesh*, which exists only
+where fips-ui can load its kernel guard — Linux and NixOS (nftables) and
+FreeBSD (pf); macOS is experimental, pfSense and Windows have none. On the
+node, Access → **Web UI over the mesh** must be switched on (it needs helper
+v5 or later; without the guard nobody is admitted from the mesh) and the
+phone's npub added as a **viewer**. Viewer is enough for everything below;
+do not make the phone an admin: fips-ui grants a role to everything that
+leaves the listed node under its npub, which on a phone means every mesh
+app you selected, a browser running arbitrary web pages included — and
+admin is root on that node ([fips-ui
+docs/mesh-access.md](https://github.com/fr34aky/fips-ui/blob/main/docs/mesh-access.md)).
+
+- **Mesh names sync.** Overview → *Mesh names* can pull the name → npub
+  address book from that node (off by default): fips2go sends
+  `GET /api/hosts` to its mesh address through the shim's in-process HTTP
+  client (`meshhttp.rs` — the app's own sockets cannot reach `fd00::/8`),
+  hourly and on *Sync now*, only while connected. The names land in fips-ui's
+  own marked block at the end of the phone's hosts file, so a synced name
+  wins over a local one, and turning sync off removes the block. It is the
+  same protocol fips-ui nodes use among themselves ([fips-ui
+  docs/hosts-sync.md](https://github.com/fr34aky/fips-ui/blob/main/docs/hosts-sync.md)),
+  so the phone sits in that tree as a follower of whichever node you name.
+  fips-ui's guard drops TCP it does not admit, so a missing viewer entry,
+  mesh access switched off, or no guard loaded all show up on the phone as
+  a timeout, not a 403.
+- **The dashboard itself.** With a browser selected as a mesh app, the phone
+  opens the node's fips-ui at `http://<name>.fips:8321` (or `<npub>.fips`;
+  8321 is fips-ui's default). There is no login: the mesh authenticates the
+  source address. The same viewer entry serves both uses.
+
+### fips-pub-domains → fips2go: public names over the mesh
+
+- **On the phone, built in.** The resolver is not a separate app: the
+  shim links fips-pub-domains' `pubdom-core` (policy, no I/O) and
+  `pubdom-resolve` (relays, TXT verification, pin file) as pinned git
+  dependencies and runs them inside the VPN's DNS proxy (`names.rs`). Every
+  non-`.fips` name a mesh app asks for is offered to it first; a domain bound
+  to a mesh node answers with that node's `fd…` address, anything else
+  resolves as before. Settings → *Public domain names over fips* (on by
+  default).
+- **On the site's node.** The service the phone uses is
+  `fips-pubdom-server`: it publishes the domain's signed claim to Nostr and
+  answers the per-name lookups (`www` → `CNAME <npub>.fips.`) as DNS over the
+  mesh, on the port named in the domain's TXT record and claim (5355 by
+  default), which fips2go reaches through its in-process smoltcp stack
+  (`meshudp.rs`). When the CNAME names another node, the phone pings that
+  node over the mesh before answering. The site owner adds one `_fips-dns`
+  TXT record at their DNS hoster; that record, DNSSEC-validated where the
+  zone is signed, is what makes the phone trust the claim before it pins it.
+- **Direct links.** With Settings → *Link directly to the servers of domains
+  you use* (on by default), fips2go peers with the servers of up to two of
+  its most recently verified domains — those verified by DNSSEC or by
+  several resolvers, read when the node starts, so a domain verified while
+  connected becomes a peer at the next connect. Their first lookup after a
+  connect then does not wait for mesh discovery.
+- **Offline.** A pinned domain keeps resolving with no Internet. For a domain
+  never seen before, a Nostr relay running *on a fips node* — a separate
+  service from `fips-pubdom-server`, listed in Settings → *Mesh relays for
+  public names* and carried over the mesh by `meshtcp.rs` — lets the phone
+  fetch claims and verify their DNSSEC proof, or — with witness npubs
+  configured — accept attestations from nodes you trust. *Trust my Mesh
+  names as witnesses* (off by default) counts the fips-ui node the names
+  sync from, and every named node, among them.
+
+Spec and phone-specific details: [fips-pub-domains
+docs/spec.md](https://github.com/fr34aky/fips-pub-domains/blob/main/docs/spec.md)
+and
+[docs/android.md](https://github.com/fr34aky/fips-pub-domains/blob/main/docs/android.md).
+
+### Where they meet: fips-ui manages fips-pub-domains
+
+On a node that serves a domain or resolves for a desktop, fips-ui's *Public
+domains* page manages the fips-pub-domains installed **on that same node**,
+read from its local control sockets: it installs and updates
+`fips-pubdom-server` and `fips-pubdomd` (Linux with systemd), edits their
+zone files and configuration, shows the TXT record to add, and lists which
+domains are served, attested and pinned ([fips-ui
+docs/public-domains.md](https://github.com/fr34aky/fips-ui/blob/main/docs/public-domains.md)).
+So a typical setup is one home or VPS node running fips, fips-ui and —
+optionally — `fips-pubdom-server`, with fips2go on the phone syncing names
+from it and reaching its services by name.
+
 ## Layout
 
 | Path | What |
