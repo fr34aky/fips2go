@@ -50,6 +50,15 @@ object ConfigStore {
      */
     const val NAMES_WITNESSES_FROM_HOSTS = "names_witnesses_from_hosts"
     /**
+     * Keep a direct link to the servers of the public domains in use (the
+     * most recently verified, up to [NAMES_DIRECT_SERVER_COUNT]): after a
+     * connect the mesh took up to 30 s to find such a server, which a
+     * direct link skips. On by default; the server's operator then sees the
+     * phone's public IP and when it comes online, and the public relays
+     * which servers it links to, so it is a switch.
+     */
+    const val NAMES_DIRECT_SERVERS = "names_direct_servers"
+    /**
      * DNSSEC for public names: validate the domain's DNS record and accept
      * the DNSSEC proof in its claim. Off, only witnesses vouch offline for a
      * domain never seen. On by default; off is for testing the witness path.
@@ -130,6 +139,9 @@ object ConfigStore {
     const val DEF_NAMES_ATTESTATION_K = 2
     const val DEF_NAMES_DNSSEC = true
     const val DEF_NAMES_WITNESSES_FROM_HOSTS = false
+    const val DEF_NAMES_DIRECT_SERVERS = true
+    /** How many servers [NAMES_DIRECT_SERVERS] links: each is one kept-alive link. */
+    const val NAMES_DIRECT_SERVER_COUNT = 2
     const val DEF_HOTSPOT = true
     const val DEF_AUTO_UPDATE = true
     const val DEF_FORWARD_CLEARNET = true
@@ -291,6 +303,9 @@ object ConfigStore {
 
     fun namesWitnessesFromHosts(context: Context) =
         prefs(context).getBoolean(NAMES_WITNESSES_FROM_HOSTS, DEF_NAMES_WITNESSES_FROM_HOSTS)
+
+    fun namesDirectServers(context: Context) =
+        prefs(context).getBoolean(NAMES_DIRECT_SERVERS, DEF_NAMES_DIRECT_SERVERS)
 
     /**
      * The witnesses the hosts file implies: the node the names sync from
@@ -547,6 +562,12 @@ object ConfigStore {
             // Sent whenever public names are on, so the switch means what
             // it shows whatever the library's default becomes.
             config.put("names_dnssec", namesDnssec(context))
+            // Always sent with public names, off included: the shim's own
+            // default is on.
+            config.put(
+                "names_server_peers",
+                if (namesDirectServers(context)) NAMES_DIRECT_SERVER_COUNT else 0
+            )
         }
 
         // Only a customised list is sent; omitted → fips's built-in relays
