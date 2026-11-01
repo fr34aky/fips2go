@@ -73,7 +73,7 @@ jobs:
           # is present so it can honour the pin.
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2, 2026-08-06
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2, 2026-08-06
         with:
           workspaces: shim -> target
 
@@ -117,7 +117,7 @@ jobs:
           toolchain: stable
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2, 2026-08-06
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2, 2026-08-06
         with:
           workspaces: shim -> target
 
@@ -142,7 +142,7 @@ jobs:
           echo "armeabi-v7a LOAD alignment: $got"
           [ "$got" = "0x1000" ] || { echo "::error::armeabi-v7a must stay 4 KB aligned"; exit 1; }
 
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0, 2026-09-28
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.0, 2026-09-28
         with:
           gradle-version: '8.7'
 
