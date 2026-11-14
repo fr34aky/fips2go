@@ -367,18 +367,27 @@ impl DnsProxy {
                 hook(socket.as_raw_fd());
             }
         }
-        socket.set_read_timeout(Some(QUERY_TIMEOUT)).ok()?;
-        socket.send_to(query, server).ok()?;
+        // Connected, after the protect hook (which picks the network): the
+        // kernel then delivers only what `server` itself sent. Unconnected,
+        // any host that reached this port with the right 16-bit id had its
+        // datagram taken as the answer, and three wrong ones ended the wait.
+        socket.connect(server).ok()?;
+        socket.send(query).ok()?;
         let mut buf = vec![0u8; MAX_RESPONSE];
-        // Take the first response whose transaction id matches the query.
-        for _ in 0..3 {
-            let (n, _from) = socket.recv_from(&mut buf).ok()?;
+        // The first response whose transaction id matches the query, within
+        // one timeout for the exchange however many others arrive.
+        let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
+        loop {
+            let left = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|d| !d.is_zero())?;
+            socket.set_read_timeout(Some(left)).ok()?;
+            let n = socket.recv(&mut buf).ok()?;
             if n >= 2 && query.len() >= 2 && buf[..2] == query[..2] {
                 buf.truncate(n);
                 return Some(buf);
             }
         }
-        None
     }
 }
 
@@ -664,6 +673,43 @@ mod tests {
         udp[6] = 17;
         assert!(!DnsProxy::intercepts_tcp(&udp, &sentinel));
         assert!(!DnsProxy::intercepts_tcp(&pkt[..59], &sentinel));
+    }
+
+    /// A datagram from anyone but the upstream asked is not the answer,
+    /// right id or not; nor does a run of them end the wait for the real one.
+    #[test]
+    fn only_the_upstream_asked_can_answer() {
+        let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (n, from) = upstream.recv_from(&mut buf).unwrap();
+            let reply = |marker: u8| {
+                let mut r = buf[..n].to_vec();
+                r[2] |= 0x80;
+                r.push(marker);
+                r
+            };
+            // Someone else, who knows the port and the id, gets in first.
+            let other = UdpSocket::bind("127.0.0.1:0").unwrap();
+            for _ in 0..5 {
+                other.send_to(&reply(b'X'), from).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            upstream.send_to(&reply(b'R'), from).unwrap();
+        });
+        let (writer_tx, _writer_rx) = std::sync::mpsc::channel();
+        let proxy = Arc::new(DnsProxy {
+            local_responder: "[::1]:1".parse().unwrap(),
+            upstreams: vec![upstream_addr],
+            writer_tx,
+            protect: None,
+            hosts: None,
+            names: None,
+            in_flight: Default::default(),
+        });
+        let answer = proxy.answer(&query_for("example.com")).expect("an answer");
+        assert_eq!(answer.last(), Some(&b'R'), "the upstream's, not the other sender's");
     }
 
     /// Unresolvable upstreams must yield SERVFAIL, not silence.
