@@ -9,7 +9,9 @@
 //! i.e. a tun2socks-style forwarder scoped to the apps the user opted in.
 //!
 //! Only the selected apps' non-mesh traffic reaches here; mesh and DNS are
-//! handled earlier in the pump.
+//! handled earlier in the pump — except DNS over TCP to the tunnel's
+//! resolver, which needs a TCP stack to end the connection and so comes
+//! here too: see [`DnsOverTcp`].
 
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -28,12 +30,29 @@ use tokio::sync::Notify;
 
 use fips::SocketProtect;
 
+use crate::dns::DnsProxy;
+
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the app side gets to take the FIN that tells it its server is
 /// gone (see [`forward_tcp`]).
 const APP_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_MAX_DATAGRAM: usize = 65535;
+/// A DNS-over-TCP connection with nothing to read is closed after this.
+const DNS_TCP_IDLE: Duration = Duration::from_secs(10);
+/// One exchange with one upstream over TCP: connect, ask, read the answer.
+const DNS_TCP_UPSTREAM: Duration = Duration::from_secs(5);
+
+/// DNS over TCP to the tunnel's resolver. A resolver that got a truncated
+/// answer over UDP asks again over TCP, at the same address — the in-tunnel
+/// sentinel, which no host has. The stack here accepts that connection and
+/// each message on it is answered by the DNS proxy, the way a UDP query is.
+#[derive(Clone)]
+pub struct DnsOverTcp {
+    /// `[sentinel]:53`, the destination that marks such a connection.
+    pub addr: std::net::SocketAddr,
+    pub proxy: Arc<DnsProxy>,
+}
 
 /// The `ipstack` "device": an `AsyncRead`/`AsyncWrite` of raw IP packets.
 /// Reads the non-mesh packets the pump classifier feeds it; writes the
@@ -120,6 +139,7 @@ impl Forwarder {
         protect: Option<SocketProtect>,
         running: Arc<AtomicBool>,
         mtu: u16,
+        dns: Option<DnsOverTcp>,
     ) -> io::Result<Self> {
         let shutdown = Arc::new(Notify::new());
         let shutdown_rx = shutdown.clone();
@@ -137,7 +157,7 @@ impl Forwarder {
                         return;
                     }
                 };
-                rt.block_on(run(inbound, to_tun, protect, running, shutdown_rx, mtu));
+                rt.block_on(run(inbound, to_tun, protect, running, shutdown_rx, mtu, dns));
                 // A plain `drop(rt)` waits unboundedly for blocking-pool
                 // threads; on-device one parked such thread kept this join —
                 // and the app's whole disconnect — hanging. Bound the wait;
@@ -195,6 +215,7 @@ async fn run(
     running: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
     mtu: u16,
+    dns: Option<DnsOverTcp>,
 ) {
     let device = ForwardDevice {
         inbound,
@@ -219,6 +240,15 @@ async fn run(
         };
         match accepted {
             Ok(IpStackStream::Tcp(tcp)) => {
+                if let Some(dns) = dns.as_ref().filter(|d| d.addr == tcp.peer_addr()) {
+                    let proxy = dns.proxy.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = serve_dns_tcp(tcp, proxy).await {
+                            tracing::debug!(error = %e, "DNS-over-TCP connection ended");
+                        }
+                    });
+                    continue;
+                }
                 let protect = protect.clone();
                 tokio::spawn(async move {
                     if let Err(e) = forward_tcp(tcp, protect).await {
@@ -286,6 +316,106 @@ async fn close_app_side(mut client: ipstack::IpStackTcpStream, error: io::Error)
     error
 }
 
+/// Serve DNS over TCP on `client` (RFC 1035 §4.2.2: each message behind a
+/// two-byte length) until it closes, goes idle, or sends something that is
+/// not a DNS message.
+async fn serve_dns_tcp<S>(mut client: S, proxy: Arc<DnsProxy>) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let mut len = [0u8; 2];
+        match tokio::time::timeout(DNS_TCP_IDLE, client.read_exact(&mut len)).await {
+            Ok(Ok(_)) => {}
+            // Closed between messages, or idle: the ordinary ends.
+            Ok(Err(_)) | Err(_) => break,
+        }
+        let len = u16::from_be_bytes(len) as usize;
+        if len < 12 {
+            break; // shorter than a DNS header
+        }
+        let mut query = vec![0u8; len];
+        match tokio::time::timeout(DNS_TCP_IDLE, client.read_exact(&mut query)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => break,
+        }
+        let Some(answer) = answer_dns_tcp(&proxy, query).await else {
+            break;
+        };
+        let Ok(answer_len) = u16::try_from(answer.len()) else {
+            break;
+        };
+        // One write: some resolvers read the length and the message at once.
+        let mut framed = Vec::with_capacity(2 + answer.len());
+        framed.extend_from_slice(&answer_len.to_be_bytes());
+        framed.extend_from_slice(&answer);
+        client.write_all(&framed).await?;
+    }
+    let _ = tokio::time::timeout(APP_CLOSE_TIMEOUT, client.shutdown()).await;
+    Ok(())
+}
+
+/// The answer to one message that arrived over TCP. The proxy decides as
+/// it does for UDP (`.fips`, public names over fips, the upstreams), and
+/// asks the upstreams over UDP; when what comes back is truncated — the
+/// case a resolver turns to TCP for — the upstreams are asked again over
+/// TCP and that answer is the one sent. It is sent as the upstream gave it:
+/// a TTL cap the proxy put on the truncated answer is not carried over.
+async fn answer_dns_tcp(proxy: &Arc<DnsProxy>, query: Vec<u8>) -> Option<Vec<u8>> {
+    // The proxy's lookup blocks, for seconds when the upstreams are slow.
+    let Some(slot) = proxy.slot() else {
+        return crate::dns::servfail_for(&query);
+    };
+    let (p, q) = (proxy.clone(), query.clone());
+    let answer = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        p.answer(&q)
+    })
+    .await
+    .ok()
+    .flatten()?;
+    let truncated = answer.get(2).is_some_and(|flags| flags & 0x02 != 0);
+    if truncated {
+        for &upstream in &proxy.upstreams {
+            let asked = ask_upstream_tcp(upstream, &query, &proxy.protect);
+            if let Ok(Ok(full)) = tokio::time::timeout(DNS_TCP_UPSTREAM, asked).await {
+                return Some(full);
+            }
+        }
+    }
+    Some(answer)
+}
+
+/// One query to `upstream` over TCP, on a protected socket.
+async fn ask_upstream_tcp(
+    upstream: std::net::SocketAddr,
+    query: &[u8],
+    protect: &Option<SocketProtect>,
+) -> io::Result<Vec<u8>> {
+    let socket = if upstream.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    protect_fd(&socket, protect);
+    let mut server = socket.connect(upstream).await?;
+    let len = u16::try_from(query.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "query too long"))?;
+    let mut framed = Vec::with_capacity(2 + query.len());
+    framed.extend_from_slice(&len.to_be_bytes());
+    framed.extend_from_slice(query);
+    server.write_all(&framed).await?;
+    let mut len = [0u8; 2];
+    server.read_exact(&mut len).await?;
+    let mut answer = vec![0u8; u16::from_be_bytes(len) as usize];
+    server.read_exact(&mut answer).await?;
+    if answer.len() < 12 || answer[..2] != query[..2] {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not the answer to this query"));
+    }
+    Ok(answer)
+}
+
 async fn forward_udp(
     mut client: ipstack::IpStackUdpStream,
     protect: Option<SocketProtect>,
@@ -334,7 +464,8 @@ mod tests {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let (to_tun, _to_tun_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let running = Arc::new(AtomicBool::new(true));
-        let forwarder = Forwarder::spawn(inbound_rx, to_tun, None, running.clone(), 1280).unwrap();
+        let forwarder =
+            Forwarder::spawn(inbound_rx, to_tun, None, running.clone(), 1280, None).unwrap();
 
         running.store(false, Ordering::Relaxed);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -346,5 +477,113 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("forwarder join hung despite shutdown signal");
         drop(inbound_tx); // keep the sender alive until after the join
+    }
+
+    /// A minimal query: id, RD, one question (`example.com A`).
+    fn query(id: u16) -> Vec<u8> {
+        let mut q = id.to_be_bytes().to_vec();
+        q.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+        q.extend_from_slice(b"\x07example\x03com\x00");
+        q.extend_from_slice(&[0, 1, 0, 1]);
+        q
+    }
+
+    /// The query turned into a response, truncated or not, with `marker`
+    /// appended so the test can tell which transport's answer it got.
+    fn response(query: &[u8], truncated: bool, marker: u8) -> Vec<u8> {
+        let mut r = query.to_vec();
+        r[2] |= 0x80 | if truncated { 0x02 } else { 0 };
+        r.push(marker);
+        r
+    }
+
+    /// An upstream on one port over both transports: UDP answers with
+    /// `udp_truncated`, TCP always in full.
+    fn upstream(udp_truncated: bool) -> std::net::SocketAddr {
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = udp.local_addr().unwrap();
+        let tcp = std::net::TcpListener::bind(addr).unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = udp.recv_from(&mut buf) {
+                let _ = udp.send_to(&response(&buf[..n], udp_truncated, b'U'), from);
+            }
+        });
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while let Ok((mut conn, _)) = tcp.accept() {
+                let mut len = [0u8; 2];
+                if conn.read_exact(&mut len).is_err() {
+                    continue;
+                }
+                let mut q = vec![0u8; u16::from_be_bytes(len) as usize];
+                if conn.read_exact(&mut q).is_err() {
+                    continue;
+                }
+                let r = response(&q, false, b'T');
+                let mut framed = (r.len() as u16).to_be_bytes().to_vec();
+                framed.extend_from_slice(&r);
+                let _ = conn.write_all(&framed);
+            }
+        });
+        addr
+    }
+
+    fn proxy(upstream: std::net::SocketAddr) -> Arc<DnsProxy> {
+        let (writer_tx, _) = std::sync::mpsc::channel();
+        Arc::new(DnsProxy {
+            local_responder: "[::1]:1".parse().unwrap(),
+            upstreams: vec![upstream],
+            writer_tx,
+            protect: None,
+            hosts: None,
+            names: None,
+            in_flight: Default::default(),
+        })
+    }
+
+    /// Two framed queries on one connection, each answered in its frame.
+    fn ask_twice(proxy: Arc<DnsProxy>) -> Vec<Vec<u8>> {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (mut app, served) = tokio::io::duplex(4096);
+            let server = tokio::spawn(serve_dns_tcp(served, proxy));
+            let mut answers = Vec::new();
+            for id in [0x1111u16, 0x2222] {
+                let q = query(id);
+                let mut framed = (q.len() as u16).to_be_bytes().to_vec();
+                framed.extend_from_slice(&q);
+                app.write_all(&framed).await.unwrap();
+                let mut len = [0u8; 2];
+                app.read_exact(&mut len).await.unwrap();
+                let mut a = vec![0u8; u16::from_be_bytes(len) as usize];
+                app.read_exact(&mut a).await.unwrap();
+                assert_eq!(a[..2], id.to_be_bytes());
+                answers.push(a);
+            }
+            // Closing the app's side ends the connection cleanly.
+            drop(app);
+            server.await.unwrap().unwrap();
+            answers
+        })
+    }
+
+    /// An answer that fits is the proxy's own, as over UDP.
+    #[test]
+    fn dns_over_tcp_is_answered_by_the_proxy() {
+        for a in ask_twice(proxy(upstream(false))) {
+            assert_eq!(a[2] & 0x02, 0, "not truncated");
+            assert_eq!(a.last(), Some(&b'U'), "the UDP upstream's answer");
+        }
+    }
+
+    /// A truncated answer is what TCP was asked for: the upstream is asked
+    /// again over TCP and the full answer goes back.
+    #[test]
+    fn a_truncated_answer_is_fetched_again_over_tcp() {
+        for a in ask_twice(proxy(upstream(true))) {
+            assert_eq!(a[2] & 0x02, 0, "not truncated");
+            assert_eq!(a.last(), Some(&b'T'), "the TCP upstream's answer");
+        }
     }
 }

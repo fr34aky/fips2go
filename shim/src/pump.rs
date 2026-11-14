@@ -533,6 +533,18 @@ fn run_reader(
             dns.handle(packet.to_vec());
             continue;
         }
+        // Nor does DNS over TCP (a resolver's retry after a truncated
+        // answer): the sentinel is in fd00::/8, so it used to go to the
+        // node as mesh traffic for an address nobody has, and the name
+        // failed. The forwarder's stack ends the connection instead.
+        if let Some(fwd) = forward_tx
+            && DnsProxy::intercepts_tcp(packet, dns_addr)
+        {
+            if fwd.blocking_send(packet.to_vec()).is_err() {
+                tracing::debug!("forwarder channel closed; dropping DNS-over-TCP packet");
+            }
+            continue;
+        }
 
         // Clearnet (non-mesh) traffic → userspace forwarder, if enabled.
         // No forwarder: drop (the VPN shouldn't route clearnet to us then).

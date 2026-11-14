@@ -55,6 +55,65 @@ const LOCAL_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
 const MAX_CONNECTIONS: usize = 4;
 /// The request head the token is read from.
 const MAX_HEAD: usize = 8 * 1024;
+/// How long a connection has to send its whole request head. One deadline,
+/// not one per read: a caller trickling a byte at a time gets no longer.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+/// Connections that have not shown the token yet, per relay. They are any
+/// app's to open, so they do not count against [`MAX_CONNECTIONS`]; when
+/// one more arrives the oldest is closed, which keeps a caller that never
+/// sends a head from shutting the token's holder out.
+const MAX_WAITING: usize = 8;
+
+/// The connections of one relay still to show the token, oldest first.
+#[derive(Default)]
+struct Waiting {
+    next: u64,
+    streams: VecDeque<(u64, TcpStream)>,
+}
+
+impl Waiting {
+    /// Take a place for `stream`, closing the oldest when there are too
+    /// many; `None` when the stream cannot be tracked (then not served).
+    fn enter(waiting: &Mutex<Self>, stream: &TcpStream) -> Option<u64> {
+        let handle = stream.try_clone().ok()?;
+        let mut w = waiting.lock().unwrap_or_else(|e| e.into_inner());
+        let id = w.next;
+        w.next += 1;
+        w.streams.push_back((id, handle));
+        if w.streams.len() > MAX_WAITING
+            && let Some((_, oldest)) = w.streams.pop_front()
+        {
+            // Its reader sees end-of-stream and gives up.
+            let _ = oldest.shutdown(Shutdown::Both);
+        }
+        Some(id)
+    }
+
+    fn leave(waiting: &Mutex<Self>, id: u64) {
+        let mut w = waiting.lock().unwrap_or_else(|e| e.into_inner());
+        w.streams.retain(|(other, _)| *other != id);
+    }
+}
+
+/// One of a relay's [`MAX_CONNECTIONS`], given back however the
+/// connection's thread ends.
+struct Slot(Arc<Relay>);
+
+impl Slot {
+    fn take(relay: &Arc<Relay>) -> Option<Self> {
+        if relay.active.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
+            relay.active.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(Self(relay.clone()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// A relay on the mesh, served on a loopback port for the lifetime of the
 /// value; dropping it stops the listener (open connections end with it).
@@ -109,6 +168,7 @@ impl MeshRelayProxy {
             stop: stop.clone(),
             name: url.to_string(),
             active: AtomicUsize::new(0),
+            waiting: Mutex::default(),
         };
         std::thread::Builder::new()
             .name("mesh-relay".into())
@@ -132,7 +192,9 @@ struct Relay {
     token: String,
     stop: Arc<AtomicBool>,
     name: String,
+    /// Connections that showed the token and are being carried.
     active: AtomicUsize,
+    waiting: Mutex<Waiting>,
 }
 
 fn accept_loop(listener: TcpListener, relay: Arc<Relay>) {
@@ -149,20 +211,33 @@ fn accept_loop(listener: TcpListener, relay: Arc<Relay>) {
                 continue;
             }
         };
-        if relay.active.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
-            relay.active.fetch_sub(1, Ordering::Relaxed);
+        // A relay slot is taken only once the token has been shown: until
+        // then the connection is anyone's, and used to hold one of the four
+        // for as long as it kept sending a byte every few seconds.
+        let Some(id) = Waiting::enter(&relay.waiting, &stream) else {
             continue; // dropped: closes the connection
-        }
+        };
         let r = relay.clone();
         let spawned = std::thread::Builder::new().name("mesh-relay-conn".into()).spawn(move || {
-            match pipe(&r, stream) {
+            let mut stream = stream;
+            // The token first: nothing reaches the mesh for a caller without it.
+            let first = read_head(&mut stream, HEAD_TIMEOUT)
+                .and_then(|h| admit(&h, &r.token, &r.path));
+            Waiting::leave(&r.waiting, id);
+            let Some(first) = first else {
+                tracing::debug!(relay = %r.name, "refused a loopback connection without the token");
+                return;
+            };
+            let Some(_slot) = Slot::take(&r) else {
+                return; // dropped: closes the connection
+            };
+            match pipe(&r, stream, first) {
                 Ok(()) => {}
                 Err(e) => tracing::info!(relay = %r.name, error = %e.message, "mesh relay connection ended"),
             }
-            r.active.fetch_sub(1, Ordering::Relaxed);
         });
         if spawned.is_err() {
-            relay.active.fetch_sub(1, Ordering::Relaxed);
+            Waiting::leave(&relay.waiting, id);
         }
     }
 }
@@ -191,15 +266,18 @@ fn admit(head: &[u8], token: &str, path: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Read the request head (up to its blank line) within a few seconds.
-fn read_head(local: &mut TcpStream) -> Option<Vec<u8>> {
-    local.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+/// Read the request head (up to its blank line), all of it within
+/// `timeout`.
+fn read_head(local: &mut TcpStream, timeout: Duration) -> Option<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
     let mut head = Vec::new();
     let mut buf = [0u8; 1024];
     while !head.windows(4).any(|w| w == b"\r\n\r\n") {
         if head.len() > MAX_HEAD {
             return None;
         }
+        let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
+        local.set_read_timeout(Some(left)).ok()?;
         match local.read(&mut buf) {
             Ok(0) | Err(_) => return None,
             Ok(n) => head.extend_from_slice(&buf[..n]),
@@ -243,18 +321,13 @@ impl Backlog {
 }
 
 /// Carry `local` to the relay over the mesh until either side closes.
-fn pipe(relay: &Relay, mut local: TcpStream) -> Result<(), FetchError> {
+/// `first` is the admitted request head, the first bytes for the relay.
+fn pipe(relay: &Relay, local: TcpStream, first: Vec<u8>) -> Result<(), FetchError> {
     let link = &relay.link;
     let (addr, port) = (relay.addr, relay.port);
     if addr == link.our_addr {
         return Err(FetchError::other("that is this node's own address"));
     }
-    // The token first: nothing reaches the mesh for a caller without it.
-    let Some(first) = read_head(&mut local).and_then(|h| admit(&h, &relay.token, &relay.path))
-    else {
-        tracing::debug!(relay = %relay.name, "refused a loopback connection without the token");
-        return Ok(());
-    };
     let _ = local.set_nodelay(true);
     let _ = local.set_write_timeout(Some(LOCAL_WRITE_TIMEOUT));
     register_identity(link.responder, &relay.npub);
@@ -594,6 +667,51 @@ mod tests {
     /// The pipe between a real loopback socket and a smoltcp echo server on
     /// the far end of two channels: bytes both ways, then a clean close
     /// started from the local side.
+    /// A caller that never finishes its head is cut off at the deadline,
+    /// however steadily it keeps sending.
+    #[test]
+    fn the_request_head_has_one_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut slow = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut accepted, _) = listener.accept().unwrap();
+        let trickle = std::thread::spawn(move || {
+            // A byte every 50 ms: each read succeeds well inside the timeout.
+            while slow.write_all(b"G").is_ok() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+        assert!(read_head(&mut accepted, Duration::from_millis(400)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(2), "one deadline, not one per read");
+        drop(accepted);
+        trickle.join().unwrap();
+    }
+
+    /// One connection too many without the token closes the oldest, and
+    /// none of them holds a relay slot.
+    #[test]
+    fn waiting_connections_are_bounded_oldest_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let waiting = Mutex::new(Waiting::default());
+        let mut clients = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..=MAX_WAITING {
+            clients.push(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+            let (accepted, _) = listener.accept().unwrap();
+            ids.push(Waiting::enter(&waiting, &accepted).unwrap());
+        }
+        assert_eq!(waiting.lock().unwrap().streams.len(), MAX_WAITING);
+        // The first client's connection was shut down; the last one's not.
+        let mut buf = [0u8; 1];
+        clients[0].set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(clients[0].read(&mut buf).unwrap(), 0, "oldest closed");
+        let last = clients.last_mut().unwrap();
+        last.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        assert!(last.read(&mut buf).is_err(), "newest still open");
+        Waiting::leave(&waiting, *ids.last().unwrap());
+        assert_eq!(waiting.lock().unwrap().streams.len(), MAX_WAITING - 1);
+    }
+
     #[test]
     fn pipe_against_a_userspace_echo_server() {
         let client_addr: Ipv6Addr = "fd00::1".parse().unwrap();

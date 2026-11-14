@@ -74,7 +74,7 @@ pub struct DnsProxy {
 
 /// One slot of [`DnsProxy::in_flight`], given back when the query's thread
 /// ends, however it ends.
-struct InFlight(Arc<DnsProxy>);
+pub struct InFlight(Arc<DnsProxy>);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
@@ -107,12 +107,10 @@ impl DnsProxy {
     /// answered SERVFAIL here, so the app's resolver fails at once instead
     /// of waiting out its timeout on silence.
     pub fn handle(self: &Arc<Self>, packet: Vec<u8>) {
-        if self.in_flight.fetch_add(1, Ordering::Relaxed) >= MAX_IN_FLIGHT {
-            self.in_flight.fetch_sub(1, Ordering::Relaxed);
+        let Some(slot) = self.slot() else {
             self.refuse(&packet, "too many DNS queries in flight");
             return;
-        }
-        let slot = InFlight(self.clone());
+        };
         // The packet is shared so it is still here if the spawn fails (the
         // closure, and the slot with it, is dropped by a failed spawn).
         let packet = Arc::new(packet);
@@ -124,6 +122,27 @@ impl DnsProxy {
             tracing::warn!(error = %e, "DNS thread not spawned");
             self.refuse(&packet, "no thread for the DNS query");
         }
+    }
+
+    /// A place among the [`MAX_IN_FLIGHT`] queries served at once, `None`
+    /// when they are all taken. Held for as long as the query is served.
+    pub fn slot(self: &Arc<Self>) -> Option<InFlight> {
+        if self.in_flight.fetch_add(1, Ordering::Relaxed) >= MAX_IN_FLIGHT {
+            self.in_flight.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(InFlight(self.clone()))
+    }
+
+    /// Whether `packet` is a TCP segment to `<dns_addr>:53` — a resolver
+    /// retrying over TCP after a truncated answer. The pump hands these to
+    /// the forwarder, whose stack ends the connection here (`forward.rs`).
+    pub fn intercepts_tcp(packet: &[u8], dns_addr: &[u8; 16]) -> bool {
+        packet.len() >= 60
+            && packet[0] >> 4 == 6
+            && packet[6] == 6
+            && &packet[24..40] == dns_addr
+            && packet[42..44] == 53u16.to_be_bytes()
     }
 
     /// Answer `packet` SERVFAIL without serving it. Runs on the pump's
@@ -149,7 +168,20 @@ impl DnsProxy {
         let Some(query) = packet::parse_ipv6_udp(packet) else {
             return;
         };
-        let qname = parse_qname(query.payload).unwrap_or_default();
+        let Some(payload) = self.answer(query.payload) else {
+            return;
+        };
+        // Swap the flow back toward the querier.
+        let response = packet::build_ipv6_udp(query.dst, query.src, 53, query.src_port, &payload);
+        let _ = self.writer_tx.send(response);
+    }
+
+    /// The answer to one DNS message, whatever carried it (a UDP packet to
+    /// the sentinel, or a TCP connection to it — see `forward.rs`): SERVFAIL
+    /// when nothing answered, `None` only for a message too short to answer.
+    /// Blocking, up to the upstreams' timeouts.
+    pub fn answer(self: &Arc<Self>, query: &[u8]) -> Option<Vec<u8>> {
+        let qname = parse_qname(query).unwrap_or_default();
         let is_fips = qname == "fips" || qname.ends_with(".fips");
 
         let response_payload = if is_fips {
@@ -158,11 +190,11 @@ impl DnsProxy {
                     // debug: a lookup is three queries (A, AAAA, HTTPS) and
                     // each already logs its outcome at info below.
                     tracing::debug!(qname = %qname, npub = %npub, "hosts entry matched");
-                    npub_query(query.payload, &npub)
+                    npub_query(query, &npub)
                         .and_then(|q| self.forward(&q, self.local_responder, false))
-                        .and_then(|r| answer_as_asked(query.payload, &r))
+                        .and_then(|r| answer_as_asked(query, &r))
                 }
-                None => self.forward(query.payload, self.local_responder, false),
+                None => self.forward(query, self.local_responder, false),
             };
             // `.fips` lookups are rare and load-bearing — log the outcome at
             // info so "mesh site won't load" reports show whether resolution
@@ -170,7 +202,7 @@ impl DnsProxy {
             match &resp {
                 Some(r) => tracing::info!(
                     qname = %qname,
-                    qtype = qtype_of(query.payload),
+                    qtype = qtype_of(query),
                     rcode = r.get(3).map_or(0xff, |b| b & 0x0f),
                     answers = u16::from_be_bytes([
                         r.get(6).copied().unwrap_or(0),
@@ -193,7 +225,7 @@ impl DnsProxy {
             let start_prefetch = || {
                 slot.get_or_init(|| {
                     let (tx, rx) = std::sync::mpsc::channel();
-                    let (proxy, q) = (self.clone(), query.payload.to_vec());
+                    let (proxy, q) = (self.clone(), query.to_vec());
                     // A thread that cannot be spawned drops `tx` with its
                     // closure: a disconnected channel, asked inline instead.
                     let _ = std::thread::Builder::new()
@@ -216,18 +248,18 @@ impl DnsProxy {
                     // A dead fetching thread must not cost the answer.
                     Some(rx) => rx
                         .recv()
-                        .unwrap_or_else(|_| self.forward_upstreams(query.payload)),
-                    None => self.forward_upstreams(query.payload),
+                        .unwrap_or_else(|_| self.forward_upstreams(query)),
+                    None => self.forward_upstreams(query),
                 };
             let outcome = self
                 .names
                 .as_ref()
-                .map(|n| n.lookup(query.payload, &start_prefetch));
+                .map(|n| n.lookup(query, &start_prefetch));
             let prefetched = slot.into_inner();
             match outcome {
                 Some(Outcome::Answer(a)) => {
                     // Rare and load-bearing, like `.fips`: say so at info.
-                    tracing::info!(qname = %qname, qtype = qtype_of(query.payload), "public name answered over fips");
+                    tracing::info!(qname = %qname, qtype = qtype_of(query), "public name answered over fips");
                     Some(a)
                 }
                 Some(Outcome::Capped(cap)) => {
@@ -235,9 +267,9 @@ impl DnsProxy {
                     // while the lookup is still deciding, longer when the
                     // name is over fips but its server is unreachable.
                     if cap == pubdom_core::OVERRUN_TTL_SECS {
-                        tracing::info!(qname = %qname, qtype = qtype_of(query.payload), "public name still deciding; legacy answer for a few seconds");
+                        tracing::info!(qname = %qname, qtype = qtype_of(query), "public name still deciding; legacy answer for a few seconds");
                     } else {
-                        tracing::info!(qname = %qname, qtype = qtype_of(query.payload), cap, "public name's server unreachable; legacy answer until the retry");
+                        tracing::info!(qname = %qname, qtype = qtype_of(query), cap, "public name's server unreachable; legacy answer until the retry");
                     }
                     forward(prefetched).map(|legacy| clamp_to(legacy, cap))
                 }
@@ -263,10 +295,10 @@ impl DnsProxy {
                                         }
                                         // The fetching thread died: ask here.
                                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                            self.forward_upstreams(query.payload)
+                                            self.forward_upstreams(query)
                                         }
                                     },
-                                    None => self.forward_upstreams(query.payload),
+                                    None => self.forward_upstreams(query),
                                 });
                                 outcome = decided(Duration::ZERO);
                             }
@@ -277,12 +309,12 @@ impl DnsProxy {
                     }
                     match outcome {
                         Some(Decided::Answer(a)) => {
-                            tracing::info!(qname = %qname, qtype = qtype_of(query.payload), "public name answered over fips");
+                            tracing::info!(qname = %qname, qtype = qtype_of(query), "public name answered over fips");
                             Some(a)
                         }
                         Some(Decided::Legacy) => legacy.unwrap_or_else(|| forward(prefetched)),
                         Some(Decided::Capped(cap)) => {
-                            tracing::info!(qname = %qname, qtype = qtype_of(query.payload), cap, "public name's server unreachable; legacy answer until the retry");
+                            tracing::info!(qname = %qname, qtype = qtype_of(query), cap, "public name's server unreachable; legacy answer until the retry");
                             legacy
                                 .unwrap_or_else(|| forward(prefetched))
                                 .map(|l| clamp_to(l, cap))
@@ -299,20 +331,10 @@ impl DnsProxy {
             }
         };
 
-        let payload = match response_payload {
-            Some(p) => p,
-            None => {
-                tracing::debug!(qname = %qname, "DNS forward failed; returning SERVFAIL");
-                match servfail_for(query.payload) {
-                    Some(p) => p,
-                    None => return,
-                }
-            }
-        };
-
-        // Swap the flow back toward the querier.
-        let response = packet::build_ipv6_udp(query.dst, query.src, 53, query.src_port, &payload);
-        let _ = self.writer_tx.send(response);
+        response_payload.or_else(|| {
+            tracing::debug!(qname = %qname, "DNS forward failed; returning SERVFAIL");
+            servfail_for(query)
+        })
     }
 
     /// The upstreams in order, the first that answers.
@@ -474,7 +496,7 @@ fn answer_as_asked(query: &[u8], reply: &[u8]) -> Option<Vec<u8>> {
 
 /// Turn a query into a minimal SERVFAIL response (QR=1, RCODE=2, counts
 /// zeroed except the echoed question).
-fn servfail_for(query: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn servfail_for(query: &[u8]) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
     }
@@ -618,6 +640,30 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("slot not given back");
+    }
+
+    /// TCP to the sentinel's port 53 is taken; other TCP, and UDP, is not.
+    #[test]
+    fn tcp_to_the_sentinel_is_recognised() {
+        let sentinel = [0xfd; 16];
+        let mut pkt = vec![0u8; 60];
+        pkt[0] = 0x60;
+        pkt[6] = 6; // TCP
+        pkt[24..40].copy_from_slice(&sentinel);
+        pkt[42..44].copy_from_slice(&53u16.to_be_bytes());
+        assert!(DnsProxy::intercepts_tcp(&pkt, &sentinel));
+        assert!(!DnsProxy::intercepts(&pkt, &sentinel));
+
+        let mut other_port = pkt.clone();
+        other_port[42..44].copy_from_slice(&443u16.to_be_bytes());
+        assert!(!DnsProxy::intercepts_tcp(&other_port, &sentinel));
+        let mut other_host = pkt.clone();
+        other_host[39] = 1;
+        assert!(!DnsProxy::intercepts_tcp(&other_host, &sentinel));
+        let mut udp = pkt.clone();
+        udp[6] = 17;
+        assert!(!DnsProxy::intercepts_tcp(&udp, &sentinel));
+        assert!(!DnsProxy::intercepts_tcp(&pkt[..59], &sentinel));
     }
 
     /// Unresolvable upstreams must yield SERVFAIL, not silence.
