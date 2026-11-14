@@ -354,6 +354,10 @@ fn start_inner(
             engine_protect.clone(),
             running.clone(),
             FORWARD_MTU,
+            Some(crate::forward::DnsOverTcp {
+                addr: (std::net::Ipv6Addr::from(DNS_SENTINEL), 53).into(),
+                proxy: dns.clone(),
+            }),
         )
         .map_err(|e| {
             unsafe { libc::close(owned_fd) };
