@@ -8,7 +8,7 @@
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use fips::control::ControlCommandHandle;
@@ -45,20 +45,51 @@ pub fn dns_server_string() -> String {
 
 /// Cap the FMP encrypt/decrypt worker pools for mobile before the node
 /// starts. FIPS reads `FIPS_ENCRYPT_WORKERS` / `FIPS_DECRYPT_WORKERS` at
-/// `start()` (else `available_parallelism()` → ~8 each). We set them here,
-/// respecting any value already present in the environment.
+/// every `start()` (else `available_parallelism()` → ~8 each). We set them
+/// here on every engine start, so a changed setting applies on the next
+/// connect — except for a key that was already in the environment before
+/// the first start, which is someone else's choice and is left alone.
 ///
-/// Called on the connect thread before the node thread is spawned, so the
-/// write happens-before any FIPS reader — no concurrent `getenv` for these
-/// keys is in flight, which is what makes the `set_var` sound.
+/// Called under `LIFECYCLE` before the node thread is spawned, so no FIPS
+/// reader of these keys is running. Other threads of the process are alive
+/// (always were: the JVM's), and `setenv` is not safe against a concurrent
+/// `getenv` elsewhere, so the write is skipped whenever the value already
+/// matches — it happens on the first start and after a settings change only.
 fn apply_worker_thread_caps(worker_threads: usize) {
-    for key in ["FIPS_ENCRYPT_WORKERS", "FIPS_DECRYPT_WORKERS"] {
-        if std::env::var_os(key).is_none() {
-            // SAFETY: single-threaded w.r.t. these keys — see doc comment.
-            unsafe { std::env::set_var(key, worker_threads.to_string()) };
+    const KEYS: [&str; 2] = ["FIPS_ENCRYPT_WORKERS", "FIPS_DECRYPT_WORKERS"];
+    // Which keys came from outside, decided once, before we write any.
+    static EXTERNAL: std::sync::OnceLock<[bool; 2]> = std::sync::OnceLock::new();
+    let external = EXTERNAL.get_or_init(|| KEYS.map(|key| std::env::var_os(key).is_some()));
+    let wanted = worker_threads.to_string();
+    for (key, external) in KEYS.iter().zip(external) {
+        if *external {
+            tracing::info!(key, "worker pool size taken from the environment, setting ignored");
+            continue;
         }
+        if std::env::var_os(key).is_some_and(|v| v == wanted.as_str()) {
+            continue;
+        }
+        // SAFETY: no reader of these keys is running — see doc comment.
+        unsafe { std::env::set_var(key, &wanted) };
     }
     tracing::info!(worker_threads, "capped FMP worker pools for mobile");
+}
+
+/// Lock a mutex whether or not a thread panicked while holding it. Nothing
+/// guarded here is left half-written by a panic (the `ENGINE` slot is only
+/// ever replaced whole), and refusing a poisoned lock would turn one caught
+/// panic into an engine that can never be stopped or queried again.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Clears a "busy" flag when dropped, so a panic cannot leave it set.
+struct ClearOnDrop(&'static AtomicBool);
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -122,7 +153,7 @@ pub struct StartInfo {
 }
 
 pub fn is_running() -> bool {
-    ENGINE.lock().unwrap().is_some()
+    lock(&ENGINE).is_some()
 }
 
 /// Start the embedded node. `tun_fd` is borrowed (dup'd internally); the
@@ -136,7 +167,7 @@ pub fn start(
     tun_fd: RawFd,
     protect: Option<fips::SocketProtect>,
 ) -> Result<StartInfo, String> {
-    let _lifecycle = LIFECYCLE.lock().unwrap();
+    let _lifecycle = lock(&LIFECYCLE);
     start_locked(config_json, tun_fd, protect)
 }
 
@@ -146,22 +177,16 @@ fn start_locked(
     tun_fd: RawFd,
     protect: Option<fips::SocketProtect>,
 ) -> Result<StartInfo, String> {
-    if ENGINE.lock().unwrap().is_some() {
+    if lock(&ENGINE).is_some() {
         return Err("already running".into());
     }
     if STARTING.swap(true, Ordering::SeqCst) {
         return Err("start already in progress".into());
     }
-    let result = start_inner(config_json, tun_fd, protect);
-    let outcome = match result {
-        Ok((engine, info)) => {
-            *ENGINE.lock().unwrap() = Some(engine);
-            Ok(info)
-        }
-        Err(e) => Err(e),
-    };
-    STARTING.store(false, Ordering::SeqCst);
-    outcome
+    let _starting = ClearOnDrop(&STARTING);
+    let (engine, info) = start_inner(config_json, tun_fd, protect)?;
+    *lock(&ENGINE) = Some(engine);
+    Ok(info)
 }
 
 fn start_inner(
@@ -226,7 +251,7 @@ fn start_inner(
                     tokio::spawn(async move {
                         loop {
                             let rows = nostr.relay_status().await;
-                            *relay_slot.lock().unwrap() = rows;
+                            *lock(&relay_slot) = rows;
                             relay_wake.notified().await;
                         }
                     })
@@ -316,6 +341,7 @@ fn start_inner(
         protect: engine_protect.clone(),
         hosts: crate::dns::hosts_reloader(shim_config.hosts_path.as_deref()),
         names: names.clone().map(|n| n as Arc<dyn crate::names::Lookup>),
+        in_flight: Default::default(),
     });
 
     // Clearnet forwarder (split-tunnel): non-mesh packets from the pump go
@@ -396,13 +422,13 @@ fn start_inner(
 
 /// Stop the engine: drain the node, stop the pump, close our fd. Idempotent.
 pub fn stop() {
-    let _lifecycle = LIFECYCLE.lock().unwrap();
+    let _lifecycle = lock(&LIFECYCLE);
     stop_locked();
 }
 
 /// [`stop`] body; caller must hold [`LIFECYCLE`].
 fn stop_locked() {
-    let engine = ENGINE.lock().unwrap().take();
+    let engine = lock(&ENGINE).take();
     let Some(mut engine) = engine else {
         return;
     };
@@ -455,12 +481,13 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
         // latest, so coalescing this callback into it is correct.
         return Ok(());
     }
+    let _rebinding = ClearOnDrop(&REBINDING);
     let result = {
-        let _lifecycle = LIFECYCLE.lock().unwrap();
+        let _lifecycle = lock(&LIFECYCLE);
         // Snapshot what we need to rebuild; bail if not running (e.g. a
         // disconnect won the lock first).
         let rebuild = {
-            let slot = ENGINE.lock().unwrap();
+            let slot = lock(&ENGINE);
             slot.as_ref()
                 .map(|e| (e.config_json.clone(), e.protect.clone()))
         };
@@ -493,7 +520,6 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
             }
         }
     };
-    REBINDING.store(false, Ordering::SeqCst);
     if let Err(e) = &result {
         tracing::error!(error = %e, "node rebuild after network change failed");
     }
@@ -515,7 +541,7 @@ fn swap_tun_locked(tun_fd: RawFd) -> Result<(), String> {
     // must not wait for it. LIFECYCLE (held by the caller) keeps start and
     // stop out meanwhile; nothing else touches the pump.
     let mut pump = {
-        let mut slot = ENGINE.lock().unwrap();
+        let mut slot = lock(&ENGINE);
         let Some(pump) = slot.as_mut().and_then(|e| e.pump.take()) else {
             unsafe { libc::close(owned_fd) };
             return Err("not running".into());
@@ -523,7 +549,7 @@ fn swap_tun_locked(tun_fd: RawFd) -> Result<(), String> {
         pump
     };
     let swapped = pump.swap_fd(owned_fd);
-    let mut slot = ENGINE.lock().unwrap();
+    let mut slot = lock(&ENGINE);
     let engine = slot.as_mut().expect("held by LIFECYCLE");
     // Back in the slot either way: after a failed swap the restart joins it.
     engine.pump = Some(pump);
@@ -553,7 +579,7 @@ fn swap_tun_locked(tun_fd: RawFd) -> Result<(), String> {
 /// latency into a debounce-period one. Cheap and non-blocking (a `Notify`
 /// permit); safe on the main thread. No-op when not running.
 pub fn network_hint() {
-    let slot = ENGINE.lock().unwrap();
+    let slot = lock(&ENGINE);
     if let Some(engine) = slot.as_ref() {
         engine.netmon.poke();
         if let Some(names) = &engine.names {
@@ -572,7 +598,7 @@ static INTERNET_VALIDATED: AtomicBool = AtomicBool::new(true);
 /// the running resolver now and to every resolver built later.
 pub fn names_online(validated: bool) {
     INTERNET_VALIDATED.store(validated, Ordering::SeqCst);
-    let slot = ENGINE.lock().unwrap();
+    let slot = lock(&ENGINE);
     if let Some(engine) = slot.as_ref()
         && let Some(names) = &engine.names
     {
@@ -585,7 +611,7 @@ pub fn names_online(validated: bool) {
 /// Nostr is off or the node has not published a snapshot yet); each call
 /// also asks the node runtime for a fresh snapshot, served by the next call.
 pub fn status_json() -> String {
-    let slot = ENGINE.lock().unwrap();
+    let slot = lock(&ENGINE);
     let value = match slot.as_ref() {
         None => serde_json::json!({ "running": false }),
         Some(engine) => serde_json::json!({
@@ -594,7 +620,7 @@ pub fn status_json() -> String {
             "address": engine.address,
             "status": engine.read_handle.query("show_status", None)
                 .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take)),
-            "relays": engine.relay_status.lock().unwrap().clone(),
+            "relays": lock(&engine.relay_status).clone(),
         }),
     };
     if let Some(engine) = slot.as_ref() {
@@ -605,7 +631,7 @@ pub fn status_json() -> String {
 
 /// Generic read-only query passthrough (any snapshot-served `show_*`).
 pub fn query_json(command: &str, params_json: &str) -> String {
-    let slot = ENGINE.lock().unwrap();
+    let slot = lock(&ENGINE);
     let Some(engine) = slot.as_ref() else {
         return r#"{"status":"error","message":"not running"}"#.to_string();
     };
@@ -638,11 +664,7 @@ pub fn query_json(command: &str, params_json: &str) -> String {
 /// thread. The `ENGINE` lock is dropped before the round-trip so status
 /// polls never queue behind a slow handshake initiation.
 pub fn connect_peer_json(npub: &str, address: &str) -> String {
-    let handle = ENGINE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|e| e.cmd_handle.clone());
+    let handle = lock(&ENGINE).as_ref().map(|e| e.cmd_handle.clone());
     let Some(handle) = handle else {
         return r#"{"status":"error","message":"not running"}"#.to_string();
     };
@@ -675,7 +697,7 @@ pub fn mesh_http_get_json(
     let error = |message: String, unreachable: bool| {
         serde_json::json!({ "error": message, "unreachable": unreachable }).to_string()
     };
-    let Some(link) = ENGINE.lock().unwrap().as_ref().map(|e| e.mesh.clone()) else {
+    let Some(link) = lock(&ENGINE).as_ref().map(|e| e.mesh.clone()) else {
         return error("not connected".into(), false);
     };
     let (npub, address) = match crate::config::resolve_npub(npub) {
@@ -719,6 +741,24 @@ pub fn mesh_http_get_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panic_under_a_lock_or_flag_leaves_both_usable() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let slot = Arc::new(Mutex::new(7));
+        let held = slot.clone();
+        let panicked = std::thread::spawn(move || {
+            let _guard = lock(&held);
+            FLAG.store(true, Ordering::SeqCst);
+            let _busy = ClearOnDrop(&FLAG);
+            panic!("while holding the lock");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(slot.is_poisoned());
+        assert_eq!(*lock(&slot), 7);
+        assert!(!FLAG.load(Ordering::SeqCst));
+    }
 
     /// The engine is a process singleton, and cargo runs tests in parallel:
     /// every test that starts one holds this for its whole run.
@@ -905,7 +945,7 @@ mod tests {
             );
             (fds[0], fds[1])
         };
-        let engine_id = || ENGINE.lock().unwrap().as_ref().expect("running").start;
+        let engine_id = || lock(&ENGINE).as_ref().expect("running").start;
 
         let (old_tun, old_app) = pair();
         start(&config, old_tun, None).unwrap_or_else(|e| panic!("start: {e}"));

@@ -13,13 +13,16 @@
 //!   the protect hook so the query itself bypasses the tunnel
 //!
 //! Each query is served on a short-lived thread (blocking send/recv with a
-//! timeout); DNS is low-rate and this keeps the pump loop non-blocking.
+//! timeout); DNS is low-rate and this keeps the pump loop non-blocking. At
+//! most [`MAX_IN_FLIGHT`] are served at once — past that a query is answered
+//! SERVFAIL on the spot rather than given a thread.
 //! Where the public-names resolver allows it (no pinned domain above the
 //! name, a validated Internet) a second thread asks the upstreams while
 //! the resolver decides, so a name that is not over fips does not wait
 //! for both in turn.
 
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,6 +36,12 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// whether its legacy answer has arrived.
 const EARLY_POLL: Duration = Duration::from_millis(5);
 const MAX_RESPONSE: usize = 4096;
+/// Queries served at once. A query's thread can live for seconds (3 s per
+/// dead upstream, the public-names budget on top), so without a ceiling a
+/// burst from a covered app while the upstreams are slow becomes thousands
+/// of threads in the VPN process. A page load is a few dozen queries; this
+/// is far above anything but a flood.
+pub const MAX_IN_FLIGHT: usize = 128;
 
 /// Shared context for the DNS proxy.
 pub struct DnsProxy {
@@ -59,6 +68,18 @@ pub struct DnsProxy {
     /// `Capped(n)` that it goes upstream but with the answer's TTLs capped
     /// at `n` seconds (the lookup still deciding, or a server unreachable).
     pub names: Option<Arc<dyn crate::names::Lookup>>,
+    /// Queries being served now, bounded by [`MAX_IN_FLIGHT`].
+    pub in_flight: AtomicUsize,
+}
+
+/// One slot of [`DnsProxy::in_flight`], given back when the query's thread
+/// ends, however it ends.
+struct InFlight(Arc<DnsProxy>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Reloader for the hosts file at `path` (see [`DnsProxy::hosts`]). A file
@@ -81,13 +102,47 @@ impl DnsProxy {
             .unwrap_or(false)
     }
 
-    /// Serve one intercepted query on a short-lived thread.
+    /// Serve one intercepted query on a short-lived thread. A query that
+    /// gets no thread — the ceiling is reached, or the spawn failed — is
+    /// answered SERVFAIL here, so the app's resolver fails at once instead
+    /// of waiting out its timeout on silence.
     pub fn handle(self: &Arc<Self>, packet: Vec<u8>) {
-        let proxy = self.clone();
-        std::thread::Builder::new()
+        if self.in_flight.fetch_add(1, Ordering::Relaxed) >= MAX_IN_FLIGHT {
+            self.in_flight.fetch_sub(1, Ordering::Relaxed);
+            self.refuse(&packet, "too many DNS queries in flight");
+            return;
+        }
+        let slot = InFlight(self.clone());
+        // The packet is shared so it is still here if the spawn fails (the
+        // closure, and the slot with it, is dropped by a failed spawn).
+        let packet = Arc::new(packet);
+        let for_thread = packet.clone();
+        let spawned = std::thread::Builder::new()
             .name("fips-dns".into())
-            .spawn(move || proxy.serve(&packet))
-            .ok();
+            .spawn(move || slot.0.serve(&for_thread));
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "DNS thread not spawned");
+            self.refuse(&packet, "no thread for the DNS query");
+        }
+    }
+
+    /// Answer `packet` SERVFAIL without serving it. Runs on the pump's
+    /// reader thread: no I/O beyond the writer channel.
+    fn refuse(&self, packet: &[u8], why: &str) {
+        let Some(query) = packet::parse_ipv6_udp(packet) else {
+            return;
+        };
+        // Once per power of two, so a flood does not become a log flood.
+        static REFUSED: AtomicUsize = AtomicUsize::new(0);
+        let refused = REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+        if refused.is_power_of_two() {
+            tracing::warn!(refused, "{why}; answering SERVFAIL");
+        }
+        if let Some(payload) = servfail_for(query.payload) {
+            let response =
+                packet::build_ipv6_udp(query.dst, query.src, 53, query.src_port, &payload);
+            let _ = self.writer_tx.send(response);
+        }
     }
 
     fn serve(self: &Arc<Self>, packet: &[u8]) {
@@ -499,6 +554,7 @@ mod tests {
             protect: None,
             hosts: None,
             names: None,
+            in_flight: Default::default(),
         });
 
         let our = [0xfd; 16];
@@ -520,6 +576,50 @@ mod tests {
         assert_eq!(parsed.payload[2] & 0x80, 0x80, "answer bit set");
     }
 
+    /// Past the ceiling a query is answered SERVFAIL at once, takes no
+    /// slot, and the slots in use are given back when their queries end.
+    #[test]
+    fn a_query_past_the_ceiling_is_refused_not_served() {
+        // An upstream that never answers: a served query would sit in its
+        // 3 s timeout, so a reply within 1 s can only be the refusal.
+        let silent = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+        let proxy = Arc::new(DnsProxy {
+            local_responder: "[::1]:1".parse().unwrap(),
+            upstreams: vec![silent.local_addr().unwrap()],
+            writer_tx,
+            protect: None,
+            hosts: None,
+            names: None,
+            in_flight: AtomicUsize::new(MAX_IN_FLIGHT),
+        });
+        let our = [0xfd; 16];
+        let mut phone = [0xfd; 16];
+        phone[15] = 9;
+        let query_pkt = packet::build_ipv6_udp(phone, our, 40123, 53, &query_for("example.com"));
+        proxy.handle(query_pkt.clone());
+        let response = writer_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("refusal");
+        let parsed = packet::parse_ipv6_udp(&response).unwrap();
+        assert_eq!(parsed.payload[3] & 0x0f, 2, "SERVFAIL rcode");
+        assert_eq!(parsed.dst_port, 40123);
+        assert_eq!(proxy.in_flight.load(Ordering::Relaxed), MAX_IN_FLIGHT);
+
+        // One below the ceiling the query is served, and its slot returns.
+        proxy.in_flight.store(MAX_IN_FLIGHT - 1, Ordering::Relaxed);
+        proxy.handle(query_pkt);
+        assert!(writer_rx.recv_timeout(Duration::from_secs(1)).is_err(), "served, not refused");
+        writer_rx.recv_timeout(Duration::from_secs(5)).expect("SERVFAIL after the timeout");
+        for _ in 0..100 {
+            if proxy.in_flight.load(Ordering::Relaxed) == MAX_IN_FLIGHT - 1 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("slot not given back");
+    }
+
     /// Unresolvable upstreams must yield SERVFAIL, not silence.
     #[test]
     fn servfail_when_upstreams_dead() {
@@ -531,6 +631,7 @@ mod tests {
             protect: None,
             hosts: None,
             names: None,
+            in_flight: Default::default(),
         });
         let our = [0xfd; 16];
         let mut phone = [0xfd; 16];
@@ -601,6 +702,7 @@ mod tests {
             protect: None,
             hosts: hosts_reloader(path.to_str()),
             names: None,
+            in_flight: Default::default(),
         });
 
         let query = typed_query_for("Home.fips", TYPE_AAAA);
@@ -680,6 +782,7 @@ mod tests {
             protect: None,
             hosts: None,
             names: Some(Arc::new(Bound)),
+            in_flight: Default::default(),
         });
         let reply = ask(
             &proxy,
@@ -744,6 +847,7 @@ mod tests {
             protect: None,
             hosts: None,
             names: Some(Arc::new(Slow)),
+            in_flight: Default::default(),
         });
         let reply = ask(&proxy, &replies, &typed_query_for("relay.example.org", 1));
         assert_eq!(reply[3] & 0x0f, 0);
@@ -835,6 +939,7 @@ mod tests {
                 protect: None,
                 hosts: None,
                 names: Some(Arc::new(names)),
+                in_flight: Default::default(),
             });
             (proxy, replies)
         };
@@ -941,6 +1046,7 @@ mod tests {
             protect: None,
             hosts: None,
             names: Some(Arc::new(Unavailable)),
+            in_flight: Default::default(),
         });
         let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", 1));
         let n = reply.len();
@@ -1001,6 +1107,7 @@ mod tests {
                 protect: None,
                 hosts: None,
                 names: Some(Arc::new(Asks(asks))),
+                in_flight: Default::default(),
             });
             let before = asked.load(Ordering::SeqCst);
             let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", 1));

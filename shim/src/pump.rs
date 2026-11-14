@@ -41,6 +41,54 @@ const READ_BUF: usize = 65536;
 /// Must cover the node's drain (2 s), which is what releases the bridge.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Writes failed in a row before the writer gives up: the fd is then dead
+/// in a way no errno said, and looping on it would only burn the battery.
+const MAX_WRITE_FAILURES: u32 = 256;
+/// How long a write waits for a full TUN queue to drain before the packet
+/// is dropped. Short: the writer is the only path back to the apps, and a
+/// late packet is worth less than the ones queued behind it.
+const WRITE_WAIT_MS: libc::c_int = 100;
+
+/// Why a packet was not written to the TUN fd.
+#[derive(Debug)]
+enum WriteError {
+    /// This packet is lost, the fd is still good: the kernel refused the
+    /// packet (`EINVAL`), was out of buffers (`ENOBUFS`/`ENOMEM`), or its
+    /// queue stayed full past [`WRITE_WAIT_MS`].
+    Dropped(std::io::Error),
+    /// The fd itself is gone (closed, or the tunnel behind it torn down).
+    Fatal(std::io::Error),
+}
+
+/// Write one packet to the TUN fd. The fd is the `VpnService`'s and so
+/// non-blocking: a full queue is waited out briefly, and an error about
+/// this one packet costs this one packet — the writer used to end on any
+/// error, and with it every reply to the apps until a reconnect, while the
+/// engine went on reporting itself running.
+fn write_packet(fd: RawFd, pkt: &[u8]) -> Result<(), WriteError> {
+    let mut waited = false;
+    loop {
+        let n = unsafe { libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len()) };
+        if n >= 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) if !waited => {
+                waited = true;
+                let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+                unsafe { libc::poll(&mut pfd, 1, WRITE_WAIT_MS) };
+                if pfd.revents & libc::POLLNVAL != 0 {
+                    return Err(WriteError::Fatal(err));
+                }
+            }
+            Some(libc::EBADF) | Some(libc::EBADFD) => return Err(WriteError::Fatal(err)),
+            _ => return Err(WriteError::Dropped(err)),
+        }
+    }
+}
+
 pub struct Pump {
     /// The reader and writer on the current fd; replaced by [`Pump::swap_fd`].
     /// `None` only after a swap failed to stop them.
@@ -301,22 +349,33 @@ fn spawn_io(
             .name("fips-tun-writer".into())
             .spawn(move || {
                 let live = writer_live;
+                // Writes failed in a row, reset by one that works.
+                let mut failures = 0u32;
                 while running.load(Ordering::Relaxed) && live.load(Ordering::Relaxed) {
                     match writer_rx.recv() {
                         // A stop sentinel: ours (the loop head then sees the
                         // flags cleared), or one a previous generation left
                         // behind, which is not.
                         Ok(pkt) if pkt.is_empty() => continue,
-                        Ok(pkt) => {
-                            let n = unsafe {
-                                libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len())
-                            };
-                            if n < 0 {
-                                let err = std::io::Error::last_os_error();
-                                tracing::warn!(error = %err, "TUN write failed; stopping writer");
+                        Ok(pkt) => match write_packet(fd, &pkt) {
+                            Ok(()) => failures = 0,
+                            Err(WriteError::Fatal(err)) => {
+                                tracing::error!(error = %err, "TUN fd gone; stopping writer");
                                 break;
                             }
-                        }
+                            Err(WriteError::Dropped(err)) => {
+                                failures += 1;
+                                // First of a run, then every power of two:
+                                // visible, not a flood.
+                                if failures.is_power_of_two() {
+                                    tracing::warn!(error = %err, len = pkt.len(), failures, "TUN write failed; packet dropped");
+                                }
+                                if failures >= MAX_WRITE_FAILURES {
+                                    tracing::error!(failures, "TUN writes keep failing; stopping writer");
+                                    break;
+                                }
+                            }
+                        },
                         Err(_) => break,
                     }
                 }
@@ -517,5 +576,42 @@ fn run_reader(
                 tracing::info!(dst = %dst_of(packet), "mesh outbound dropped by node processor");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pipe_nonblocking() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) }, 0);
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    /// A full queue costs the packet, not the writer; a dead fd ends it.
+    #[test]
+    fn a_write_error_is_per_packet_unless_the_fd_is_gone() {
+        let (rx, tx) = pipe_nonblocking();
+        assert!(write_packet(tx.as_raw_fd(), &[0u8; 64]).is_ok());
+
+        // Fill the pipe: the next write would block.
+        let chunk = [0u8; 4096];
+        while unsafe { libc::write(tx.as_raw_fd(), chunk.as_ptr().cast(), chunk.len()) } > 0 {}
+        let started = Instant::now();
+        assert!(matches!(
+            write_packet(tx.as_raw_fd(), &chunk),
+            Err(WriteError::Dropped(_))
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(WRITE_WAIT_MS as u64 / 2), "waited for room");
+
+        // Room again: the same fd writes again.
+        let mut sink = vec![0u8; 1 << 20];
+        while unsafe { libc::read(rx.as_raw_fd(), sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
+        assert!(write_packet(tx.as_raw_fd(), &[0u8; 64]).is_ok());
+
+        // An fd that is not open is the end of the writer. (-1, not a
+        // closed pipe end: another test could be handed that number.)
+        assert!(matches!(write_packet(-1, &[0u8; 64]), Err(WriteError::Fatal(_))));
     }
 }
