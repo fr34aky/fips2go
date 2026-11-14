@@ -193,7 +193,7 @@ impl Pump {
         // the node drops its inbound sender (end of drain) or the writer dies.
         // It never touches the fd, so it lives across fd swaps.
         let (bridge_done_tx, bridge_done) = std::sync::mpsc::channel();
-        let bridge = {
+        let spawned = {
             let running = running.clone();
             let writer_tx = writer_tx.clone();
             std::thread::Builder::new()
@@ -230,7 +230,19 @@ impl Pump {
                     }
                     tracing::info!("TUN bridge stopped");
                     let _ = bridge_done_tx.send(());
-                })?
+                })
+        };
+        let bridge = match spawned {
+            Ok(bridge) => bridge,
+            Err(e) => {
+                // The reader and writer are already on the fd, which the
+                // caller closes on this error: stop them first, or they
+                // would go on using a number the next open may reuse.
+                if stop_io(io, &writer_tx, SWAP_TIMEOUT).is_none() {
+                    tracing::warn!("TUN reader/writer did not stop after a failed pump start");
+                }
+                return Err(e);
+            }
         };
 
         Ok(Self {

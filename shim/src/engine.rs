@@ -303,6 +303,9 @@ fn start_inner(
 
     let running = Arc::new(AtomicBool::new(true));
     let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+    // In slots from here on, so a later failure can take them for
+    // `abort_start` and success can take them for the engine.
+    let (mut stop_tx_slot, mut node_slot) = (Some(stop_tx), Some(node_thread));
 
     let divert = Arc::new(crate::meshhttp::Divert::default());
     let mesh = Arc::new(crate::meshhttp::MeshLink {
@@ -346,7 +349,7 @@ fn start_inner(
 
     // Clearnet forwarder (split-tunnel): non-mesh packets from the pump go
     // through a userspace stack and out on protected sockets.
-    let (forwarder, forward_tx) = if shim_config.forward_clearnet {
+    let (mut forwarder, forward_tx) = if shim_config.forward_clearnet {
         let (forward_tx, forward_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
         let forwarder = Forwarder::spawn(
             forward_rx,
@@ -360,7 +363,7 @@ fn start_inner(
             }),
         )
         .map_err(|e| {
-            unsafe { libc::close(owned_fd) };
+            abort_start(stop_tx_slot.take(), &running, None, node_slot.take(), owned_fd);
             format!("spawn forwarder: {e}")
         })?;
         (Some(forwarder), Some(forward_tx))
@@ -396,16 +399,17 @@ fn start_inner(
         writer_rx,
     })
     .map_err(|e| {
-        unsafe { libc::close(owned_fd) };
+        abort_start(stop_tx_slot.take(), &running, forwarder.take(), node_slot.take(), owned_fd);
         format!("spawn pump: {e}")
     })?;
+    let (stop_tx, node_thread) = (stop_tx_slot.take(), node_slot.take());
 
     tracing::info!(npub = %npub, address = %address, "fips engine started");
     let engine = Engine {
         start: STARTS.fetch_add(1, Ordering::SeqCst),
         running,
-        stop_tx: Some(stop_tx),
-        node_thread: Some(node_thread),
+        stop_tx,
+        node_thread,
         pump: Some(pump),
         forwarder,
         read_handle,
@@ -457,12 +461,34 @@ fn stop_locked() {
     tracing::info!("fips engine stopped");
 }
 
+/// Undo a start that failed after the node came up: what `stop_locked` does,
+/// for the parts that exist so far. The error paths used to close the fd and
+/// return, which left the node draining on its own after `LIFECYCLE` was
+/// released — a retry could then meet it still holding `[::1]:5354` and
+/// start with no `.fips` responder, the very race `LIFECYCLE` is there to
+/// prevent — and left `running` set for whatever had already started.
+fn abort_start(
+    stop_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    running: &AtomicBool,
+    forwarder: Option<Forwarder>,
+    node_thread: Option<std::thread::JoinHandle<()>>,
+    owned_fd: RawFd,
+) {
+    if let Some(stop_tx) = stop_tx {
+        let _ = stop_tx.send(());
+    }
+    running.store(false, Ordering::Relaxed);
+    if let Some(forwarder) = forwarder {
+        forwarder.join();
+    }
+    if let Some(handle) = node_thread {
+        let _ = handle.join();
+    }
+    unsafe { libc::close(owned_fd) };
+}
+
 /// Numbers each engine start, so a test can tell a kept node from a new one.
 static STARTS: AtomicU64 = AtomicU64::new(0);
-
-/// Guards against overlapping / re-entrant rebuilds from a burst of network
-/// callbacks.
-static REBINDING: AtomicBool = AtomicBool::new(false);
 
 /// Follow a rebind from Kotlin: a new tunnel (its `::/0` route or allowed
 /// apps changed, both fixed at `establish()`) or a changed config (the FIPS
@@ -479,13 +505,15 @@ static REBINDING: AtomicBool = AtomicBool::new(false);
 /// node — Kotlin regenerates it on every rebind so per-network state (the
 /// FIPS Hotspot transport overlay) rides the same coalesced path; `None`
 /// keeps the config from the previous start.
+///
+/// A call that arrives while another is at work waits for it and is then
+/// applied. It used to return `Ok` at once on the assumption that the one
+/// in flight would see the latest state — but each call carries its own fd
+/// and config, so the later tunnel was simply dropped and the engine left
+/// on the earlier one, which Kotlin then closes. Kotlin serialises its
+/// rebinds on one worker, so this never ran; `LIFECYCLE` now makes the
+/// order hold here too instead of depending on that.
 pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), String> {
-    if REBINDING.swap(true, Ordering::SeqCst) {
-        // A rebuild is already running; the network state it reads will be the
-        // latest, so coalescing this callback into it is correct.
-        return Ok(());
-    }
-    let _rebinding = ClearOnDrop(&REBINDING);
     let result = {
         let _lifecycle = lock(&LIFECYCLE);
         // Snapshot what we need to rebuild; bail if not running (e.g. a
@@ -1004,6 +1032,79 @@ mod tests {
 
         stop();
         for fd in [old_tun, old_app, new_tun, new_app] {
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    /// A rebind that arrives while another is at work is applied after it,
+    /// not dropped: the engine ends up on the later call's tunnel.
+    #[test]
+    fn a_rebind_during_a_rebind_is_applied() {
+        let _serial = engine_test_lock();
+        let identity = crate::config::derive_identity("").unwrap();
+        let config = serde_json::json!({
+            "nsec": identity.nsec,
+            "peers": [],
+            "enable_nostr": false,
+            "enable_fips_dns": false,
+            "forward_clearnet": false,
+            "battery_saver": false,
+            "log_level": "warn",
+        })
+        .to_string();
+        let pair = || {
+            let mut fds = [0i32; 2];
+            assert_eq!(
+                unsafe {
+                    libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr())
+                },
+                0
+            );
+            (fds[0], fds[1])
+        };
+        let (first_tun, first_app) = pair();
+        start(&config, first_tun, None).unwrap_or_else(|e| panic!("start: {e}"));
+        let first = lock(&ENGINE).as_ref().expect("running").start;
+
+        // The first rebind restarts the node (a changed config), which takes
+        // long enough for the second to arrive in the middle of it.
+        let changed = config.replace("\"log_level\":\"warn\"", "\"log_level\":\"error\"");
+        let (second_tun, second_app) = pair();
+        let restart = {
+            let changed = changed.clone();
+            std::thread::spawn(move || network_changed(second_tun, Some(&changed)))
+        };
+        // Under way once the old engine is out of the slot. (Or already
+        // over, on a fast host: the later rebind is then merely the next
+        // one, and must be applied all the same.)
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while lock(&ENGINE).as_ref().is_some_and(|e| e.start == first) {
+            assert!(std::time::Instant::now() < deadline, "the restart never began");
+            std::thread::yield_now();
+        }
+        let (third_tun, third_app) = pair();
+        network_changed(third_tun, Some(&changed)).expect("the later rebind");
+        restart.join().unwrap().expect("the earlier rebind");
+
+        // The node answers on the later tunnel.
+        let src: std::net::Ipv6Addr = identity.address.parse().unwrap();
+        let dst: std::net::Ipv6Addr = "fd12:3456::1".parse().unwrap();
+        let probe = crate::packet::build_ipv6_udp(src.octets(), dst.octets(), 40000, 9, b"late");
+        let sent = unsafe { libc::write(third_app, probe.as_ptr().cast(), probe.len()) };
+        assert_eq!(sent, probe.len() as isize);
+        let mut pfd = libc::pollfd {
+            fd: third_app,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut pfd, 1, 5000) },
+            1,
+            "an answer on the later tunnel"
+        );
+
+        stop();
+        for fd in [first_tun, first_app, second_tun, second_app, third_tun, third_app] {
             unsafe { libc::close(fd) };
         }
     }
