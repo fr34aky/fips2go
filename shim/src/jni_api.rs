@@ -48,6 +48,17 @@ fn protect_hook_from(env: &mut JNIEnv, callback: &JObject) -> Option<fips::Socke
     }))
 }
 
+/// Run `f`, turning a panic into `fallback`. Every export goes through this
+/// or its own `catch_unwind`: a panic that unwinds out of an
+/// `extern "system"` fn aborts the process — with the VPN up.
+fn guarded<T>(fallback: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| fallback())
+}
+
+fn error_json(what: &str) -> String {
+    serde_json::json!({ "error": format!("panic in {what}") }).to_string()
+}
+
 fn to_jstring(env: &JNIEnv, s: &str) -> jstring {
     env.new_string(s)
         .map(|s| s.into_raw())
@@ -69,10 +80,13 @@ pub extern "system" fn Java_org_fips_android_FipsNative_deriveIdentity(
     nsec: JString,
 ) -> jstring {
     let nsec = from_jstring(&mut env, &nsec);
-    let json = match crate::config::derive_identity(&nsec) {
-        Ok(info) => serde_json::to_string(&info).unwrap_or_default(),
-        Err(e) => serde_json::json!({ "error": e }).to_string(),
-    };
+    let json = guarded(
+        || error_json("deriveIdentity"),
+        || match crate::config::derive_identity(&nsec) {
+            Ok(info) => serde_json::to_string(&info).unwrap_or_default(),
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        },
+    );
     to_jstring(&env, &json)
 }
 
@@ -120,7 +134,7 @@ pub extern "system" fn Java_org_fips_android_FipsNative_isRunning(
     _env: JNIEnv,
     _class: JClass,
 ) -> jboolean {
-    crate::engine::is_running() as jboolean
+    guarded(|| false, crate::engine::is_running) as jboolean
 }
 
 /// `onNetworkChanged(tunFd, configJson)` — follow a rebind: a tunnel
@@ -173,7 +187,12 @@ pub extern "system" fn Java_org_fips_android_FipsNative_status(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    to_jstring(&env, &crate::engine::status_json())
+    // A panic reads as "not running", the one shape every caller handles.
+    let json = guarded(
+        || r#"{"running":false,"error":"panic in status"}"#.to_string(),
+        crate::engine::status_json,
+    );
+    to_jstring(&env, &json)
 }
 
 /// `resolveNpub(npub)` → JSON `{npub, address}` (the `.fips` mesh address) or
@@ -185,10 +204,15 @@ pub extern "system" fn Java_org_fips_android_FipsNative_resolveNpub(
     npub: JString,
 ) -> jstring {
     let npub = from_jstring(&mut env, &npub);
-    let json = match crate::config::resolve_npub(&npub) {
-        Ok((npub, address)) => serde_json::json!({ "npub": npub, "address": address }).to_string(),
-        Err(e) => serde_json::json!({ "error": e }).to_string(),
-    };
+    let json = guarded(
+        || error_json("resolveNpub"),
+        || match crate::config::resolve_npub(&npub) {
+            Ok((npub, address)) => {
+                serde_json::json!({ "npub": npub, "address": address }).to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        },
+    );
     to_jstring(&env, &json)
 }
 
@@ -200,7 +224,7 @@ pub extern "system" fn Java_org_fips_android_FipsNative_recentLogs(
     max_lines: jint,
 ) -> jstring {
     let max = max_lines.max(0) as usize;
-    to_jstring(&env, &crate::logbuf::recent(max))
+    to_jstring(&env, &guarded(String::new, || crate::logbuf::recent(max)))
 }
 
 /// `connectPeer(npub, address)` → the node's `connect` command response
@@ -258,5 +282,9 @@ pub extern "system" fn Java_org_fips_android_FipsNative_query(
 ) -> jstring {
     let command = from_jstring(&mut env, &command);
     let params = from_jstring(&mut env, &params_json);
-    to_jstring(&env, &crate::engine::query_json(&command, &params))
+    let json = guarded(
+        || r#"{"status":"error","message":"panic in query"}"#.to_string(),
+        || crate::engine::query_json(&command, &params),
+    );
+    to_jstring(&env, &json)
 }
