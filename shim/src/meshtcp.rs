@@ -197,6 +197,17 @@ struct Relay {
     waiting: Mutex<Waiting>,
 }
 
+impl Relay {
+    /// The relay as its own `Host` header names it: `<npub>.fips`, with the
+    /// port unless it is the scheme's.
+    fn host(&self) -> String {
+        match self.port {
+            80 => format!("{}.fips", self.npub),
+            port => format!("{}.fips:{port}", self.npub),
+        }
+    }
+}
+
 fn accept_loop(listener: TcpListener, relay: Arc<Relay>) {
     loop {
         let accepted = listener.accept();
@@ -222,7 +233,7 @@ fn accept_loop(listener: TcpListener, relay: Arc<Relay>) {
             let mut stream = stream;
             // The token first: nothing reaches the mesh for a caller without it.
             let first = read_head(&mut stream, HEAD_TIMEOUT)
-                .and_then(|h| admit(&h, &r.token, &r.path));
+                .and_then(|h| admit(&h, &r.token, &r.path, &r.host()));
             Waiting::leave(&r.waiting, id);
             let Some(first) = first else {
                 tracing::debug!(relay = %r.name, "refused a loopback connection without the token");
@@ -244,8 +255,14 @@ fn accept_loop(listener: TcpListener, relay: Arc<Relay>) {
 
 /// The request head with the token checked and replaced by the relay's
 /// path, plus whatever followed it; `None` for anyone without the token.
-fn admit(head: &[u8], token: &str, path: &str) -> Option<Vec<u8>> {
-    head.windows(4).position(|w| w == b"\r\n\r\n")?;
+///
+/// The `Host` header is rewritten too. The resolver dialed loopback, so it
+/// sent `Host: 127.0.0.1:<port>`; a relay behind a proxy that routes by
+/// host, or one that checks the header against its own URL, refused the
+/// upgrade for a name it does not serve. It now gets `host`, what a client
+/// dialing `ws://<npub>.fips` directly would send.
+fn admit(head: &[u8], token: &str, path: &str, host: &str) -> Option<Vec<u8>> {
+    let head_end = head.windows(4).position(|w| w == b"\r\n\r\n")?;
     let line_end = head.iter().position(|b| *b == b'\n')?;
     let line = std::str::from_utf8(&head[..line_end])
         .ok()?
@@ -261,8 +278,18 @@ fn admit(head: &[u8], token: &str, path: &str) -> Option<Vec<u8>> {
     if !target.starts_with('/') {
         target.insert(0, '/');
     }
-    let mut out = format!("GET {target} HTTP/1.1\r\n").into_bytes();
-    out.extend_from_slice(&head[line_end + 1..]);
+    let mut out = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n").into_bytes();
+    // The other header lines as they came, minus any Host of the caller's
+    // (a head that is only the request line has none).
+    let headers = head.get(line_end + 1..head_end + 2).unwrap_or_default();
+    for line in headers.split_inclusive(|b| *b == b'\n') {
+        let name = line.split(|b| *b == b':').next().unwrap_or_default();
+        if !name.eq_ignore_ascii_case(b"host") {
+            out.extend_from_slice(line);
+        }
+    }
+    // The blank line, and whatever followed the head.
+    out.extend_from_slice(&head[head_end + 2..]);
     Some(out)
 }
 
@@ -645,12 +672,18 @@ mod tests {
         let head = |target: &str| {
             format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:1\r\nUpgrade: websocket\r\n\r\nrest")
         };
+        let admit = |head: &[u8], token: &str, path: &str| admit(head, token, path, "npub1x.fips:7777");
         let ok = admit(head("/abc").as_bytes(), "abc", "").unwrap();
-        assert!(ok.starts_with(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:1\r\n"));
-        assert!(
-            ok.ends_with(b"\r\n\r\nrest"),
-            "bytes after the head pass through"
+        // The relay's own name replaces the loopback Host; the rest stays.
+        assert_eq!(
+            ok,
+            b"GET / HTTP/1.1\r\nHost: npub1x.fips:7777\r\nUpgrade: websocket\r\n\r\nrest"
         );
+        // Whatever the header's case, and a head that had none gets one.
+        let ok = admit(b"GET /abc HTTP/1.1\r\nhOsT:evil\r\nA: b\r\n\r\n", "abc", "").unwrap();
+        assert_eq!(ok, b"GET / HTTP/1.1\r\nHost: npub1x.fips:7777\r\nA: b\r\n\r\n");
+        let ok = admit(b"GET /abc HTTP/1.1\r\n\r\n", "abc", "").unwrap();
+        assert_eq!(ok, b"GET / HTTP/1.1\r\nHost: npub1x.fips:7777\r\n\r\n");
         // The relay's own path replaces the token.
         let ok = admit(head("/abc/nostr").as_bytes(), "abc", "/nostr").unwrap();
         assert!(ok.starts_with(b"GET /nostr HTTP/1.1\r\n"));
@@ -664,9 +697,6 @@ mod tests {
         );
     }
 
-    /// The pipe between a real loopback socket and a smoltcp echo server on
-    /// the far end of two channels: bytes both ways, then a clean close
-    /// started from the local side.
     /// A caller that never finishes its head is cut off at the deadline,
     /// however steadily it keeps sending.
     #[test]
@@ -712,6 +742,9 @@ mod tests {
         assert_eq!(waiting.lock().unwrap().streams.len(), MAX_WAITING - 1);
     }
 
+    /// The pipe between a real loopback socket and a smoltcp echo server on
+    /// the far end of two channels: bytes both ways, then a clean close
+    /// started from the local side.
     #[test]
     fn pipe_against_a_userspace_echo_server() {
         let client_addr: Ipv6Addr = "fd00::1".parse().unwrap();
