@@ -80,6 +80,40 @@ impl Quiet {
     }
 }
 
+/// `line` with the access token of every mesh relay's loopback URL
+/// replaced. nostr-sdk logs the URL it dials, `ws://127.0.0.1:<port>/<token>`
+/// (see `meshtcp.rs`), and that token is what admits a caller to the relay
+/// connection. It is new at every node start and useless off this phone,
+/// but the log is there to be copied and sent to someone. At every level:
+/// debug and trace are the ones a log is shared at.
+fn mask_tokens(line: &str) -> std::borrow::Cow<'_, str> {
+    const MARK: &str = "ws://127.0.0.1:";
+    const TOKEN_LEN: usize = 32;
+    if !line.contains(MARK) {
+        return line.into();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find(MARK) {
+        let after = &rest[at + MARK.len()..];
+        let port = after.bytes().take_while(u8::is_ascii_digit).count();
+        let token = after[port..].strip_prefix('/').map_or(0, |path| {
+            path.bytes().take_while(u8::is_ascii_hexdigit).count()
+        });
+        let keep = at + MARK.len() + port;
+        if port > 0 && token >= TOKEN_LEN {
+            out.push_str(&rest[..keep]);
+            out.push_str("/<token>");
+            rest = &rest[keep + 1 + token..];
+        } else {
+            out.push_str(&rest[..keep]);
+            rest = &rest[keep..];
+        }
+    }
+    out.push_str(rest);
+    out.into()
+}
+
 fn push_line(line: &str) {
     if line.is_empty() {
         return;
@@ -132,6 +166,7 @@ impl io::Write for FanoutWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         for line in buf.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
             let s = String::from_utf8_lossy(line);
+            let s = mask_tokens(&s);
             if QUIET.load(Ordering::Relaxed)
                 && !FILTER
                     .lock()
@@ -185,6 +220,27 @@ mod tests {
             &format!("2026-11-15T09:15:54.427677Z {ABORT}"),
             start + Duration::from_secs(19)
         ));
+    }
+
+    #[test]
+    fn a_mesh_relay_token_is_not_logged() {
+        let token = "16cc43dfee59ddc62aa4fe8142932890";
+        let line = format!(
+            "ERROR nostr_relay_pool::relay::inner: Connection failed. url=ws://127.0.0.1:46353/{token} error=x; Connected to 'ws://127.0.0.1:9/{token}/sub'"
+        );
+        assert_eq!(
+            mask_tokens(&line),
+            "ERROR nostr_relay_pool::relay::inner: Connection failed. url=ws://127.0.0.1:46353/<token> error=x; Connected to 'ws://127.0.0.1:9/<token>/sub'"
+        );
+        // Not a token: other hosts, a short path, no path, nothing after the port.
+        for line in [
+            format!("url=wss://relay.example/{token}"),
+            "url=ws://127.0.0.1:7777/abc".to_string(),
+            "bind=ws://127.0.0.1:7777".to_string(),
+            "ws://127.0.0.1:".to_string(),
+        ] {
+            assert_eq!(mask_tokens(&line), line);
+        }
     }
 
     #[test]
