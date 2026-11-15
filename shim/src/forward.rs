@@ -36,6 +36,8 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the app side gets to take the FIN that tells it its server is
 /// gone (see [`forward_tcp`]).
 const APP_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How many times that is tried before the connection is dropped.
+const APP_CLOSE_TRIES: u32 = 3;
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_MAX_DATAGRAM: usize = 65535;
 /// A DNS-over-TCP connection with nothing to read is closed after this.
@@ -115,6 +117,88 @@ impl AsyncWrite for ForwardDevice {
     }
 }
 
+/// The app's side of a forwarded TCP connection, dropped on another thread.
+///
+/// `ipstack` ends a connection's session task from `Drop`, and waits for it
+/// there: `block_in_place`, then `block_on` of the task's handle. That is
+/// written for a multi-threaded runtime, and the forwarder's has one thread.
+/// While the runtime ran, the drop of a connection whose session was not
+/// over panicked ("can call blocking only when running on the
+/// multi-threaded runtime") — caught by the flow's task, with the session
+/// left to its own timeout. When the runtime shut down, the same drop was
+/// allowed to block, on a task only this thread could finish: the
+/// forwarder's thread parked for good with every stop that found a
+/// connection open, `join` gave up on it after 3 s, and the thread stayed
+/// (a Pixel 9 Pro on 0.10.1 still had it a quarter of an hour later).
+///
+/// So the stream is handed to [`reap`]'s thread instead, where waiting is
+/// legitimate: the forwarder's thread keeps running the session task, or
+/// cancels it on shutdown, and either ends the wait.
+struct AppTcp {
+    stream: Option<ipstack::IpStackTcpStream>,
+    reaper: StdSender<ipstack::IpStackTcpStream>,
+}
+
+impl AppTcp {
+    fn stream(&mut self) -> Pin<&mut ipstack::IpStackTcpStream> {
+        Pin::new(self.stream.as_mut().expect("taken only by drop"))
+    }
+}
+
+impl AsyncRead for AppTcp {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.stream().poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AppTcp {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.stream().poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.stream().poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.stream().poll_shutdown(cx)
+    }
+}
+
+impl Drop for AppTcp {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take()
+            && let Err(unsent) = self.reaper.send(stream)
+        {
+            // No reaper left to wait on it. Leaking one connection's state
+            // is the lesser harm: dropping it here is the panic or the hang.
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!("forwarder reaper is gone; closed connections keep their state");
+            }
+            std::mem::forget(unsent.0);
+        }
+    }
+}
+
+/// Drop the streams [`AppTcp`] hands over, until the last sender is gone.
+/// `ipstack`'s drop asks for the current runtime, hence the handle.
+fn reap(
+    handle: tokio::runtime::Handle,
+    streams: std::sync::mpsc::Receiver<ipstack::IpStackTcpStream>,
+) {
+    let _runtime = handle.enter();
+    for stream in streams {
+        drop(stream);
+    }
+}
+
 fn protect_fd<S: AsRawFd>(socket: &S, protect: &Option<SocketProtect>) {
     if let Some(hook) = protect {
         hook(socket.as_raw_fd());
@@ -144,20 +228,30 @@ impl Forwarder {
         let shutdown = Arc::new(Notify::new());
         let shutdown_rx = shutdown.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // Both built here, not on the thread, so a failure fails the start
+        // instead of leaving an engine that reports running with no
+        // forwarder behind it.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let (reaper, dropped) = std::sync::mpsc::channel();
+        let handle = rt.handle().clone();
+        std::thread::Builder::new()
+            .name("fips-fwd-reaper".into())
+            .spawn(move || reap(handle, dropped))?;
         let thread = std::thread::Builder::new()
             .name("fips-forwarder".into())
             .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!(error = %e, "forwarder runtime build failed");
-                        return;
-                    }
-                };
-                rt.block_on(run(inbound, to_tun, protect, running, shutdown_rx, mtu, dns));
+                rt.block_on(run(
+                    inbound,
+                    to_tun,
+                    protect,
+                    running,
+                    shutdown_rx,
+                    mtu,
+                    dns,
+                    reaper,
+                ));
                 // A plain `drop(rt)` waits unboundedly for blocking-pool
                 // threads; on-device one parked such thread kept this join —
                 // and the app's whole disconnect — hanging. Bound the wait;
@@ -182,7 +276,9 @@ impl Forwarder {
     /// completes and a tunnel that never closes. If the thread won't die in
     /// time, abandon it: the engine is tearing down anyway, and a leaked
     /// parked thread is strictly better than a hung `stop()`.
-    pub fn join(mut self) {
+    ///
+    /// Returns whether the thread stopped.
+    pub fn join(mut self) -> bool {
         self.shutdown.notify_one();
         match self.done_rx.recv_timeout(Duration::from_secs(3)) {
             // Reached its last line (send) or died earlier (disconnect):
@@ -191,10 +287,12 @@ impl Forwarder {
                 if let Some(t) = self.thread.take() {
                     let _ = t.join();
                 }
+                true
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 tracing::warn!("forwarder did not stop in 3s; abandoning its thread");
                 self.thread.take(); // drop the handle → detach
+                false
             }
         }
     }
@@ -208,6 +306,7 @@ impl Drop for Forwarder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     inbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
     to_tun: StdSender<Vec<u8>>,
@@ -216,6 +315,7 @@ async fn run(
     shutdown: Arc<Notify>,
     mtu: u16,
     dns: Option<DnsOverTcp>,
+    reaper: StdSender<ipstack::IpStackTcpStream>,
 ) {
     let device = ForwardDevice {
         inbound,
@@ -240,7 +340,12 @@ async fn run(
         };
         match accepted {
             Ok(IpStackStream::Tcp(tcp)) => {
-                if let Some(dns) = dns.as_ref().filter(|d| d.addr == tcp.peer_addr()) {
+                let dst = tcp.peer_addr();
+                let tcp = AppTcp {
+                    stream: Some(tcp),
+                    reaper: reaper.clone(),
+                };
+                if let Some(dns) = dns.as_ref().filter(|d| d.addr == dst) {
                     let proxy = dns.proxy.clone();
                     tokio::spawn(async move {
                         if let Err(e) = serve_dns_tcp(tcp, proxy).await {
@@ -251,7 +356,7 @@ async fn run(
                 }
                 let protect = protect.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = forward_tcp(tcp, protect).await {
+                    if let Err(e) = forward_tcp(tcp, dst, protect).await {
                         tracing::debug!(error = %e, "tcp flow ended");
                     }
                 });
@@ -273,10 +378,10 @@ async fn run(
 }
 
 async fn forward_tcp(
-    mut client: ipstack::IpStackTcpStream,
+    mut client: AppTcp,
+    dst: std::net::SocketAddr,
     protect: Option<SocketProtect>,
 ) -> io::Result<()> {
-    let dst = client.peer_addr();
     let socket = if dst.is_ipv4() {
         TcpSocket::new_v4()?
     } else {
@@ -310,9 +415,22 @@ async fn forward_tcp(
 /// "aborted" rather than "closed"; and it sends the FIN only from an open,
 /// idle connection, otherwise the timeout passes and the old silent drop
 /// remains.
-async fn close_app_side(mut client: ipstack::IpStackTcpStream, error: io::Error) -> io::Error {
+async fn close_app_side(mut client: AppTcp, error: io::Error) -> io::Error {
     use tokio::io::AsyncWriteExt;
-    let _ = tokio::time::timeout(APP_CLOSE_TIMEOUT, client.shutdown()).await;
+    // More than one try: the stack sends the FIN only when a try finds
+    // nothing in flight, and the drop that follows ends the session at once
+    // — data the app has not acknowledged by then is not sent again. (The
+    // drop used to fail, see `AppTcp`, and the session went on resending on
+    // its own.) An answer whose tail is still on its way to a slow app gets
+    // these seconds to arrive.
+    for _ in 0..APP_CLOSE_TRIES {
+        if tokio::time::timeout(APP_CLOSE_TIMEOUT, client.shutdown())
+            .await
+            .is_ok()
+        {
+            break;
+        }
+    }
     error
 }
 
@@ -477,6 +595,158 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("forwarder join hung despite shutdown signal");
         drop(inbound_tx); // keep the sender alive until after the join
+    }
+
+    fn checksum(parts: &[&[u8]]) -> u16 {
+        let mut sum = 0u32;
+        for part in parts {
+            for pair in part.chunks(2) {
+                sum += u32::from(u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)]));
+            }
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// An IPv4 TCP segment without payload, as an app sends it into the
+    /// tunnel.
+    fn segment(src: ([u8; 4], u16), dst: ([u8; 4], u16), seq: u32, ack: u32, flags: u8) -> Vec<u8> {
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&src.1.to_be_bytes());
+        tcp.extend_from_slice(&dst.1.to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&ack.to_be_bytes());
+        tcp.extend_from_slice(&[0x50, flags]); // header 20 bytes
+        tcp.extend_from_slice(&65535u16.to_be_bytes()); // window
+        tcp.extend_from_slice(&[0, 0, 0, 0]); // checksum, urgent
+        let pseudo = [&src.0[..], &dst.0[..], &[0, 6], &(tcp.len() as u16).to_be_bytes()].concat();
+        let sum = checksum(&[&pseudo, &tcp]);
+        tcp[16..18].copy_from_slice(&sum.to_be_bytes());
+
+        let mut ip = vec![0x45, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0x40, 0, 64, 6, 0, 0]); // id, DF, ttl, TCP, checksum
+        ip.extend_from_slice(&src.0);
+        ip.extend_from_slice(&dst.0);
+        let sum = checksum(&[&ip]);
+        ip[10..12].copy_from_slice(&sum.to_be_bytes());
+        ip.extend_from_slice(&tcp);
+        ip
+    }
+
+    const SYN: u8 = 0x02;
+    const ACK: u8 = 0x10;
+    const APP_SEQ: u32 = 1000;
+
+    /// The app's half of a handshake with `server` through the forwarder:
+    /// SYN, the stack's SYN-ACK, ACK. Returns the server's end once the
+    /// forwarder has dialed it, so the connection is open on both sides.
+    fn connect(
+        inbound: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        to_app: &std::sync::mpsc::Receiver<Vec<u8>>,
+        app: ([u8; 4], u16),
+        server: &std::net::TcpListener,
+    ) -> std::net::TcpStream {
+        let dst = ([127, 0, 0, 1], server.local_addr().unwrap().port());
+        inbound
+            .blocking_send(segment(app, dst, APP_SEQ, 0, SYN))
+            .unwrap();
+        let syn_ack = to_app
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a SYN-ACK for the app");
+        assert_eq!(syn_ack[33] & (SYN | ACK), SYN | ACK, "a SYN-ACK");
+        let stack_seq = u32::from_be_bytes(syn_ack[24..28].try_into().unwrap());
+        inbound
+            .blocking_send(segment(app, dst, APP_SEQ + 1, stack_seq.wrapping_add(1), ACK))
+            .unwrap();
+        accept(server)
+    }
+
+    /// `accept` with a deadline: a dial that never comes fails the test
+    /// instead of hanging the run.
+    fn accept(server: &std::net::TcpListener) -> std::net::TcpStream {
+        server.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok((stream, _)) = server.accept() {
+                return stream;
+            }
+            assert!(std::time::Instant::now() < deadline, "the server was never dialed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A stop with a TCP connection open must still end the forwarder's
+    /// thread. On a Pixel 9 Pro (0.10.1) a node restart logged "forwarder
+    /// did not stop in 3s" and the thread was still parked a quarter of an
+    /// hour later, in `IpStackTcpStream::drop` under the runtime's shutdown.
+    #[test]
+    fn join_ends_the_thread_with_a_tcp_connection_open() {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (to_tun, to_tun_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let running = Arc::new(AtomicBool::new(true));
+        let forwarder =
+            Forwarder::spawn(inbound_rx, to_tun, None, running.clone(), 1280, None).unwrap();
+
+        let _server_side = connect(&inbound_tx, &to_tun_rx, ([10, 111, 222, 1], 40000), &server);
+
+        running.store(false, Ordering::Relaxed);
+        assert!(forwarder.join(), "the forwarder's thread was abandoned");
+        drop(inbound_tx);
+    }
+
+    /// An open connection that ends while the forwarder runs — here its
+    /// server resets it, and the app never answers the FIN — is over for
+    /// the stack too: the same addresses and ports can connect again. Its
+    /// drop used to panic instead, and the session stayed until the stack's
+    /// own timeout, swallowing the new SYN.
+    #[test]
+    fn a_connection_whose_server_reset_it_can_be_made_again() {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dst = ([127, 0, 0, 1], server.local_addr().unwrap().port());
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (to_tun, to_tun_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let running = Arc::new(AtomicBool::new(true));
+        let forwarder =
+            Forwarder::spawn(inbound_rx, to_tun, None, running.clone(), 1280, None).unwrap();
+        let app = ([10, 111, 222, 1], 40001);
+
+        let server_side = connect(&inbound_tx, &to_tun_rx, app, &server);
+        // Closing with SO_LINGER 0 sends a reset.
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        let set = unsafe {
+            libc::setsockopt(
+                server_side.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&linger as *const libc::linger).cast(),
+                std::mem::size_of::<libc::linger>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0);
+        drop(server_side);
+
+        // A new SYN from the same port, again and again until the server is
+        // dialed a second time: while the old session is there it takes the
+        // SYN and nothing is dialed.
+        let deadline = std::time::Instant::now()
+            + APP_CLOSE_TIMEOUT * APP_CLOSE_TRIES
+            + Duration::from_secs(5);
+        while server.accept().is_err() {
+            assert!(std::time::Instant::now() < deadline, "the second connection was not dialed");
+            let _ = inbound_tx.blocking_send(segment(app, dst, APP_SEQ + 5000, 0, SYN));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        running.store(false, Ordering::Relaxed);
+        assert!(forwarder.join(), "the forwarder's thread was abandoned");
+        drop(inbound_tx);
     }
 
     /// A minimal query: id, RD, one question (`example.com A`).
