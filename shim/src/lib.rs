@@ -28,6 +28,10 @@ pub mod pump;
 /// behind a reload handle: calling this again (every engine start, i.e. every
 /// reconnect) swaps the filter in place, so a log-level settings change takes
 /// effect on the next connect without killing the app process.
+///
+/// At error, warn and info — the levels someone reads in the app's viewer —
+/// the log is kept to what they can act on, see [`log_directives`] and
+/// `logbuf::Quiet`. Debug and trace show everything.
 pub fn init_logging(level: Option<&str>) {
     use std::sync::OnceLock;
     use tracing_subscriber::{
@@ -35,8 +39,9 @@ pub fn init_logging(level: Option<&str>) {
     };
     static FILTER: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
 
-    let filter =
-        EnvFilter::try_new(level.unwrap_or("info")).unwrap_or_else(|_| EnvFilter::new("info"));
+    let (directives, quiet) = log_directives(level);
+    logbuf::set_quiet(quiet);
+    let filter = EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new("info"));
 
     if let Some(handle) = FILTER.get() {
         let _ = handle.reload(filter);
@@ -56,4 +61,41 @@ pub fn init_logging(level: Option<&str>) {
     }
     // try_init failing means another subscriber owns the process (host
     // tests); leave the handle unset and stay a no-op there.
+}
+
+/// The filter for a configured log level, and whether the log is kept quiet.
+///
+/// Quiet, two warnings that are routine on a phone are left out:
+/// - `ipstack` warns for every forwarded connection it closes after its
+///   idle timeout, twice;
+/// - fips's netmon warns at every node start that kernel medium-change
+///   events are unavailable. They always are: SELinux refuses apps the
+///   netlink socket, and the service pokes the detector itself.
+fn log_directives(level: Option<&str>) -> (String, bool) {
+    let level = level.unwrap_or("info");
+    match level.to_ascii_lowercase().as_str() {
+        "error" | "warn" | "info" => (
+            format!("{level},ipstack=error,fips::node::netmon=error"),
+            true,
+        ),
+        _ => (level.to_string(), false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_directives;
+
+    #[test]
+    fn only_the_levels_someone_reads_are_kept_quiet() {
+        for level in [None, Some("info"), Some("warn"), Some("error"), Some("INFO")] {
+            let (directives, quiet) = log_directives(level);
+            assert!(quiet, "{level:?}");
+            assert!(directives.ends_with(",ipstack=error,fips::node::netmon=error"));
+            assert!(tracing_subscriber::EnvFilter::try_new(&directives).is_ok());
+        }
+        for level in ["debug", "trace", "info,fips=debug"] {
+            assert_eq!(log_directives(Some(level)), (level.to_string(), false));
+        }
+    }
 }
