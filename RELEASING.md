@@ -6,7 +6,8 @@ might.
 
 Two distribution channels, in order: **GitHub Releases** (which the in-app
 updater reads) and **Zapstore** (Nostr-based). GitHub first — Zapstore's
-manifest pulls the APK from the GitHub release.
+manifest pulls the APK from the GitHub release. The repository is also
+mirrored to Nostr (ngit); step 8 brings that mirror up to the release.
 
 ## 0. Decide whether to release at all
 
@@ -42,6 +43,7 @@ The updater compares dotted numerics, so differing segment counts (`0.2` vs
 | GitHub CLI | `gh auth status` — needs `repo` scope |
 | Zapstore CLI | `zsp` (`~/go/bin/zsp`; on PATH via `~/.profile`). Prebuilt: `gh release download -R zapstore/zsp -p 'zsp-*-linux-amd64' -O ~/go/bin/zsp` |
 | Nostr signer | The publisher nsec in `~/.zsp-nsec` (mode 600) — see step 5. `nak` (`~/go/bin/nak`, prebuilt from `fiatjaf/nak`) for the identity link and relay checks |
+| ngit | `ngit` + `git-remote-nostr` (`cargo install ngit --locked`, run outside this repo so the pinned toolchain does not apply), for the Nostr mirror — see step 8 |
 
 Without `keystore.properties` the APKs come out **unsigned**, which the script
 does not treat as fatal. Check the signature output in step 2.
@@ -283,7 +285,65 @@ asyncio.run(main())
 Check the newest `d` tag is `org.fips.android@<version>` and that the file
 event's `x` (sha256) and `size` match `dist/v<version>/` exactly.
 
-## 8. Clean up
+## 8. Sync the Nostr mirror
+
+The repository is announced on Nostr (NIP-34) by the publisher npub
+`…wha52w`, the same key as Zapstore, with the git data on the grasp servers
+`relay.ngit.dev` and `gitnostr.com` and GitHub listed as a third clone:
+
+```
+nostr://npub1yptpz34agws3z95dqxgvyhwnhkulav5vueryjpzrl32p57euwteqwha52w/relay.ngit.dev/fips2go
+```
+
+GitHub stays where PRs are merged and tags are made, so the mirror only moves
+when someone moves it. After the release tag exists on GitHub:
+
+```bash
+ngit sync
+```
+
+Nostr state is the source of truth for ngit, and a plain `ngit sync` pushes
+that state *to* the servers. What makes it run the other way here is
+`nostr.trust-server-domains=github.com` in this clone's git config: a ref on
+GitHub that is a clean fast-forward ahead is adopted into the Nostr state and
+copied to the grasp servers. Without that setting, pass `--trust-server`.
+
+Verify — all three must name the release commit, and the tag must be there:
+
+```bash
+git ls-remote origin main v<version>
+git ls-remote nostr  main v<version>
+ngit sync --ref-name main      # → "already in sync" for all three servers
+```
+
+If the new tag did not come across (adoption is documented for refs that are
+*ahead*; a ref that is new on GitHub was not tried when this was written),
+push it through the mirror, which is a no-op on GitHub:
+
+```bash
+git fetch origin --tags && git push nostr v<version>
+```
+
+- This is not only a release step: run `ngit sync` after any merge to `main`
+  if the mirror should not lag until the next release.
+- `git push nostr …` also pushes to GitHub, because GitHub is a listed clone.
+  Push to `origin` as always and let `ngit sync` carry it over.
+- Never pass `--force` to `ngit sync`: it deletes and force-updates refs on
+  GitHub to match the Nostr state.
+- The remote is named `nostr` and `origin` is GitHub. `ngit init` sets it up
+  the other way round (`origin` = nostr, `github` = GitHub).
+
+**On a new machine** (the announcement already exists — do not run
+`ngit init` again):
+
+```bash
+ngit account login --local --nsec-file ~/.zsp-nsec --profile fips2go
+git remote add nostr nostr://npub1yptpz34agws3z95dqxgvyhwnhkulav5vueryjpzrl32p57euwteqwha52w/relay.ngit.dev/fips2go
+git config nostr.trust-server-domains github.com
+git fetch nostr && ngit repo        # health: ok, three servers
+```
+
+## 9. Clean up
 
 Nothing to shred: `~/.zsp-nsec` is the publisher identity and stays (step 5).
 `zsp`'s own flows can leave `/.env` and `/signing-crt_*.txt` in the repo; both
