@@ -1,0 +1,60 @@
+# fips2go exit node. See README.md. Before the first start:
+#   mkdir -p data && $EDITOR data/allowed_npubs
+services:
+  fips-exit:
+    build: .
+    image: fips2go-exit
+    restart: unless-stopped
+    cap_drop: [ALL]
+    # NET_ADMIN: fips0, the tunnels and the firewall. NET_RAW: fips's TUN.
+    # NET_BIND_SERVICE: DNS on port 53. SETUID/SETGID: dnsmasq drops to
+    # nobody after binding.
+    cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE, SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    devices: [/dev/net/tun:/dev/net/tun]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "0"
+      net.ipv6.conf.all.disable_ipv6: "0"
+    environment:
+      # Interface to the internet inside the container.
+      WAN_IFACE: eth0
+      # Allowed phones, in addition to data/allowed_npubs (space separated).
+      # ALLOWED_NPUBS: "npub1..."
+      # fips peers, npub@host:port, space separated. Default: the public
+      # bootstrap servers the app uses, so phones with default settings
+      # find this exit.
+      # FIPS_PEERS: "npub1...@host:2121"
+      # Extra destinations clients may never reach. Private ranges and this
+      # network's public address (below) are always blocked.
+      # BLOCK_CIDRS: "203.0.113.7/32"
+      # DNS_UPSTREAMS: "1.1.1.1 9.9.9.9"
+      # This network's public IPv4 address is blocked too, looked up at start
+      # and every PUBLIC_IP_INTERVAL seconds; no answer at start stops the
+      # exit. "off" turns it off. See README.md, "This network's public address".
+      # PUBLIC_IP_LOOKUP: "https://api.ipify.org https://ipv4.icanhazip.com https://v4.ident.me"
+      # PUBLIC_IP_INTERVAL: "300"
+      # Services on your LAN (or this host) that allowed phones may reach,
+      # as MESH_PORT=IPv4:PORT, space separated, TCP only. A phone opens
+      # http://<exit>.fips:MESH_PORT. See README.md, "Publishing services".
+      # PUBLISH: "8000=192.168.1.20:8000"
+    volumes:
+      # The allow-list: edit it on the host, then `docker compose restart`.
+      # Long form: a missing file is an error, rather than Docker creating a
+      # root-owned directory in its place.
+      - type: bind
+        source: ./data/allowed_npubs
+        target: /etc/exit/allowed_npubs
+        read_only: true
+        bind:
+          create_host_path: false
+      # The exit's identity (fips.key) and generated config. A named volume,
+      # because with every capability dropped the container's root cannot
+      # write to (or chmod) a host directory owned by another user.
+      - state:/data
+    # Optional: lets other fips nodes peer with the exit directly, which
+    # gives phones a shorter path. The exit works without it.
+    # ports: ["2121:2121/udp"]
+
+volumes:
+  state:
