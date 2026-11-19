@@ -99,6 +99,10 @@ object ConfigStore {
      * [RETIRED_KEYS], so applyDefaults would delete this list on every launch.
      */
     const val NOSTR_RELAYS = "relay_list"
+    /** Exit nodes: a JSON array of `{name, npub}` ([exitNodes]). */
+    const val EXIT_NODES = "exit_nodes"
+    /** The selected exit's npub; absent = the phone's own connection. */
+    const val EXIT_SELECTED = "exit_selected"
 
     /**
      * Mesh names sync ([HostsSync]): pull the name list of a node running
@@ -263,6 +267,58 @@ object ConfigStore {
         else e.putString(NOSTR_RELAYS, relays.joinToString("\n"))
         e.apply()
     }
+
+    /** An exit node: internet traffic of the mesh apps can leave through it. */
+    data class ExitNode(val name: String, val npub: String)
+
+    const val MAX_EXITS = 16
+
+    /** The stored exit nodes, in the order they were added. */
+    fun exitNodes(context: Context): List<ExitNode> {
+        val raw = prefs(context).getString(EXIT_NODES, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val npub = o.optString("npub").trim()
+                if (npub.isEmpty()) null else ExitNode(o.optString("name").trim(), npub)
+            }.distinctBy { it.npub }.take(MAX_EXITS)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun setExitNodes(context: Context, nodes: List<ExitNode>) {
+        val arr = JSONArray()
+        nodes.take(MAX_EXITS).forEach {
+            arr.put(JSONObject().put("name", it.name).put("npub", it.npub))
+        }
+        val e = prefs(context).edit().putString(EXIT_NODES, arr.toString())
+        // Removing the selected exit returns to the phone's connection.
+        val selected = prefs(context).getString(EXIT_SELECTED, null)
+        if (selected != null && nodes.none { it.npub == selected }) e.remove(EXIT_SELECTED)
+        e.apply()
+    }
+
+    /**
+     * The exit the next node start routes internet traffic through, or null for
+     * the phone's own connection. Only an npub that is still in the list counts.
+     */
+    fun selectedExit(context: Context): ExitNode? {
+        val npub = prefs(context).getString(EXIT_SELECTED, null) ?: return null
+        return exitNodes(context).firstOrNull { it.npub == npub }
+    }
+
+    /** Select an exit by npub, or null for the phone's own connection. */
+    fun selectExit(context: Context, npub: String?) {
+        val e = prefs(context).edit()
+        if (npub == null) e.remove(EXIT_SELECTED) else e.putString(EXIT_SELECTED, npub)
+        e.apply()
+    }
+
+    /** A label for an exit: its name, or a shortened npub. */
+    fun exitLabel(node: ExitNode): String =
+        node.name.ifEmpty { "${node.npub.take(12)}…${node.npub.takeLast(6)}" }
 
     /** The mesh relays for public names, validated; at most [MAX_RELAYS]. */
     fun meshRelays(context: Context): List<String> =
@@ -577,6 +633,12 @@ object ConfigStore {
         customRelays(context)?.let { relays ->
             config.put("nostr_relays", JSONArray(relays.take(MAX_RELAYS)))
         }
+
+        // Internet traffic of the mesh apps through an exit node instead of
+        // the phone's connection. Blocks when the exit is unreachable; the
+        // mesh itself is unaffected. A change while connected switches the
+        // exit in the running node (the shim compares configs without it).
+        selectedExit(context)?.let { config.put("exit_node", it.npub) }
 
         val inboundPorts = JSONArray()
         (p.getString(INBOUND_PORTS, "") ?: "").split('\n', ',', ' ')
