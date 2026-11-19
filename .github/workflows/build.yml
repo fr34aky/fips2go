@@ -44,6 +44,20 @@ jobs:
             fi
             echo "$lock OK"
           done
+          # The exit node builds the fips daemon at the same rev, so the exit
+          # speaks the same fips as the phone.
+          # Full commit there (GitHub serves no fetch by short hash), so it
+          # is compared with the one shim/Cargo.lock resolved the pin to.
+          exit_rev=$(grep -oP '^ARG FIPS_REV=\K\S+' exit-node/Dockerfile)
+          locked=$(grep -oP "rev=$shim#\K[0-9a-f]{40}" shim/Cargo.lock | sort -u)
+          echo "exit-node/Dockerfile FIPS_REV = $exit_rev (lock: $locked)"
+          if [ "$exit_rev" != "$locked" ]; then
+            echo "::error::exit-node/Dockerfile FIPS_REV ($exit_rev) is not the shim's locked fips commit ($locked)"
+            exit 1
+          fi
+
+      - name: exit node unit tests (allow-list, addresses, firewall rules)
+        run: python3 -I -m unittest discover -s exit-node -v
 
       - name: ABI list is in sync across the three places that define it
         run: |

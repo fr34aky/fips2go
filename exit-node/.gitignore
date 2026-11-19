@@ -1,0 +1,5 @@
+# The exit identity (fips.key) and allow-list live here: never commit them.
+data/
+__pycache__/
+# Host-specific compose overrides stay on the host.
+compose.override.yaml
