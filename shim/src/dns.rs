@@ -68,8 +68,20 @@ pub struct DnsProxy {
     /// `Capped(n)` that it goes upstream but with the answer's TTLs capped
     /// at `n` seconds (the lookup still deciding, or a server unreachable).
     pub names: Option<Arc<dyn crate::names::Lookup>>,
+    /// The exit-node selection and the mesh link to ask it over. While an
+    /// exit is selected, every non-`.fips` query goes to the exit's own
+    /// resolver (port 53 on its fips address) over the mesh and nowhere
+    /// else — no fallback to [`Self::upstreams`], which would tell the
+    /// phone's network every name looked up — and the public-names lookup
+    /// is skipped, since its TXT queries go out through the phone too.
+    pub exit: Option<ExitDns>,
     /// Queries being served now, bounded by [`MAX_IN_FLIGHT`].
     pub in_flight: AtomicUsize,
+}
+
+pub struct ExitDns {
+    pub switch: Arc<crate::exit::ExitSwitch>,
+    pub link: Arc<crate::meshhttp::MeshLink>,
 }
 
 /// One slot of [`DnsProxy::in_flight`], given back when the query's thread
@@ -254,6 +266,7 @@ impl DnsProxy {
             let outcome = self
                 .names
                 .as_ref()
+                .filter(|_| self.exit_addr().is_none())
                 .map(|n| n.lookup(query, &start_prefetch));
             let prefetched = slot.into_inner();
             match outcome {
@@ -337,8 +350,33 @@ impl DnsProxy {
         })
     }
 
-    /// The upstreams in order, the first that answers.
+    /// The selected exit's fips address, if any.
+    fn exit_addr(&self) -> Option<std::net::Ipv6Addr> {
+        self.exit.as_ref()?.switch.selected_addr()
+    }
+
+    /// True while an exit is selected: then no query may go to
+    /// [`Self::upstreams`] by any path, the exit's resolver alone answers.
+    pub fn exit_selected(&self) -> bool {
+        self.exit_addr().is_some()
+    }
+
+    /// The upstreams in order, the first that answers — or, with an exit
+    /// selected, the exit's resolver alone.
     fn forward_upstreams(&self, query: &[u8]) -> Option<Vec<u8>> {
+        if let Some(exit) = &self.exit
+            && let Some(addr) = exit.switch.selected_addr()
+        {
+            return match crate::meshudp::query(&exit.link, addr, 53, query, QUERY_TIMEOUT) {
+                Ok(reply) if reply.len() >= 2 && reply[..2] == query[..2] => Some(reply),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e.message, "exit node DNS unreachable");
+                    exit.switch.refused();
+                    None
+                }
+            };
+        }
         self.upstreams
             .iter()
             .find_map(|&upstream| self.forward(query, upstream, true))
@@ -583,6 +621,7 @@ mod tests {
             upstreams: vec![upstream_addr],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: None,
             in_flight: Default::default(),
@@ -620,6 +659,7 @@ mod tests {
             upstreams: vec![silent.local_addr().unwrap()],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: None,
             in_flight: AtomicUsize::new(MAX_IN_FLIGHT),
@@ -704,6 +744,7 @@ mod tests {
             upstreams: vec![upstream_addr],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: None,
             in_flight: Default::default(),
@@ -721,6 +762,7 @@ mod tests {
             upstreams: vec![], // nothing to try
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: None,
             in_flight: Default::default(),
@@ -792,6 +834,7 @@ mod tests {
             upstreams: vec![],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: hosts_reloader(path.to_str()),
             names: None,
             in_flight: Default::default(),
@@ -872,6 +915,7 @@ mod tests {
             upstreams: vec![upstream_addr],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: Some(Arc::new(Bound)),
             in_flight: Default::default(),
@@ -937,6 +981,7 @@ mod tests {
             upstreams: vec![upstream_addr],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: Some(Arc::new(Slow)),
             in_flight: Default::default(),
@@ -1029,6 +1074,7 @@ mod tests {
                 upstreams: vec![upstream],
                 writer_tx,
                 protect: None,
+            exit: None,
                 hosts: None,
                 names: Some(Arc::new(names)),
                 in_flight: Default::default(),
@@ -1136,6 +1182,7 @@ mod tests {
             upstreams: vec![slow_upstream(Duration::ZERO)],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: Some(Arc::new(Unavailable)),
             in_flight: Default::default(),
@@ -1197,6 +1244,7 @@ mod tests {
                 upstreams: vec![addr],
                 writer_tx,
                 protect: None,
+            exit: None,
                 hosts: None,
                 names: Some(Arc::new(Asks(asks))),
                 in_flight: Default::default(),

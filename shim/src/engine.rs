@@ -143,6 +143,9 @@ struct Engine {
     /// Public domain names over fips, when on; its caches are flushed on a
     /// network hint since "offline" and "online" decisions differ.
     names: Option<Arc<crate::names::Names>>,
+    /// Exit-node selection (internet traffic via an exit, or the phone's
+    /// own connection); switched in place by [`network_changed`].
+    exit: Arc<crate::exit::ExitSwitch>,
 }
 
 /// What `start()` reports back to Kotlin.
@@ -242,7 +245,7 @@ fn start_inner(
                     return;
                 }
                 // Processor needs the started transports' MTU floor.
-                let _ = ready_tx.send(Ok(node.tun_packet_processor()));
+                let _ = ready_tx.send(Ok((node.tun_packet_processor(), node.effective_ipv6_mtu())));
                 // Relay-pool refresher for the UI: the pool lives inside the
                 // Nostr runtime, which only this runtime may await on. Runs
                 // once per status poll (Notify permit), so it costs nothing
@@ -279,8 +282,8 @@ fn start_inner(
         })
         .map_err(|e| format!("spawn node thread: {e}"))?;
 
-    let processor = match ready_rx.recv_timeout(START_TIMEOUT) {
-        Ok(Ok(processor)) => processor,
+    let (processor, ipv6_mtu) = match ready_rx.recv_timeout(START_TIMEOUT) {
+        Ok(Ok(ready)) => ready,
         Ok(Err(e)) => {
             let _ = node_thread.join();
             return Err(e);
@@ -306,6 +309,19 @@ fn start_inner(
     // In slots from here on, so a later failure can take them for
     // `abort_start` and success can take them for the engine.
     let (mut stop_tx_slot, mut node_slot) = (Some(stop_tx), Some(node_thread));
+
+    // Exit node: chosen before the pump moves a single packet, so selected
+    // apps' internet traffic never starts out through the phone. A bad npub
+    // fails the start rather than quietly falling back to the phone.
+    let exit = Arc::new(crate::exit::ExitSwitch::new(
+        *our_fips_addr.as_bytes(),
+        ipv6_mtu,
+        LOCAL_RESPONDER.parse().unwrap(),
+    ));
+    if let Err(e) = exit.set(shim_config.exit_node.as_deref()) {
+        abort_start(stop_tx_slot.take(), &running, None, node_slot.take(), owned_fd);
+        return Err(e);
+    }
 
     let divert = Arc::new(crate::meshhttp::Divert::default());
     let mesh = Arc::new(crate::meshhttp::MeshLink {
@@ -344,6 +360,10 @@ fn start_inner(
         protect: engine_protect.clone(),
         hosts: crate::dns::hosts_reloader(shim_config.hosts_path.as_deref()),
         names: names.clone().map(|n| n as Arc<dyn crate::names::Lookup>),
+        exit: Some(crate::dns::ExitDns {
+            switch: exit.clone(),
+            link: mesh.clone(),
+        }),
         in_flight: Default::default(),
     });
 
@@ -395,6 +415,7 @@ fn start_inner(
         dns_addr: DNS_SENTINEL,
         dns,
         forward_tx,
+        exit: exit.clone(),
         writer_tx,
         writer_rx,
     })
@@ -424,6 +445,7 @@ fn start_inner(
         relay_refresh,
         mesh,
         names,
+        exit,
     };
     Ok((engine, StartInfo { npub, address }))
 }
@@ -533,7 +555,30 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
                 // the pump onto the new fd and keep the node, its links and
                 // sessions. A changed config (a FIPS Hotspot joined or left)
                 // still rebuilds the node, and so does a swap that fails.
-                let swapped = if config_json == stored_config {
+                // A config that differs only in `exit_node` is the same node:
+                // switch the exit in place, then swap the tunnel (Kotlin
+                // rebuilds it, since its IPv6 routes follow the exit). An
+                // exit that cannot be selected takes the restart path, whose
+                // start refuses it — never the old route.
+                let mut same_node = config_json == stored_config;
+                if !same_node && same_but_exit(config_json, &stored_config) {
+                    let exit = lock(&ENGINE).as_ref().map(|e| e.exit.clone());
+                    let switched = match (exit, ShimConfig::from_json(config_json)) {
+                        (Some(exit), Ok(c)) => exit.set(c.exit_node.as_deref()),
+                        (None, _) => Err("engine gone".into()),
+                        (_, Err(e)) => Err(e),
+                    };
+                    match switched {
+                        Ok(()) => {
+                            if let Some(engine) = lock(&ENGINE).as_mut() {
+                                engine.config_json = config_json.to_string();
+                            }
+                            same_node = true;
+                        }
+                        Err(e) => tracing::error!(error = %e, "exit node change failed"),
+                    }
+                }
+                let swapped = if same_node {
                     swap_tun_locked(tun_fd)
                         .map_err(|e| {
                             tracing::warn!(error = %e, "tunnel swap failed; restarting node on the tun fd");
@@ -556,6 +601,19 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
         tracing::error!(error = %e, "node rebuild after network change failed");
     }
     result
+}
+
+/// True when two config JSONs differ at most in `exit_node`.
+fn same_but_exit(a: &str, b: &str) -> bool {
+    let strip = |s: &str| {
+        serde_json::from_str::<serde_json::Value>(s).ok().map(|mut v| {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("exit_node");
+            }
+            v
+        })
+    };
+    matches!((strip(a), strip(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// Move the running engine's pump onto `tun_fd` (dup'd here) and close the
@@ -653,6 +711,10 @@ pub fn status_json() -> String {
             "status": engine.read_handle.query("show_status", None)
                 .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take)),
             "relays": lock(&engine.relay_status).clone(),
+            "exit": engine.exit.selected().map(|npub| serde_json::json!({
+                "npub": npub,
+                "inner_ipv4": engine.exit.inner().to_string(),
+            })),
         }),
     };
     if let Some(engine) = slot.as_ref() {
@@ -773,6 +835,17 @@ pub fn mesh_http_get_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_exit_change_keeps_the_node() {
+        let base = r#"{"nsec":"x","peers":[],"exit_node":null}"#;
+        let exit = r#"{"exit_node":"npub1abc","peers":[],"nsec":"x"}"#;
+        let other = r#"{"nsec":"x","peers":[],"exit_node":"npub1abc","hotspot":{}}"#;
+        assert!(same_but_exit(base, exit));
+        assert!(same_but_exit(r#"{"nsec":"x"}"#, exit.replace(r#""peers":[],"#, "").as_str()));
+        assert!(!same_but_exit(base, other));
+        assert!(!same_but_exit(base, "not json"));
+    }
 
     #[test]
     fn a_panic_under_a_lock_or_flag_leaves_both_usable() {
@@ -1032,6 +1105,163 @@ mod tests {
 
         stop();
         for fd in [old_tun, old_app, new_tun, new_app] {
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    /// An exit node that cannot be reached blocks: DNS gets SERVFAIL and the
+    /// phone's own upstream resolver hears nothing, while mesh traffic keeps
+    /// its own path. Switching back to the phone keeps the node and sends
+    /// DNS to the upstream again.
+    #[test]
+    fn an_unreachable_exit_blocks_but_the_mesh_still_works() {
+        let _serial = engine_test_lock();
+        let identity = crate::config::derive_identity("").unwrap();
+        let exit = crate::config::derive_identity("").unwrap();
+        let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        upstream
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        let config = |exit_node: Option<&str>| {
+            serde_json::json!({
+                "nsec": identity.nsec,
+                "peers": [],
+                "enable_nostr": false,
+                "enable_fips_dns": true,
+                "forward_clearnet": false,
+                "battery_saver": false,
+                "log_level": "warn",
+                "dns_upstreams": [upstream.local_addr().unwrap().to_string()],
+                "exit_node": exit_node,
+            })
+            .to_string()
+        };
+        let mut fds = [0i32; 2];
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) },
+            0
+        );
+        let [tun, app] = fds;
+        start(&config(Some(&exit.npub)), tun, None).unwrap_or_else(|e| panic!("start: {e}"));
+        struct StopOnDrop(i32, i32);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                stop();
+                unsafe { libc::close(self.0) };
+                unsafe { libc::close(self.1) };
+            }
+        }
+        let _stop = StopOnDrop(tun, app);
+        let status: serde_json::Value = serde_json::from_str(&status_json()).unwrap();
+        assert_eq!(status["exit"]["npub"], exit.npub);
+
+        let me: std::net::Ipv6Addr = identity.address.parse().unwrap();
+        let read_reply = |timeout_ms: i32| -> Option<Vec<u8>> {
+            let mut pfd = libc::pollfd { fd: app, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut pfd, 1, timeout_ms) } != 1 {
+                return None;
+            }
+            let mut buf = vec![0u8; 4096];
+            let n = unsafe { libc::read(app, buf.as_mut_ptr().cast(), buf.len()) };
+            buf.truncate(n.max(0) as usize);
+            Some(buf)
+        };
+        let send = |pkt: &[u8]| {
+            assert_eq!(unsafe { libc::write(app, pkt.as_ptr().cast(), pkt.len()) }, pkt.len() as isize);
+        };
+        let dns_query = crate::packet::build_ipv6_udp(
+            me.octets(),
+            DNS_SENTINEL,
+            40999,
+            53,
+            &[0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0, 0, 1, 0, 1],
+        );
+
+        // DNS: SERVFAIL from the proxy, nothing at the phone's upstream.
+        send(&dns_query);
+        let reply = read_reply(15_000).expect("a DNS reply");
+        let parsed = crate::packet::parse_ipv6_udp(&reply).expect("IPv6/UDP");
+        assert_eq!(parsed.payload[3] & 0x0f, 2, "SERVFAIL");
+        let mut buf = [0u8; 512];
+        assert!(upstream.recv_from(&mut buf).is_err(), "the upstream must not be asked");
+
+        // Mesh traffic is not the exit's: the node answers for itself.
+        let dst: std::net::Ipv6Addr = "fd12:3456::1".parse().unwrap();
+        send(&crate::packet::build_ipv6_udp(me.octets(), dst.octets(), 40000, 9, b"mesh"));
+        let reply = loop {
+            let r = read_reply(5000).expect("the node's answer");
+            if r.len() > 40 && r[6] == 58 {
+                break r;
+            }
+        };
+        assert_eq!(reply[40], 1, "Destination Unreachable from the node");
+
+        // Back to the phone: same node, DNS goes upstream again.
+        let first = lock(&ENGINE).as_ref().unwrap().start;
+        let (tun2, app2) = {
+            let mut f = [0i32; 2];
+            assert_eq!(
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, f.as_mut_ptr()) },
+                0
+            );
+            (f[0], f[1])
+        };
+        network_changed(tun2, Some(&config(None))).expect("switch");
+        assert_eq!(lock(&ENGINE).as_ref().unwrap().start, first, "same node");
+        let status: serde_json::Value = serde_json::from_str(&status_json()).unwrap();
+        assert!(status["exit"].is_null());
+        assert_eq!(unsafe { libc::write(app2, dns_query.as_ptr().cast(), dns_query.len()) }, dns_query.len() as isize);
+        upstream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        assert!(upstream.recv_from(&mut buf).is_ok(), "the upstream is asked again");
+        unsafe {
+            libc::close(tun2);
+            libc::close(app2);
+        }
+    }
+
+    /// A start refused for a bad exit npub stops the node it had started
+    /// (`abort_start`): nothing is left running, and the next start gets the
+    /// `.fips` responder port and comes up.
+    #[test]
+    fn a_bad_exit_npub_fails_the_start_and_leaves_nothing_behind() {
+        let _serial = engine_test_lock();
+        let identity = crate::config::derive_identity("").unwrap();
+        let config = |exit_node: Option<&str>| {
+            serde_json::json!({
+                "nsec": identity.nsec,
+                "peers": [],
+                "enable_nostr": false,
+                "enable_fips_dns": true,
+                "forward_clearnet": false,
+                "battery_saver": false,
+                "log_level": "warn",
+                "exit_node": exit_node,
+            })
+            .to_string()
+        };
+        let pair = || {
+            let mut fds = [0i32; 2];
+            assert_eq!(
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) },
+                0
+            );
+            (fds[0], fds[1])
+        };
+        let (tun, app) = pair();
+        let Err(err) = start(&config(Some("npub1typo")), tun, None) else {
+            panic!("started with a bad exit npub");
+        };
+        assert!(err.contains("exit node"), "{err}");
+        assert!(!is_running());
+        assert!(lock(&ENGINE).is_none());
+
+        let (tun2, app2) = pair();
+        start(&config(None), tun2, None).unwrap_or_else(|e| panic!("the next start: {e}"));
+        assert!(is_running());
+        stop();
+        for fd in [tun, app, tun2, app2] {
             unsafe { libc::close(fd) };
         }
     }
