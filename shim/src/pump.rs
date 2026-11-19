@@ -130,6 +130,7 @@ struct ReaderCtx {
     dns: Arc<DnsProxy>,
     forward_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     filter: Option<Arc<crate::filter::InboundFilter>>,
+    exit: Arc<crate::exit::ExitSwitch>,
 }
 
 pub struct PumpConfig {
@@ -157,6 +158,10 @@ pub struct PumpConfig {
     /// disables forwarding (such packets are dropped) — used when the VPN only
     /// routes `fd00::/8` and no clearnet is expected.
     pub forward_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    /// The exit-node selection: with one selected, internet traffic is
+    /// wrapped for it instead of going to `forward_tx`, and its replies are
+    /// unwrapped in the bridge. Mesh traffic never goes near it.
+    pub exit: Arc<crate::exit::ExitSwitch>,
     /// The writer channel pair (the sender is also held by the DNS proxy).
     pub writer_tx: Sender<Vec<u8>>,
     pub writer_rx: Receiver<Vec<u8>>,
@@ -175,6 +180,7 @@ impl Pump {
             dns_addr,
             dns,
             forward_tx,
+            exit,
             writer_tx,
             writer_rx,
         } = config;
@@ -186,6 +192,7 @@ impl Pump {
             dns,
             forward_tx,
             filter: filter.clone(),
+            exit: exit.clone(),
         };
         let io = spawn_io(tun_fd, &reader, &running, writer_rx)?;
 
@@ -208,6 +215,14 @@ impl Pump {
                                 let Some(pkt) = divert.claim(pkt) else {
                                     continue; // an in-process flow's reply
                                 };
+                                // Internet replies through the exit node:
+                                // NATed by the exit, so no firewall here.
+                                if let Some(reply) = exit.inbound(&pkt) {
+                                    if writer_tx.send(reply).is_err() {
+                                        break;
+                                    }
+                                    continue;
+                                }
                                 if let Some(f) = filter.as_deref()
                                     && !f.allow_inbound(&pkt)
                                 {
@@ -346,6 +361,7 @@ fn spawn_io(
                     &ctx.dns,
                     ctx.forward_tx.as_ref(),
                     ctx.filter.as_deref(),
+                    &ctx.exit,
                 );
                 tracing::info!("TUN reader stopped");
                 let _ = done_tx.send(());
@@ -468,6 +484,32 @@ fn dst_of(packet: &[u8]) -> std::net::Ipv6Addr {
     std::net::Ipv6Addr::from(dst)
 }
 
+/// Where a packet read from the TUN goes, before anything else looks at it.
+#[derive(Debug, PartialEq)]
+enum Class {
+    /// A query to the in-tunnel DNS server.
+    Dns,
+    /// DNS over TCP to the in-tunnel DNS server: the forwarder's stack
+    /// takes it, and the DNS proxy answers. Never internet traffic.
+    DnsTcp,
+    /// For the mesh (`fd00::/8`): the node, never the exit or the forwarder.
+    Mesh,
+    /// Everything else: the exit node or the phone's connection.
+    Internet,
+}
+
+fn classify(packet: &[u8], dns_addr: &[u8; 16]) -> Class {
+    if DnsProxy::intercepts(packet, dns_addr) {
+        Class::Dns
+    } else if DnsProxy::intercepts_tcp(packet, dns_addr) {
+        Class::DnsTcp
+    } else if is_mesh_bound(packet) {
+        Class::Mesh
+    } else {
+        Class::Internet
+    }
+}
+
 /// True if this is an IPv6 packet destined for the mesh (`fd00::/8`).
 fn is_mesh_bound(packet: &[u8]) -> bool {
     packet.len() >= 40 && packet[0] >> 4 == 6 && packet[24] == MESH_PREFIX
@@ -486,6 +528,7 @@ fn run_reader(
     dns: &Arc<DnsProxy>,
     forward_tx: Option<&tokio::sync::mpsc::Sender<Vec<u8>>>,
     filter: Option<&crate::filter::InboundFilter>,
+    exit: &crate::exit::ExitSwitch,
 ) {
     let mut buf = vec![0u8; READ_BUF];
     while running.load(Ordering::Relaxed) && live.load(Ordering::Relaxed) {
@@ -540,33 +583,62 @@ fn run_reader(
         }
         let packet = &mut buf[..n as usize];
 
-        // DNS queries addressed to our resolver never enter the mesh.
-        if DnsProxy::intercepts(packet, dns_addr) {
-            dns.handle(packet.to_vec());
-            continue;
-        }
-        // Nor does DNS over TCP (a resolver's retry after a truncated
-        // answer): the sentinel is in fd00::/8, so it used to go to the
-        // node as mesh traffic for an address nobody has, and the name
-        // failed. The forwarder's stack ends the connection instead.
-        if let Some(fwd) = forward_tx
-            && DnsProxy::intercepts_tcp(packet, dns_addr)
-        {
-            if fwd.blocking_send(packet.to_vec()).is_err() {
-                tracing::debug!("forwarder channel closed; dropping DNS-over-TCP packet");
+        match classify(packet, dns_addr) {
+            // DNS queries addressed to our resolver never enter the mesh.
+            Class::Dns => {
+                dns.handle(packet.to_vec());
+                continue;
             }
-            continue;
-        }
-
-        // Clearnet (non-mesh) traffic → userspace forwarder, if enabled.
-        // No forwarder: drop (the VPN shouldn't route clearnet to us then).
-        if !is_mesh_bound(packet) {
-            if let Some(fwd) = forward_tx
-                && fwd.blocking_send(packet.to_vec()).is_err()
-            {
-                break; // forwarder gone
+            // DNS over TCP to the resolver (a retry after a truncated
+            // answer): the sentinel is in fd00::/8, so it would otherwise
+            // go to the node as mesh traffic for an address nobody has.
+            // The forwarder's stack accepts it and the DNS proxy answers
+            // each message — through the exit when one is selected. No
+            // forwarder: it goes on to the node, as before.
+            Class::DnsTcp if forward_tx.is_some() => {
+                if let Some(fwd) = forward_tx
+                    && fwd.blocking_send(packet.to_vec()).is_err()
+                {
+                    tracing::debug!("forwarder channel closed; dropping DNS-over-TCP packet");
+                }
+                continue;
             }
-            continue;
+            Class::DnsTcp | Class::Mesh => {}
+            // Internet traffic: through the exit node when one is selected,
+            // else the userspace forwarder. No forwarder: drop (the VPN
+            // shouldn't route clearnet to us then).
+            Class::Internet => {
+                match exit.outbound(packet) {
+                    crate::exit::Outbound::Forwarder => {
+                        if let Some(fwd) = forward_tx
+                            && fwd.blocking_send(packet.to_vec()).is_err()
+                        {
+                            break; // forwarder gone
+                        }
+                    }
+                    crate::exit::Outbound::Mesh(mut outer) => {
+                        match processor.process(&mut outer) {
+                            TunPacketAction::Forward => {
+                                if outbound_tx.blocking_send(outer).is_err() {
+                                    break; // node gone
+                                }
+                            }
+                            // No route to the exit yet, or the node does not
+                            // know its identity: blocked, never sent around
+                            // it. Registering again is what usually helps.
+                            _ => exit.refused(),
+                        }
+                    }
+                    crate::exit::Outbound::Refuse(answer) => {
+                        if let Some(answer) = answer
+                            && writer_tx.send(answer).is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
         }
 
         // Mesh-bound: run the node's outbound pipeline (filter/clamp/hairpin).
@@ -606,6 +678,40 @@ fn run_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DNS: [u8; 16] = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53];
+
+    /// The exit node only ever sees `Class::Internet`: whatever is selected,
+    /// mesh addresses (and the mesh DNS sentinel) keep their own paths.
+    #[test]
+    fn mesh_traffic_is_never_internet() {
+        let me = [0xfd, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        let peer = [0xfd, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2];
+        let mesh = crate::packet::build_ipv6_udp(me, peer, 4000, 80, b"x");
+        assert_eq!(classify(&mesh, &DNS), Class::Mesh);
+        let dns = crate::packet::build_ipv6_udp(me, DNS, 4000, 53, b"q");
+        assert_eq!(classify(&dns, &DNS), Class::Dns);
+        let web = crate::packet::build_ipv6_udp(me, [0x26; 16], 4000, 443, b"x");
+        assert_eq!(classify(&web, &DNS), Class::Internet);
+        let mut v4 = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0];
+        v4.extend_from_slice(&[10, 111, 222, 1, 1, 1, 1, 1]);
+        assert_eq!(classify(&v4, &DNS), Class::Internet);
+        let tcp_dns = tcp_to(me, DNS, 53);
+        assert_eq!(classify(&tcp_dns, &DNS), Class::DnsTcp);
+        assert_eq!(classify(&tcp_to(me, peer, 53), &DNS), Class::Mesh);
+        assert_eq!(classify(&tcp_to(me, [0x26; 16], 53), &DNS), Class::Internet);
+    }
+
+    /// A minimal IPv6 TCP SYN header.
+    fn tcp_to(src: [u8; 16], dst: [u8; 16], port: u16) -> Vec<u8> {
+        let mut p = vec![0x60, 0, 0, 0, 0, 20, 6, 64];
+        p.extend_from_slice(&src);
+        p.extend_from_slice(&dst);
+        p.extend_from_slice(&40000u16.to_be_bytes());
+        p.extend_from_slice(&port.to_be_bytes());
+        p.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0xff, 0xff, 0, 0, 0, 0]);
+        p
+    }
 
     fn pipe_nonblocking() -> (OwnedFd, OwnedFd) {
         let mut fds = [0; 2];

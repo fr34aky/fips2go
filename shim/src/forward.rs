@@ -493,8 +493,7 @@ async fn answer_dns_tcp(proxy: &Arc<DnsProxy>, query: Vec<u8>) -> Option<Vec<u8>
     .await
     .ok()
     .flatten()?;
-    let truncated = answer.get(2).is_some_and(|flags| flags & 0x02 != 0);
-    if truncated {
+    if ask_upstreams_over_tcp(&answer, proxy.exit_selected()) {
         for &upstream in &proxy.upstreams {
             let asked = ask_upstream_tcp(upstream, &query, &proxy.protect);
             if let Ok(Ok(full)) = tokio::time::timeout(DNS_TCP_UPSTREAM, asked).await {
@@ -503,6 +502,16 @@ async fn answer_dns_tcp(proxy: &Arc<DnsProxy>, query: Vec<u8>) -> Option<Vec<u8>
         }
     }
     Some(answer)
+}
+
+/// Whether a truncated `answer` is fetched again from the upstreams over TCP.
+/// Never with an exit selected: the truncated answer is what goes back, since
+/// asking the phone's upstreams would tell its network the name, around the
+/// exit. (The exit is asked over UDP only; a resolver takes a truncated
+/// answer over TCP as the best there is.)
+fn ask_upstreams_over_tcp(answer: &[u8], exit_selected: bool) -> bool {
+    let truncated = answer.get(2).is_some_and(|flags| flags & 0x02 != 0);
+    truncated && !exit_selected
 }
 
 /// One query to `upstream` over TCP, on a protected socket.
@@ -806,10 +815,23 @@ mod tests {
             upstreams: vec![upstream],
             writer_tx,
             protect: None,
+            exit: None,
             hosts: None,
             names: None,
             in_flight: Default::default(),
         })
+    }
+
+    /// With an exit selected, a truncated answer never sends the name to the
+    /// phone's own upstreams.
+    #[test]
+    fn a_truncated_answer_goes_upstream_over_tcp_only_without_an_exit() {
+        let truncated = response(&query(1), true, 0);
+        let whole = response(&query(1), false, 0);
+        assert!(ask_upstreams_over_tcp(&truncated, false));
+        assert!(!ask_upstreams_over_tcp(&truncated, true));
+        assert!(!ask_upstreams_over_tcp(&whole, false));
+        assert!(!ask_upstreams_over_tcp(&[], false));
     }
 
     /// Two framed queries on one connection, each answered in its frame.

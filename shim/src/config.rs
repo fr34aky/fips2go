@@ -11,6 +11,12 @@ pub struct ShimConfig {
     /// Static peers to connect to on start.
     #[serde(default)]
     pub peers: Vec<PeerEntry>,
+    /// Exit node (npub) for internet traffic: IPv4 is carried over fips to
+    /// it ([`crate::exit`]), IPv6 internet traffic is dropped. Absent or
+    /// empty: the phone's own connection (the forwarder). Mesh traffic is
+    /// unaffected either way.
+    #[serde(default)]
+    pub exit_node: Option<String>,
     /// Upstream resolvers for non-`.fips` DNS (host:port). All device DNS is
     /// routed to us while the VPN is up, so these carry the normal traffic.
     #[serde(default = "default_dns_upstreams")]
