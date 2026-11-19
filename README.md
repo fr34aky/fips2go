@@ -54,6 +54,19 @@ usable on a device you also use for everything else.
   with [fips-ui](https://github.com/fr34aky/fips-ui) — the same sync its own
   nodes use: hourly and on demand, over the mesh, with that node admitting
   this device by its npub as a viewer.
+- **Exit nodes.** The mesh apps' internet traffic can leave through a fips
+  node you trust instead of the phone's own connection, like a VPN server
+  (Overview → *Internet route*). The exit is a Docker container
+  ([`exit-node/`](exit-node/README.md)) that serves only the npubs on its
+  allow-list. Their DNS goes to the exit's resolver and nowhere else, and if
+  the exit cannot be reached, traffic is blocked rather than sent out through
+  the phone. IPv4 only: IPv6 internet traffic is refused at once, so apps
+  fall back to IPv4. Mesh traffic never goes through the exit. The same
+  exit can also **publish services from its LAN** to those phones — a NAS's
+  web page, say, at `http://home.fips:8000` — without opening a port on the
+  router, and whether or not the exit is the phone's internet route. Nothing
+  else on that LAN is reachable through it, including the router by its own
+  public address, which the exit looks up and keeps blocked as it changes.
 - **Default-deny inbound firewall.** Any authorized node on the mesh can
   otherwise reach any port your selected apps listen on, as if you had joined
   a shared LAN. Only replies to connections the phone opened, ICMPv6, and an
@@ -249,6 +262,7 @@ from it and reaching its services by name.
 | `shim/` | Rust cdylib `libfips_android.so`: engine (node lifecycle), TUN fd pump, DNS proxy, clearnet forwarder, the public-names resolver and its mesh transports (`names.rs`, `meshudp.rs`, `meshtcp.rs`, on the `pubdom-*` crates), JNI surface (`org.fips.android.FipsNative`). |
 | `android/` | The Kotlin app (Material 3, bottom-nav): Overview / Settings / Diagnostics, `FipsVpnService` (per-app split tunnel, protect callback, foreground service). |
 | `smoke/` | Two-node host smoke test of the embedding seam. |
+| `exit-node/` | The exit-node server: a Docker container (fips daemon, one `ip6tnl` per allowed phone, NAT, DNS, default-deny nftables), its config generator `exitctl.py` with unit tests, and an end-to-end allow-list test. |
 | `android-env.sh` | Cross-build env: NDK r27c paths + the `LIBCLANG_PATH` fix for host builds. |
 | `build-native.sh` | Builds the shim for every supported ABI and copies the `.so`s into `android/app/src/main/jniLibs/<abi>/`. |
 
@@ -408,6 +422,18 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   join the node is rebound with a *second* UDP transport bound to the hotspot
   address on the main instance's port, dial-scoped to the link subnet, and
   LAN mDNS is forced on for that link.
+- **Exit nodes**: with an exit selected, each IPv4 internet packet from a
+  covered app is wrapped in an IPv6 packet (next header 4, IPv4-in-IPv6) from
+  the node's fips address to the exit's and sent over the mesh; replies are
+  unwrapped before the TUN (`shim/src/exit.rs`). Its inner source address is
+  derived from the node's address (`100.64.0.0/10`), so the exit computes it
+  from the npub with nothing negotiated. On the exit, a Linux `ip6tnl` per
+  allowed npub and a NAT take it from there. Non-`.fips` DNS goes to port 53
+  on the exit's fips address only, the public-names lookup is skipped (its TXT
+  queries would leave through the phone's upstreams), and `::/0` is always
+  claimed so IPv6 internet traffic is refused inside the tunnel rather than
+  leaking around the exit. Switching exits while connected keeps the node
+  running.
 - **Status**: `FipsNative.status()`/`query()` are served lock-free from the
   node's `ControlReadHandle` snapshots — same data as `fipsctl show_*`.
 
@@ -457,6 +483,18 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   tunnel, non-functional under "Block connections without VPN". BLE/Ethernet
   transports are not available on Android. ICMP to clearnet is not
   forwarded (TCP/UDP are).
+- Exit nodes are verified with a phone using the `exit-node/` container
+  through `compose.yaml` (internet traffic and DNS through the exit). The
+  container's allow-list is tested end to end on Docker (`exit-node/e2e-test.sh`:
+  an allowed client gets internet and DNS but not the exit's private network;
+  a node with a working fips session but not on the list gets neither, also
+  when forging the client's inner address). Publishing is verified with a
+  phone opening a published web service in a browser through an exit, and
+  end to end
+  (only the allowed client reaches the published service; an unpublished port
+  stays closed). The public-address block is tested end to end against a
+  fake lookup service: blocked at start, no answer stops the exit, and the
+  block follows a change while the exit runs.
 - Public domain names are device-verified with a real bound domain: online
   (first-visit discovery and pinning), offline from a pin, offline from the
   claim's DNSSEC proof through a mesh relay, and offline through witnesses'
