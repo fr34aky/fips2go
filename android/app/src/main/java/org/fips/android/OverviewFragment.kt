@@ -118,6 +118,9 @@ class OverviewFragment : Fragment() {
             startActivity(Intent(requireContext(), RelaysActivity::class.java))
         }
         view.findViewById<View>(R.id.mesh_apps_card).setOnClickListener(pickApps)
+        view.findViewById<View>(R.id.internet_route_card).setOnClickListener {
+            startActivity(Intent(requireContext(), ExitsActivity::class.java))
+        }
         view.findViewById<View>(R.id.mesh_names_card).setOnClickListener {
             startActivity(Intent(requireContext(), HostsActivity::class.java))
         }
@@ -328,6 +331,7 @@ class OverviewFragment : Fragment() {
         updateBatteryCard()
         updateMeshApps()
         updateMeshNames()
+        updateInternetRoute()
         poller.post(pollStatus)
     }
 
@@ -340,6 +344,15 @@ class OverviewFragment : Fragment() {
         haloPulse = null
         link = null
         super.onPause()
+    }
+
+    private fun updateInternetRoute() {
+        val exit = ConfigStore.selectedExit(requireContext())
+        view?.findViewById<TextView>(R.id.internet_route_summary)?.text = if (exit == null) {
+            "Mesh apps use this phone's connection."
+        } else {
+            "Through exit node ${ConfigStore.exitLabel(exit)} — blocked if it cannot be reached."
+        }
     }
 
     private fun updateMeshNames() {

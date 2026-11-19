@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Internet route: the phone's own connection or an exit node (ExitsActivity). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        app:navigationContentDescription="Back"
+        app:navigationIcon="?attr/homeAsUpIndicator"
+        app:title="Internet route" />
+
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false"
+        android:paddingHorizontal="16dp"
+        android:paddingBottom="24dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/Widget.Fips.Summary"
+                android:layout_marginTop="0dp"
+                android:text="Where your mesh apps' internet traffic leaves. Through an exit node it is carried over the mesh to that node, which sends it on like a VPN would. Mesh addresses and .fips names always stay on the mesh." />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_field"
+                android:padding="12dp"
+                android:text="An exit's operator can see all internet traffic you send through it, and websites see the exit's address instead of yours. Only use exits you trust. If the exit cannot be reached, internet traffic is blocked — it never falls back to the phone. Only IPv4 goes through an exit."
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+            <TextView
+                style="@style/SettingsHeader"
+                android:layout_marginTop="8dp"
+                android:text="Route internet traffic through" />
+
+            <com.google.android.material.card.MaterialCardView
+                style="@style/Widget.Fips.Card">
+
+                <LinearLayout
+                    android:id="@+id/exit_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingVertical="4dp" />
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView
+                android:id="@+id/exit_apply_hint"
+                style="@style/Widget.Fips.Summary"
+                android:text="Connected — the change applies when you leave this screen, without dropping the mesh."
+                android:visibility="gone" />
+
+            <TextView
+                style="@style/SettingsHeader"
+                android:layout_marginTop="8dp"
+                android:text="Add an exit node" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/exit_name_layout"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Name (optional)">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/exit_name"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:imeOptions="actionNext"
+                    android:inputType="text|textCapWords"
+                    android:maxLength="40" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="top"
+                android:orientation="horizontal">
+
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/exit_npub_layout"
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="npub1…">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/exit_npub"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:imeOptions="actionDone"
+                        android:inputType="textNoSuggestions|textVisiblePassword" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/exit_add"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_marginTop="4dp"
+                    android:text="Add" />
+            </LinearLayout>
+
+            <TextView
+                style="@style/SettingsHeader"
+                android:layout_marginTop="16dp"
+                android:text="This phone" />
+
+            <com.google.android.material.card.MaterialCardView
+                style="@style/Widget.Fips.Card">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        style="@style/Widget.Fips.Summary"
+                        android:layout_marginTop="0dp"
+                        android:text="An exit only carries traffic for npubs its operator has allowed. Send them this one:" />
+
+                    <TextView
+                        android:id="@+id/exit_own_npub"
+                        style="@style/Widget.Fips.Mono"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:textIsSelectable="true" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/exit_copy_npub"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Copy" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+        </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
+</LinearLayout>

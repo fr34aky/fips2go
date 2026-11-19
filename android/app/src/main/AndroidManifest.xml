@@ -58,6 +58,12 @@
             android:label="Mesh apps" />
 
         <activity
+            android:name=".ExitsActivity"
+            android:exported="false"
+            android:label="Internet route"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".RelaysActivity"
             android:exported="false"
             android:label="Nostr relays"

@@ -352,7 +352,7 @@ class FipsVpnService : VpnService() {
         }
         // Initial guess from the current default network; the first network
         // callback corrects the routes if this was wrong (or changes later).
-        val wantIpv6 = hasIpv6Internet(connectivity?.activeNetwork)
+        val wantIpv6 = wantIpv6Route(connectivity?.activeNetwork)
 
         val pfd = establishTunnel(address, wantIpv6)
         if (pfd == null) {
@@ -797,7 +797,8 @@ class FipsVpnService : VpnService() {
                 // DNS server = the fd00::/8 sentinel the pump intercepts (NOT
                 // our own tun /128, which the kernel would deliver locally).
                 builder.addDnsServer(FipsNative.dnsServer())
-                // `::/0` only when the underlay can deliver it (see class doc).
+                // `::/0` only when the underlay can deliver it (see class doc),
+                // or always with an exit node selected ([wantIpv6Route]).
                 if (ipv6Clearnet) {
                     builder.addRoute("::", 0)
                 } else {
@@ -826,6 +827,17 @@ class FipsVpnService : VpnService() {
             null
         }
     }
+
+    /**
+     * Whether the tunnel claims `::/0`. On the phone's own connection that
+     * follows the underlay ([hasIpv6Internet], see the class doc). With an exit
+     * node selected it is always claimed: the shim answers IPv6 internet
+     * traffic with an immediate ICMPv6 "administratively prohibited" (only
+     * IPv4 goes through an exit), so apps fall back to IPv4 at once — and no
+     * IPv6 destination can leave around the exit through the phone.
+     */
+    private fun wantIpv6Route(network: Network?): Boolean =
+        ConfigStore.selectedExit(this) != null || hasIpv6Internet(network)
 
     /**
      * True when `network` has usable IPv6 internet: an IPv6 default route and
@@ -990,7 +1002,7 @@ class FipsVpnService : VpnService() {
         }
         currentUnderlying = network
         updateMulticastLock(network)
-        val wantIpv6 = hasIpv6Internet(network)
+        val wantIpv6 = wantIpv6Route(network)
         // The node itself is NOT restarted for a plain underlying-network
         // change any more. Its underlay sockets are protected wildcard
         // sockets, which the kernel routes per packet over whatever the
@@ -1104,7 +1116,7 @@ class FipsVpnService : VpnService() {
             Log.e(TAG, "config rebuild failed; rebinding with previous config", e)
             ""
         }
-        val wantIpv6 = hasIpv6Internet(currentUnderlying)
+        val wantIpv6 = wantIpv6Route(currentUnderlying)
         // A replacement tunnel is needed when its routes are wrong (IPv6
         // decision flipped) or its allowed-app list is (selection changed).
         // Only ever REPLACE a tunnel: while the first connect is still
