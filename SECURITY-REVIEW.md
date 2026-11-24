@@ -49,9 +49,11 @@ Everything crosses JNI as JSON strings.
    TCP/UDP by the reversed 4-tuple, ICMP echo replies by identifier, ICMP
    errors (types 3, 11, 12) only when the header they quote is a packet this
    phone sent on a recorded flow. Later fragments, IHL < 5 and every other
-   ICMP type are dropped. There is no port allowlist and no off switch on
-   this path, and any IPv4-in-IPv6 it does not deliver is dropped, whatever
-   `inbound_filter` says. Also from the exit: the answers of its DNS resolver
+   ICMP type are dropped. Only packets the apps send refresh a flow; the
+   exit cannot keep one alive by sending on it. There is no port allowlist
+   and no off switch on this path, and any IPv4-in-IPv6 it does not deliver
+   is dropped, whatever `inbound_filter` says. Also from the exit: the
+   answers of its DNS resolver
    (`dns.rs` via `meshudp.rs`), which carry every non-`.fips` name while it
    is selected.
 
