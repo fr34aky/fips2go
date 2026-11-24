@@ -275,6 +275,9 @@ pub struct IdentityInfo {
     pub nsec: String,
     pub npub: String,
     pub address: String,
+    /// The node's inner IPv4 address ([`crate::exit::inner_ipv4`]): the
+    /// tunnel's IPv4 address, so an exit node sees the source it expects.
+    pub inner_ipv4: String,
 }
 
 /// Derive (or generate, when `nsec` is empty) the node identity.
@@ -288,6 +291,7 @@ pub fn derive_identity(nsec: &str) -> Result<IdentityInfo, String> {
         nsec: fips::identity::encode_nsec(&identity.keypair().secret_key()),
         npub: identity.npub(),
         address: identity.address().to_ipv6().to_string(),
+        inner_ipv4: crate::exit::inner_ipv4(identity.address().as_bytes()).to_string(),
     })
 }
 
@@ -421,13 +425,15 @@ impl ShimConfig {
         if lan_mdns {
             // Keep the tunnel's own addresses out of the mDNS adverts:
             // the node's mesh ULA is an identity disclosure on the LAN, and
-            // the clearnet-source IPv4 (TUN_IPV4 in FipsVpnService.kt — keep
-            // in sync) is unreachable from other hosts anyway.
-            let own_addr: std::net::IpAddr = own_address
+            // so, in part, is the tunnel's IPv4 address, which is derived
+            // from it (`inner_ipv4`; unreachable from other hosts anyway).
+            let own_addr: std::net::Ipv6Addr = own_address
                 .parse()
                 .map_err(|e| format!("own address unparseable: {e}"))?;
-            config.node.rendezvous.lan.exclude_addrs =
-                vec![own_addr, "10.111.222.1".parse().unwrap()];
+            config.node.rendezvous.lan.exclude_addrs = vec![
+                own_addr.into(),
+                crate::exit::inner_ipv4(&own_addr.octets()).into(),
+            ];
             tracing::info!("LAN mDNS discovery enabled (tunnel addrs excluded)");
         }
         if !self.nostr_relays.is_empty() {
@@ -761,7 +767,7 @@ mod tests {
         let excl = &config.node.rendezvous.lan.exclude_addrs;
         assert_eq!(excl.len(), 2);
         assert!(excl.contains(&id.address.parse().unwrap()), "own mesh ULA");
-        assert!(excl.contains(&"10.111.222.1".parse().unwrap()), "TUN_IPV4");
+        assert!(excl.contains(&id.inner_ipv4.parse().unwrap()), "the tunnel's IPv4");
     }
 
     #[test]

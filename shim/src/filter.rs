@@ -30,24 +30,95 @@ const PROTO_ICMPV6: u8 = 58;
 /// Idle timeouts after which a tracked flow no longer admits inbound
 /// traffic. TCP gets the longer window (idle-but-established connections);
 /// UDP "flows" are request/response shaped.
-const TCP_IDLE: Duration = Duration::from_secs(600);
-const UDP_IDLE: Duration = Duration::from_secs(180);
+pub(crate) const TCP_IDLE: Duration = Duration::from_secs(600);
+pub(crate) const UDP_IDLE: Duration = Duration::from_secs(180);
 
 /// Bound on tracked flows; beyond it, expired entries are purged and — if
 /// still full — the oldest entry is evicted. 4096 is far above what a
 /// phone's covered apps hold open concurrently.
 const MAX_FLOWS: usize = 4096;
 
-/// An outbound-initiated flow, from our side's perspective.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct FlowKey {
-    proto: u8,
-    /// Our port (the packet's source port outbound, destination inbound).
-    local_port: u16,
-    /// The peer's mesh address.
-    remote_addr: [u8; 16],
-    /// The peer's port.
-    remote_port: u16,
+/// An outbound-initiated flow, from our side's perspective. An IPv4 peer
+/// (the exit-node path, [`crate::exit`]) is stored IPv4-mapped.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct FlowKey {
+    pub proto: u8,
+    /// Our port (the packet's source port outbound, destination inbound);
+    /// for an ICMP echo, its identifier.
+    pub local_port: u16,
+    /// The peer's address.
+    pub remote_addr: [u8; 16],
+    /// The peer's port (0 for an ICMP echo).
+    pub remote_port: u16,
+}
+
+/// Outbound-initiated flows, bounded ([`MAX_FLOWS`]) and idle-expiring
+/// ([`TCP_IDLE`] for TCP, [`UDP_IDLE`] for anything else). Shared by the
+/// mesh firewall here and the exit node's reply check.
+#[derive(Default)]
+pub(crate) struct FlowTable {
+    flows: Mutex<HashMap<FlowKey, Instant>>,
+}
+
+impl FlowTable {
+    /// Record or refresh an outbound flow.
+    pub fn note(&self, key: FlowKey) {
+        let now = Instant::now();
+        let mut flows = self.flows.lock().unwrap();
+        if flows.len() >= MAX_FLOWS && !flows.contains_key(&key) {
+            flows.retain(|k, seen| now.duration_since(*seen) < idle_limit(k.proto));
+            if flows.len() >= MAX_FLOWS {
+                // Still full of live flows: evict the stalest one.
+                if let Some(oldest) = flows.iter().min_by_key(|(_, t)| **t).map(|(k, _)| *k) {
+                    flows.remove(&oldest);
+                }
+            }
+        }
+        flows.insert(key, now);
+    }
+
+    /// True if `key` is a live flow; inbound traffic keeps it alive.
+    pub fn admits(&self, key: &FlowKey) -> bool {
+        let now = Instant::now();
+        let mut flows = self.flows.lock().unwrap();
+        match flows.get_mut(key) {
+            Some(seen) if now.duration_since(*seen) < idle_limit(key.proto) => {
+                *seen = now;
+                true
+            }
+            Some(_) => {
+                flows.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// True if `key` is a live flow, without refreshing it (an ICMP error
+    /// says nothing about whether the flow is still wanted).
+    pub fn contains(&self, key: &FlowKey) -> bool {
+        let flows = self.flows.lock().unwrap();
+        flows
+            .get(key)
+            .is_some_and(|seen| seen.elapsed() < idle_limit(key.proto))
+    }
+
+    pub fn clear(&self) {
+        self.flows.lock().unwrap().clear();
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.flows.lock().unwrap().len()
+    }
+
+    /// Age every entry by `by` (tests of the idle limits).
+    #[cfg(test)]
+    pub fn backdate(&self, by: Duration) {
+        for t in self.flows.lock().unwrap().values_mut() {
+            *t -= by;
+        }
+    }
 }
 
 /// The parsed transport header of a plain (extension-header-free) IPv6
@@ -101,7 +172,7 @@ fn idle_limit(proto: u8) -> Duration {
 /// reader (outbound flow tracking) and bridge (inbound verdicts) threads.
 pub struct InboundFilter {
     allowed_ports: Vec<u16>,
-    flows: Mutex<HashMap<FlowKey, Instant>>,
+    flows: FlowTable,
 }
 
 impl InboundFilter {
@@ -110,7 +181,7 @@ impl InboundFilter {
         allowed_ports.dedup();
         Self {
             allowed_ports,
-            flows: Mutex::new(HashMap::new()),
+            flows: FlowTable::default(),
         }
     }
 
@@ -123,24 +194,12 @@ impl InboundFilter {
         }
         let mut dst_addr = [0u8; 16];
         dst_addr.copy_from_slice(&packet[24..40]);
-        let key = FlowKey {
+        self.flows.note(FlowKey {
             proto: p.proto,
             local_port: p.src_port,
             remote_addr: dst_addr,
             remote_port: p.dst_port,
-        };
-        let now = Instant::now();
-        let mut flows = self.flows.lock().unwrap();
-        if flows.len() >= MAX_FLOWS && !flows.contains_key(&key) {
-            flows.retain(|k, seen| now.duration_since(*seen) < idle_limit(k.proto));
-            if flows.len() >= MAX_FLOWS {
-                // Still full of live flows: evict the stalest one.
-                if let Some(oldest) = flows.iter().min_by_key(|(_, t)| **t).map(|(k, _)| *k) {
-                    flows.remove(&oldest);
-                }
-            }
-        }
-        flows.insert(key, now);
+        });
     }
 
     /// Verdict for a mesh→app packet about to be written to the TUN.
@@ -154,25 +213,12 @@ impl InboundFilter {
         if self.allowed_ports.binary_search(&p.dst_port).is_ok() {
             return true;
         }
-        let key = FlowKey {
+        self.flows.admits(&FlowKey {
             proto: p.proto,
             local_port: p.dst_port,
             remote_addr: p.src_addr,
             remote_port: p.src_port,
-        };
-        let now = Instant::now();
-        let mut flows = self.flows.lock().unwrap();
-        match flows.get_mut(&key) {
-            Some(seen) if now.duration_since(*seen) < idle_limit(p.proto) => {
-                *seen = now; // inbound traffic keeps the flow alive
-                true
-            }
-            Some(_) => {
-                flows.remove(&key);
-                false
-            }
-            None => false,
-        }
+        })
     }
 
     /// `(proto, dst_port, src)` of a denied packet, for the drop log.
@@ -264,12 +310,7 @@ mod tests {
         let f = InboundFilter::new(vec![]);
         f.note_outbound(&pkt(PROTO_UDP, addr(US), 40000, addr(PEER), 53));
         // Backdate the entry past the UDP idle limit.
-        {
-            let mut flows = f.flows.lock().unwrap();
-            for t in flows.values_mut() {
-                *t = Instant::now() - UDP_IDLE - Duration::from_secs(1);
-            }
-        }
+        f.flows.backdate(UDP_IDLE + Duration::from_secs(1));
         assert!(!f.allow_inbound(&pkt(PROTO_UDP, addr(PEER), 53, addr(US), 40000)));
     }
 
@@ -281,6 +322,6 @@ mod tests {
             let peer = addr((i % 250) as u8);
             f.note_outbound(&pkt(PROTO_UDP, addr(US), port, peer, 9999));
         }
-        assert!(f.flows.lock().unwrap().len() <= MAX_FLOWS);
+        assert!(f.flows.len() <= MAX_FLOWS);
     }
 }

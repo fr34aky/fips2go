@@ -73,7 +73,9 @@ pub struct DnsProxy {
     /// resolver (port 53 on its fips address) over the mesh and nowhere
     /// else — no fallback to [`Self::upstreams`], which would tell the
     /// phone's network every name looked up — and the public-names lookup
-    /// is skipped, since its TXT queries go out through the phone too.
+    /// is asked about pinned names only: those answer from the pin
+    /// ([`crate::names::Names::set_exit_selected`]), while an unpinned
+    /// name's TXT query would go out through the phone.
     pub exit: Option<ExitDns>,
     /// Queries being served now, bounded by [`MAX_IN_FLIGHT`].
     pub in_flight: AtomicUsize,
@@ -81,7 +83,9 @@ pub struct DnsProxy {
 
 pub struct ExitDns {
     pub switch: Arc<crate::exit::ExitSwitch>,
-    pub link: Arc<crate::meshhttp::MeshLink>,
+    /// The mesh link the exit's resolver is asked over. `None` only in
+    /// tests: then a query with an exit selected gets SERVFAIL.
+    pub link: Option<Arc<crate::meshhttp::MeshLink>>,
 }
 
 /// One slot of [`DnsProxy::in_flight`], given back when the query's thread
@@ -266,7 +270,7 @@ impl DnsProxy {
             let outcome = self
                 .names
                 .as_ref()
-                .filter(|_| self.exit_addr().is_none())
+                .filter(|n| !self.exit_selected() || n.pinned(query))
                 .map(|n| n.lookup(query, &start_prefetch));
             let prefetched = slot.into_inner();
             match outcome {
@@ -367,7 +371,10 @@ impl DnsProxy {
         if let Some(exit) = &self.exit
             && let Some(addr) = exit.switch.selected_addr()
         {
-            return match crate::meshudp::query(&exit.link, addr, 53, query, QUERY_TIMEOUT) {
+            let Some(link) = &exit.link else {
+                return None;
+            };
+            return match crate::meshudp::query(link, addr, 53, query, QUERY_TIMEOUT) {
                 Ok(reply) if reply.len() >= 2 && reply[..2] == query[..2] => Some(reply),
                 Ok(_) => None,
                 Err(e) => {
@@ -945,6 +952,62 @@ mod tests {
             &typed_query_for("www.example.net", TYPE_AAAA),
         );
         assert_eq!(reply[3] & 0x0f, 3, "not over fips: the upstream's answer");
+    }
+
+    /// With an exit selected, an unpinned name never reaches the names
+    /// resolver (offline it would ask the relays, the public ones included)
+    /// nor the phone's upstream; a pinned one is still answered over fips.
+    #[test]
+    fn with_an_exit_only_pinned_names_reach_the_resolver() {
+        use crate::names::Outcome;
+        struct Pinned(Arc<AtomicUsize>);
+        impl crate::names::Lookup for Pinned {
+            fn pinned(&self, query: &[u8]) -> bool {
+                pubdom_core::synth::parse_query(query).is_some_and(|q| q.name == "www.example.org")
+            }
+            fn lookup(&self, query: &[u8], _: &dyn Fn()) -> Outcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let q = pubdom_core::synth::parse_query(query).unwrap();
+                match pubdom_core::synth::build_answer(&q, pubdom_core::Npub::from_bytes([7; 32]), 30) {
+                    Some(a) => Outcome::Answer(a),
+                    None => Outcome::Legacy,
+                }
+            }
+        }
+        let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+        upstream.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let switch = Arc::new(crate::exit::ExitSwitch::new(
+            *fips::Identity::generate().address().as_bytes(),
+            "[::1]:9".parse().unwrap(),
+        ));
+        switch.set(Some(&fips::Identity::generate().npub())).unwrap();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let (writer_tx, replies) = std::sync::mpsc::channel();
+        let proxy = Arc::new(DnsProxy {
+            local_responder: "[::1]:1".parse().unwrap(),
+            upstreams: vec![upstream.local_addr().unwrap()],
+            writer_tx,
+            protect: None,
+            exit: Some(ExitDns { switch: switch.clone(), link: None }),
+            hosts: None,
+            names: Some(Arc::new(Pinned(asked.clone()))),
+            in_flight: Default::default(),
+        });
+
+        let reply = ask(&proxy, &replies, &typed_query_for("www.example.net", TYPE_AAAA));
+        assert_eq!(reply[3] & 0x0f, 2, "SERVFAIL: the exit's resolver is not reachable here");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "an unpinned name must not reach the resolver");
+        let mut buf = [0u8; 512];
+        assert!(upstream.recv_from(&mut buf).is_err(), "nor the phone's upstream");
+
+        let reply = ask(&proxy, &replies, &typed_query_for("www.example.org", TYPE_AAAA));
+        assert_eq!(reply[3] & 0x0f, 0, "a pinned name is answered over fips");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+
+        // Without the exit, the resolver is asked about every name again.
+        switch.set(None).unwrap();
+        let _ = ask(&proxy, &replies, &typed_query_for("www.example.net", TYPE_AAAA));
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
     }
 
     /// While the names resolver is still deciding (its budget ran out),
