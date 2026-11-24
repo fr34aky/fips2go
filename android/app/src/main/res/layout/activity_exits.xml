@@ -38,7 +38,7 @@
                 android:layout_marginTop="12dp"
                 android:background="@drawable/bg_field"
                 android:padding="12dp"
-                android:text="An exit's operator can see all internet traffic you send through it, and websites see the exit's address instead of yours. Only use exits you trust. If the exit cannot be reached, internet traffic is blocked — it never falls back to the phone. Only IPv4 goes through an exit."
+                android:text="An exit's operator can see all internet traffic you send through it, and websites see the exit's address instead of yours. Only use exits you trust. If the exit cannot be reached, internet traffic is blocked — it never falls back to the phone. Only IPv4 goes through an exit. Public domain names over fips that this phone has already verified keep working; new ones are not looked up while an exit is selected."
                 android:textAppearance="?attr/textAppearanceBodySmall"
                 android:textColor="?attr/colorOnSurfaceVariant" />
 
