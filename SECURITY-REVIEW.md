@@ -39,6 +39,21 @@ Everything crosses JNI as JSON strings.
    The reply tap (`Divert`) sits in front of the inbound firewall, but only
    claims packets matching an open in-process flow's exact (remote address,
    remote port, local port) — it cannot admit anything to a covered app.
+7. **Packets from an exit node** (only while the user has selected one):
+   IPv4-in-IPv6 (next header 4) from the exit's fips address, unwrapped in
+   `shim/src/exit.rs` and written to the TUN ahead of `filter.rs`. The exit's
+   operator controls everything inside: any inner source, port and flag.
+   `ExitSwitch` therefore keeps its own flow table (the same bounded,
+   idle-expiring `FlowTable` as `filter.rs`, cleared when the exit changes)
+   and delivers only replies to flows a covered app opened through that exit:
+   TCP/UDP by the reversed 4-tuple, ICMP echo replies by identifier, ICMP
+   errors (types 3, 11, 12) only when the header they quote is a packet this
+   phone sent on a recorded flow. Later fragments, IHL < 5 and every other
+   ICMP type are dropped. There is no port allowlist and no off switch on
+   this path, and any IPv4-in-IPv6 it does not deliver is dropped, whatever
+   `inbound_filter` says. Also from the exit: the answers of its DNS resolver
+   (`dns.rs` via `meshudp.rs`), which carry every non-`.fips` name while it
+   is selected.
 
 ## Things that would be serious in this codebase
 
@@ -48,6 +63,15 @@ Everything crosses JNI as JSON strings.
   re-exposes every listening port on the phone to the whole mesh.
 - **Flow-table abuse.** The 4-tuple table is bounded and idle-expiring; look
   for unbounded growth, or a remote party being able to forge a state entry.
+  The same applies to the exit's table in `exit.rs`: only outbound packets
+  from covered apps may add to it.
+- **Exit-node leaks.** With an exit selected, nothing a covered app sends may
+  leave through the phone's own connection: IPv4 goes to the exit or nowhere,
+  IPv6 internet traffic is refused, every non-`.fips` DNS query goes to the
+  exit's resolver only (no upstream fallback, no TCP retry upstream), and the
+  public-names resolver is offline and asked about pinned domains only, so it
+  sends no TXT query and asks no relay. A path that sends a packet or a name
+  around the exit is a finding.
 - **Packet parsing.** Out-of-bounds reads, integer overflow in length or offset
   arithmetic, extension-header/fragment handling, and checksum logic. Note the
   design intent that non-TCP/UDP/ICMPv6 next-headers are dropped *unparsed*.
@@ -83,3 +107,10 @@ Everything crosses JNI as JSON strings.
   that is a build-environment workaround, not a hardcoded secret.
 - Release signing happens on a workstation, never in CI. There is deliberately
   no signing key in GitHub secrets.
+- An exit node can read, tamper with and inject into the flows a covered app
+  opens through it, as any VPN server can (the app's own TLS is what protects
+  their content). What it cannot do is open a flow to the phone. Choosing an
+  exit is the user's statement of trust in its operator; the Internet route
+  screen says so.
+- An unreachable exit blocks internet traffic rather than falling back to the
+  phone's connection. That is the point of selecting one.
