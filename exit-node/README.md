@@ -157,14 +157,15 @@ mesh, which never goes through the exit.
 
 ## What the phone sends (the contract)
 
-- Only the selected apps' **IPv4 internet** traffic goes to the exit. Mesh
-  traffic (`fd00::/8`, `.fips` names) never does. IPv6 internet traffic is
-  refused on the phone with ICMPv6 "administratively prohibited", so apps fall
-  back to IPv4 at once.
-- Each IPv4 packet is wrapped in an IPv6 packet: **next header 4**
-  (IPv4-in-IPv6), source = the phone's fips address, destination = the exit's,
-  hop limit 64, **no extension headers** — Linux `ip6tnl` mode `ipip6` with
-  `encaplimit none`. Replies come back the same way.
+- The selected apps' internet traffic goes to the exit; mesh traffic
+  (`fd00::/8`, `.fips` names) never does.
+- Each packet is wrapped in an IPv6 packet, plain IP-in-IPv6 with **no tunnel
+  header**: source = the phone's fips address, destination = the exit's, hop
+  limit 64, **no extension headers**. An IPv4 packet is **next header 4**
+  (Linux `ip6tnl` mode `ipip6` with `encaplimit none`). Next header 41 is left
+  for IPv6; this version of the app sends none and refuses IPv6 internet
+  traffic on the phone with ICMPv6 "administratively prohibited", so apps fall
+  back to IPv4 at once. Replies come back the same way.
 - The inner IPv4 source is the phone's **inner address**, derived from its
   npub, so nothing is negotiated and two phones never collide in the NAT:
 
@@ -174,15 +175,35 @@ mesh, which never goes through the exit.
   ```
 
   `exitctl.py addrs <npub>…` prints both. The phone's side is
-  `shim/src/exit.rs` (`inner_ipv4`); `test_exitctl.py` checks both agree. Two
+  `shim/src/exit.rs` (`inner_ipv4`); `test_exitctl.py` checks both agree. It
+  is also the phone's tunnel address, so the phone rewrites nothing. Two
   allowed npubs with the same inner address (22 bits, so possible but rare) are
-  refused at start.
+  refused at start, with a message naming both.
+- `100.64.0.0/10` is not free everywhere: an exit whose own uplink is behind
+  carrier-grade NAT (a mobile or satellite connection), or that also runs an
+  overlay using the range (Tailscale does), can hold a client's address itself
+  and send that client's replies the wrong way. Run the exit elsewhere then.
 - **DNS**: while an exit is selected, every non-`.fips` query goes to UDP port
   53 on the exit's fips address, and nowhere else.
-- The phone lowers the TCP MSS on SYNs in both directions to fit the mesh; the
-  exit clamps too.
+- **TCP MSS 1200** for IPv4, on SYNs in both directions, on the phone and in
+  the exit's forward chain: planned for a 1280-byte mesh packet, the smallest
+  a fips hop carries (1280 − 40 outer IPv6 = 1240 for the inner packet).
+- The phone admits only **replies to flows its apps opened** (its own flow
+  table: TCP/UDP by ports, ICMP echo by identifier, ICMP errors by the packet
+  they quote). The exit cannot open a connection to a phone, whatever its
+  firewall says.
 - If the exit cannot be reached, the phone **blocks**: nothing goes out through
   its own connection instead.
+
+## Limits
+
+- **Packets over 1240 bytes that are not TCP are lost**, in both directions.
+  A Linux `ip6tnl` does not fragment the outer packet, so an inner packet that
+  does not fit a 1280-byte mesh packet once wrapped is dropped. TCP is clamped
+  to fit; QUIC and other UDP at 1241–1280 bytes are not (QUIC starts at 1200
+  bytes, and implementations that probe for a larger size fall back). The
+  container is meant to move to `fips-exit`'s daemon, which fragments the
+  outer packet (RFC 2473 §7.1), once that is public.
 
 ## Files
 

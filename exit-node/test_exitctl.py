@@ -106,6 +106,18 @@ class Firewall(unittest.TestCase):
         # No other accept in forward.
         self.assertEqual(fwd.count("accept"), 2)
 
+    def test_tcp_mss_is_clamped_both_ways_through_a_tunnel(self):
+        fwd = self.ruleset().split("chain forward {")[1].split("chain postrouting")[0]
+        self.assertEqual(x.TCP_MSS, 1200)
+        for side in ("iifname", "oifname"):
+            self.assertIn(
+                f'{side} "fx*" tcp flags & (syn | rst) == syn '
+                "tcp option maxseg size > 1200 tcp option maxseg size set 1200",
+                fwd,
+            )
+        # Ahead of the accepts, which end the chain for the packet.
+        self.assertLess(fwd.index("maxseg"), fwd.index("accept"))
+
     def test_private_and_local_destinations_are_blocked(self):
         rs = self.ruleset(extra=["203.0.113.7/32", "198.51.100.9"])
         for cidr in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
