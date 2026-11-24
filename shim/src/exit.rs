@@ -4,26 +4,47 @@
 //!
 //! fips only delivers packets addressed to `fd00::/8`, so an app's IPv4 packet
 //! is carried inside an IPv6 packet from this node's address to the exit's
-//! (IPv4-in-IPv6, next header 4 — what Linux's `ip6tnl` speaks, so the exit
-//! needs no program of its own: a tunnel per client and a NAT). Replies come
-//! back the same way and are unwrapped before the TUN. Only IPv4 goes through
-//! an exit: a wrapped IPv6 packet carrying QUIC's 1200-byte minimum would not
-//! fit the mesh.
+//! (IPv4-in-IPv6, next header 4, no tunnel header — what Linux's `ip6tnl`
+//! speaks). Replies come back the same way and are unwrapped before the TUN.
+//! This phone sends IPv4 only for now: IPv6 internet traffic is refused while
+//! an exit is selected (see [`Outbound::Refuse`]). The transport leaves room
+//! for IPv6-in-IPv6 (next header 41) to be added later.
 //!
 //! Each phone sends from its own inner address in `100.64.0.0/10`, derived
 //! from its node address ([`inner_ipv4`]) so the exit can compute it from the
-//! npub with nothing negotiated and two phones never collide in its NAT.
-//! The formula is the contract with the exit side; do not change it.
+//! npub with nothing negotiated. It is also the tunnel's own IPv4 address
+//! (Kotlin gets it from `deriveIdentity`), so packets go out and replies come
+//! back with no address rewriting, and an ICMP error quoting a packet matches
+//! the app's socket. The formula is the contract with the exit side
+//! (`exit-node/exitctl.py`, and `fips-exit`); do not change it.
+//!
+//! Replies are not trusted because they come from the exit: the exit's
+//! operator could otherwise open connections to any app listening on the
+//! phone. [`ExitSwitch`] keeps its own flow table and admits only replies to
+//! flows the apps opened — no port allowlist, no off switch.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::filter::{FlowKey, FlowTable};
 
 /// IPv6 next header for an encapsulated IPv4 packet.
 pub const IPPROTO_IPIP: u8 = 4;
 const IPV6_HEADER: usize = 40;
 const HOP_LIMIT: u8 = 64;
+
+const PROTO_ICMP: u8 = 1;
+const PROTO_TCP: u8 = 6;
+const PROTO_UDP: u8 = 17;
+
+/// TCP MSS for IPv4 through an exit, both directions. Planned for a mesh
+/// packet of 1280 bytes, the smallest any fips hop carries: 1280 − 40
+/// (outer IPv6) = 1240 for the inner packet, − 20 (IPv4) − 20 (TCP) = 1200.
+/// The exit clamps to the same value in its forward chain. (IPv6-in-IPv6
+/// would be 1180.)
+pub const MSS_IPV4: u16 = 1200;
 
 /// This node's inner IPv4 address, from its fips address (`fd` + 15 bytes):
 /// `100.64.0.0/10` with the low 22 bits taken from address bytes 1..4.
@@ -43,6 +64,23 @@ pub fn is_ipv4(packet: &[u8]) -> bool {
     packet.len() >= 20 && packet[0] >> 4 == 4
 }
 
+/// The IPv4 header length of a well-formed packet: version 4, IHL at least
+/// 5, a total length that covers the header and fits `packet`. `None` for
+/// anything else, so no port is ever read from inside a header.
+fn ipv4_header_len(packet: &[u8]) -> Option<usize> {
+    if !is_ipv4(packet) {
+        return None;
+    }
+    let ihl = usize::from(packet[0] & 0x0f) * 4;
+    let total = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+    (ihl >= 20 && total >= ihl && total <= packet.len()).then_some(ihl)
+}
+
+/// True for a fragment other than the first: it carries no transport header.
+fn later_fragment(packet: &[u8]) -> bool {
+    u16::from_be_bytes([packet[6], packet[7]]) & 0x1fff != 0
+}
+
 /// Wrap an IPv4 packet for the exit at `exit`, sent from `ours`.
 pub fn wrap(inner: &[u8], ours: &[u8; 16], exit: &[u8; 16]) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(IPV6_HEADER + inner.len());
@@ -56,32 +94,23 @@ pub fn wrap(inner: &[u8], ours: &[u8; 16], exit: &[u8; 16]) -> Vec<u8> {
     pkt
 }
 
+/// True for an IPv6 packet carrying IPv4 (next header 4), from anyone.
+fn is_ipip(packet: &[u8]) -> bool {
+    packet.len() >= IPV6_HEADER && packet[0] >> 4 == 6 && packet[6] == IPPROTO_IPIP
+}
+
 /// The IPv4 packet inside `packet`, if it is one wrapped by the exit at `exit`
 /// for this node: IPv6 from `exit`, next header 4, a well-formed IPv4 packet
-/// inside. Anything else — another node, another protocol — is `None` and
-/// takes the normal inbound path.
+/// inside. Anything else — another node, another protocol — is `None`.
 pub fn unwrap<'a>(packet: &'a [u8], exit: &[u8; 16]) -> Option<&'a [u8]> {
-    if packet.len() < IPV6_HEADER + 20
-        || packet[0] >> 4 != 6
-        || packet[6] != IPPROTO_IPIP
-        || packet[8..24] != exit[..]
-    {
+    if !is_ipip(packet) || packet[8..24] != exit[..] {
         return None;
     }
     let len = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
     let inner = packet.get(IPV6_HEADER..IPV6_HEADER + len)?;
+    ipv4_header_len(inner)?;
     let total = usize::from(u16::from_be_bytes([inner[2], inner[3]]));
-    if !is_ipv4(inner) || total < 20 || total > inner.len() {
-        return None;
-    }
     Some(&inner[..total])
-}
-
-/// Largest TCP MSS an inner IPv4 packet may carry through an exit when the
-/// node admits IPv6 packets of up to `ipv6_mtu` bytes (outer IPv6 header,
-/// inner IPv4 header, TCP header).
-pub fn mss_ceiling(ipv6_mtu: u16) -> u16 {
-    ipv6_mtu.saturating_sub(40 + 20 + 20)
 }
 
 /// Lower the MSS option of an IPv4 TCP SYN to `max`, fixing the TCP checksum
@@ -89,14 +118,12 @@ pub fn mss_ceiling(ipv6_mtu: u16) -> u16 {
 /// mesh would refuse once wrapped — the same job fips's own clamp does for
 /// mesh-bound IPv6. Anything else is left alone.
 pub fn clamp_mss(packet: &mut [u8], max: u16) {
-    if !is_ipv4(packet) || packet[9] != 6 {
+    let Some(ihl) = ipv4_header_len(packet) else {
+        return;
+    };
+    if packet[9] != PROTO_TCP || later_fragment(packet) {
         return;
     }
-    // A non-first fragment carries no TCP header.
-    if u16::from_be_bytes([packet[6], packet[7]]) & 0x1fff != 0 {
-        return;
-    }
-    let ihl = usize::from(packet[0] & 0x0f) * 4;
     let Some(tcp) = packet.get_mut(ihl..) else {
         return;
     };
@@ -137,53 +164,47 @@ pub fn clamp_mss(packet: &mut [u8], max: u16) {
     }
 }
 
-/// One's-complement update of a 16-bit checksum for `old` → `new` words
-/// (RFC 1624, eqn. 3).
-fn update_checksum(sum: u16, old: &[u8], new: &[u8]) -> u16 {
-    let mut acc = u32::from(!sum);
-    for (o, n) in old.chunks(2).zip(new.chunks(2)) {
-        acc += u32::from(!u16::from_be_bytes([o[0], o[1]]));
-        acc += u32::from(u16::from_be_bytes([n[0], n[1]]));
-    }
-    while acc > 0xffff {
-        acc = (acc & 0xffff) + (acc >> 16);
-    }
-    !(acc as u16)
+/// An IPv4 address as the flow table stores it (IPv4-mapped).
+fn mapped(v4: &[u8]) -> [u8; 16] {
+    let mut a = [0u8; 16];
+    a[10] = 0xff;
+    a[11] = 0xff;
+    a[12..16].copy_from_slice(&v4[..4]);
+    a
 }
 
-/// Replace the IPv4 source (`at` = 12) or destination (`at` = 16) address,
-/// fixing the header checksum and, in a first fragment, the TCP or UDP
-/// checksum (both cover the address through the pseudo-header; ICMP does
-/// not). A UDP checksum of zero means "none" and stays zero.
-fn rewrite_ipv4_addr(packet: &mut [u8], at: usize, new: [u8; 4]) {
-    let old: [u8; 4] = packet[at..at + 4].try_into().unwrap();
-    if old == new {
-        return;
-    }
-    packet[at..at + 4].copy_from_slice(&new);
-    let hc = update_checksum(u16::from_be_bytes([packet[10], packet[11]]), &old, &new);
-    packet[10..12].copy_from_slice(&hc.to_be_bytes());
-    if u16::from_be_bytes([packet[6], packet[7]]) & 0x1fff != 0 {
-        return;
+/// The flow an IPv4 packet this phone sends belongs to, as the flow table
+/// keys it: TCP and UDP by ports, an ICMP echo request by its identifier.
+/// `None` for a later fragment, another protocol or a truncated header.
+/// `packet` may be a quoted header inside an ICMP error, whose total length
+/// describes the original packet, not the bytes quoted: only the IHL is
+/// checked here, and only the 8 transport bytes every error quotes are read.
+fn sent_flow(packet: &[u8]) -> Option<FlowKey> {
+    if !is_ipv4(packet) || later_fragment(packet) {
+        return None;
     }
     let ihl = usize::from(packet[0] & 0x0f) * 4;
-    let off = match packet[9] {
-        6 => ihl + 16,
-        17 => ihl + 6,
-        _ => return,
-    };
-    let Some(field) = packet.get(off..off + 2) else {
-        return;
-    };
-    let sum = u16::from_be_bytes([field[0], field[1]]);
-    if packet[9] == 17 && sum == 0 {
-        return;
+    if ihl < 20 {
+        return None;
     }
-    let mut c = update_checksum(sum, &old, &new);
-    if packet[9] == 17 && c == 0 {
-        c = 0xffff;
+    let l4 = packet.get(ihl..ihl + 8)?;
+    let remote_addr = mapped(&packet[16..20]);
+    let port = |at: usize| u16::from_be_bytes([l4[at], l4[at + 1]]);
+    match packet[9] {
+        proto @ (PROTO_TCP | PROTO_UDP) => Some(FlowKey {
+            proto,
+            local_port: port(0),
+            remote_addr,
+            remote_port: port(2),
+        }),
+        PROTO_ICMP if l4[0] == 8 => Some(FlowKey {
+            proto: PROTO_ICMP,
+            local_port: port(4),
+            remote_addr,
+            remote_port: 0,
+        }),
+        _ => None,
     }
-    packet[off..off + 2].copy_from_slice(&c.to_be_bytes());
 }
 
 /// What the reader does with a packet that is not for the mesh.
@@ -193,12 +214,26 @@ pub enum Outbound {
     Forwarder,
     /// Wrapped for the exit; hand it to the node.
     Mesh(Vec<u8>),
-    /// An exit is selected but this cannot go through it (IPv6): refused,
-    /// so nothing leaves around the exit. Carries the ICMPv6 "administratively
-    /// prohibited" to write back to the app, so it falls back to IPv4 at once
-    /// instead of waiting out a connect timeout (`None` for a packet that
-    /// must not be answered: an ICMPv6 error itself, or garbage).
+    /// An exit is selected but this cannot go through it (IPv6, or a
+    /// malformed IPv4 packet): refused, so nothing leaves around the exit.
+    /// For IPv6 it carries the ICMPv6 "administratively prohibited" to write
+    /// back to the app, so it falls back to IPv4 at once instead of waiting
+    /// out a connect timeout (`None` for a packet that must not be answered:
+    /// an ICMPv6 error itself, or garbage).
     Refuse(Option<Vec<u8>>),
+}
+
+/// What the bridge does with a packet from the mesh.
+#[derive(Debug, PartialEq)]
+pub enum Inbound {
+    /// Not IPv4-in-IPv6: the normal inbound path (the mesh firewall).
+    NotTunnel,
+    /// A reply from the selected exit to a flow an app opened: the IPv4
+    /// packet to write to the TUN.
+    Deliver(Vec<u8>),
+    /// IPv4-in-IPv6 that is not that: dropped here, whatever the mesh
+    /// firewall's settings, since nothing else on the phone expects it.
+    Drop,
 }
 
 /// ICMPv6 Destination Unreachable, code 1 (administratively prohibited), for
@@ -256,10 +291,9 @@ pub struct ExitSwitch {
     /// This node's fips address and the inner IPv4 derived from it.
     ours: [u8; 16],
     inner: [u8; 4],
-    mss: u16,
-    /// The IPv4 source the apps use (the tunnel's address), learned from
-    /// outbound packets: replies are rewritten back to it.
-    tun_src: AtomicU32,
+    /// Flows the apps opened through the current exit: the only replies let
+    /// in. Cleared when the exit changes.
+    flows: FlowTable,
     /// The local `.fips` responder, asked to register the exit's identity.
     responder: SocketAddr,
     /// Unix seconds of the last registration (rate limit for [`Self::refused`]).
@@ -267,14 +301,12 @@ pub struct ExitSwitch {
 }
 
 impl ExitSwitch {
-    /// `ipv6_mtu` is the node's effective IPv6 MTU (`Node::effective_ipv6_mtu`).
-    pub fn new(ours: [u8; 16], ipv6_mtu: u16, responder: SocketAddr) -> Self {
+    pub fn new(ours: [u8; 16], responder: SocketAddr) -> Self {
         Self {
             route: RwLock::new(None),
             ours,
             inner: inner_ipv4(&ours).octets(),
-            mss: mss_ceiling(ipv6_mtu),
-            tun_src: AtomicU32::new(0),
+            flows: FlowTable::default(),
             responder,
             registered_at: AtomicU64::new(0),
         }
@@ -282,8 +314,9 @@ impl ExitSwitch {
 
     /// Select the exit with this npub, or none (`None`/empty: the phone's own
     /// connection). Registers the exit's identity with the node in the
-    /// background. An npub that does not parse selects nothing and is an
-    /// error, so a typo never silently sends traffic out of the phone.
+    /// background. An npub that does not parse, or this node's own, selects
+    /// nothing and is an error, so a typo never silently sends traffic out
+    /// of the phone.
     pub fn set(&self, npub: Option<&str>) -> Result<(), String> {
         let npub = npub.map(str::trim).filter(|n| !n.is_empty());
         let route = match npub {
@@ -291,26 +324,34 @@ impl ExitSwitch {
             Some(n) => {
                 let peer = fips::identity::PeerIdentity::from_npub(n)
                     .map_err(|e| format!("exit node npub: {e}"))?;
+                let addr = *peer.address().as_bytes();
+                if addr == self.ours {
+                    return Err("exit node npub: that is this phone's own npub".into());
+                }
                 Some(Route {
                     npub: peer.npub(),
-                    addr: *peer.address().as_bytes(),
+                    addr,
                 })
             }
         };
-        let changed = {
-            let current = self.route.read().unwrap();
-            current.as_ref().map(|r| &r.npub) != route.as_ref().map(|r| &r.npub)
-        };
-        if changed {
-            match &route {
-                Some(r) => {
-                    tracing::info!(exit = %r.npub, "internet traffic now goes through the exit node")
-                }
-                None => tracing::info!("internet traffic now goes through the phone's connection"),
-            }
-        }
         let register = route.as_ref().map(|r| r.npub.clone());
-        *self.route.write().unwrap() = route;
+        {
+            let mut current = self.route.write().unwrap();
+            let changed = current.as_ref().map(|r| &r.npub) != route.as_ref().map(|r| &r.npub);
+            if changed {
+                // A flow opened through one exit is not answered by another.
+                self.flows.clear();
+                match &route {
+                    Some(r) => {
+                        tracing::info!(exit = %r.npub, "internet traffic now goes through the exit node")
+                    }
+                    None => {
+                        tracing::info!("internet traffic now goes through the phone's connection")
+                    }
+                }
+            }
+            *current = route;
+        }
         if let Some(npub) = register {
             self.register(npub);
         }
@@ -327,7 +368,8 @@ impl ExitSwitch {
         self.route.read().unwrap().as_ref().map(|r| r.addr.into())
     }
 
-    /// This node's inner IPv4 address (what the exit sees as the source).
+    /// This node's inner IPv4 address (the tunnel's IPv4 address, and what
+    /// the exit sees as the source).
     pub fn inner(&self) -> Ipv4Addr {
         Ipv4Addr::from(self.inner)
     }
@@ -341,37 +383,87 @@ impl ExitSwitch {
         if !is_ipv4(packet) {
             return Outbound::Refuse(icmpv6_prohibited(packet));
         }
-        let mut inner = packet.to_vec();
-        let src = u32::from_be_bytes(inner[12..16].try_into().unwrap());
-        if src != u32::from_be_bytes(self.inner) {
-            self.tun_src.store(src, Ordering::Relaxed);
+        // Malformed, or not from the tunnel's address (which is the inner
+        // address): nothing an app sends, and nothing the exit would take.
+        if ipv4_header_len(packet).is_none() || packet[12..16] != self.inner {
+            return Outbound::Refuse(None);
         }
-        rewrite_ipv4_addr(&mut inner, 12, self.inner);
-        clamp_mss(&mut inner, self.mss);
+        if let Some(flow) = sent_flow(packet) {
+            self.flows.note(flow);
+        }
+        let mut inner = packet.to_vec();
+        clamp_mss(&mut inner, MSS_IPV4);
         Outbound::Mesh(wrap(&inner, &self.ours, &route.addr))
     }
 
-    /// The app-side packet inside a reply from the selected exit, addressed
-    /// back to the tunnel's IPv4 address; `None` for anything else.
-    pub fn inbound(&self, packet: &[u8]) -> Option<Vec<u8>> {
+    /// Decide a packet from the mesh: a reply from the selected exit is
+    /// delivered only if it belongs to a flow an app opened (see the module
+    /// docs); any other IPv4-in-IPv6 is dropped.
+    pub fn inbound(&self, packet: &[u8]) -> Inbound {
+        if !is_ipip(packet) {
+            return Inbound::NotTunnel;
+        }
         let route = self.route.read().unwrap();
-        let inner = unwrap(packet, &route.as_ref()?.addr)?;
-        if inner[16..20] != self.inner {
-            return None;
+        let Some(inner) = route.as_ref().and_then(|r| unwrap(packet, &r.addr)) else {
+            return Inbound::Drop;
+        };
+        if inner[16..20] != self.inner || later_fragment(inner) || !self.admits(inner) {
+            return Inbound::Drop;
         }
         let mut out = inner.to_vec();
-        let tun = self.tun_src.load(Ordering::Relaxed);
-        if tun != 0 {
-            rewrite_ipv4_addr(&mut out, 16, tun.to_be_bytes());
-        }
         // The far end's SYN-ACK sets what the app may send: clamp it too, or
         // the app's segments, once wrapped, outgrow the mesh.
-        clamp_mss(&mut out, self.mss);
-        Some(out)
+        clamp_mss(&mut out, MSS_IPV4);
+        Inbound::Deliver(out)
     }
 
-    /// The node refused a packet for the exit (it does not know the
-    /// identity, or has no route yet): register it again, at most every 5 s.
+    /// True if `inner` (a well-formed first-fragment IPv4 packet to us)
+    /// answers a flow in the table: TCP or UDP by its reversed ports, an
+    /// echo reply by its identifier, an ICMP error (destination unreachable,
+    /// time exceeded, parameter problem) by the packet it quotes, which must
+    /// be one this phone sent. Any other ICMP is dropped.
+    fn admits(&self, inner: &[u8]) -> bool {
+        let ihl = usize::from(inner[0] & 0x0f) * 4;
+        let Some(l4) = inner.get(ihl..) else {
+            return false;
+        };
+        let remote_addr = mapped(&inner[12..16]);
+        let port = |at: usize| l4.get(at..at + 2).map(|p| u16::from_be_bytes([p[0], p[1]]));
+        match inner[9] {
+            proto @ (PROTO_TCP | PROTO_UDP) => {
+                let (Some(sport), Some(dport)) = (port(0), port(2)) else {
+                    return false;
+                };
+                self.flows.admits(&FlowKey {
+                    proto,
+                    local_port: dport,
+                    remote_addr,
+                    remote_port: sport,
+                })
+            }
+            PROTO_ICMP => match l4.first() {
+                Some(0) => port(4).is_some_and(|id| {
+                    self.flows.admits(&FlowKey {
+                        proto: PROTO_ICMP,
+                        local_port: id,
+                        remote_addr,
+                        remote_port: 0,
+                    })
+                }),
+                Some(3 | 11 | 12) => l4
+                    .get(8..)
+                    .filter(|quoted| quoted.len() >= 20 && quoted[12..16] == self.inner)
+                    .and_then(sent_flow)
+                    .is_some_and(|flow| self.flows.contains(&flow)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The exit's resolver did not answer: register its identity with the
+    /// node again (it may have been forgotten, or not be known yet), at most
+    /// every 5 s.
     pub fn refused(&self) {
         if let Some(npub) = self.selected() {
             let now = unix_secs();
@@ -401,6 +493,7 @@ fn unix_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// One's-complement sum over `data` (for checksum checks).
     fn csum(parts: &[&[u8]]) -> u16 {
@@ -416,36 +509,86 @@ mod tests {
         !(sum as u16)
     }
 
-    /// IPv4 TCP SYN 100.64.0.1 → 1.2.3.4 with an MSS option and a valid
-    /// TCP checksum.
-    fn ipv4_syn(mss: u16) -> Vec<u8> {
-        let src = [100, 64, 0, 1];
-        let dst = [1, 2, 3, 4];
-        let mut tcp = vec![0u8; 24];
-        tcp[0..2].copy_from_slice(&40000u16.to_be_bytes());
-        tcp[2..4].copy_from_slice(&443u16.to_be_bytes());
-        tcp[12] = 6 << 4; // data offset 24
-        tcp[13] = 0x02; // SYN
-        tcp[14..16].copy_from_slice(&65535u16.to_be_bytes());
-        tcp[20..24].copy_from_slice(&[2, 4, (mss >> 8) as u8, mss as u8]);
-        let pseudo = [&src[..], &dst[..], &[0, 6, 0, tcp.len() as u8]].concat();
-        let c = csum(&[&pseudo, &tcp]);
-        tcp[16..18].copy_from_slice(&c.to_be_bytes());
-
-        let mut ip = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0];
-        ip[2..4].copy_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+    /// An IPv4 packet with a valid header checksum around `l4`; for TCP and
+    /// UDP the transport checksum is filled in too.
+    fn ipv4(proto: u8, src: [u8; 4], dst: [u8; 4], mut l4: Vec<u8>) -> Vec<u8> {
+        let at = match proto {
+            PROTO_TCP => Some(16),
+            PROTO_UDP => Some(6),
+            _ => None,
+        };
+        if let Some(at) = at {
+            l4[at..at + 2].copy_from_slice(&[0, 0]);
+            let len = (l4.len() as u16).to_be_bytes();
+            let pseudo = [&src[..], &dst[..], &[0, proto, len[0], len[1]]].concat();
+            let c = csum(&[&pseudo, &l4]);
+            l4[at..at + 2].copy_from_slice(&c.to_be_bytes());
+        } else if proto == PROTO_ICMP {
+            l4[2..4].copy_from_slice(&[0, 0]);
+            let c = csum(&[&l4]);
+            l4[2..4].copy_from_slice(&c.to_be_bytes());
+        }
+        let mut ip = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, proto, 0, 0];
+        ip[2..4].copy_from_slice(&((20 + l4.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&src);
         ip.extend_from_slice(&dst);
         let c = csum(&[&ip]);
         ip[10..12].copy_from_slice(&c.to_be_bytes());
-        ip.extend_from_slice(&tcp);
+        ip.extend_from_slice(&l4);
         ip
+    }
+
+    /// A TCP header with `flags` and, if given, an MSS option.
+    fn tcp(sport: u16, dport: u16, flags: u8, mss: Option<u16>) -> Vec<u8> {
+        let mut t = vec![0u8; 20];
+        t[0..2].copy_from_slice(&sport.to_be_bytes());
+        t[2..4].copy_from_slice(&dport.to_be_bytes());
+        t[12] = 5 << 4;
+        t[13] = flags;
+        t[14..16].copy_from_slice(&65535u16.to_be_bytes());
+        if let Some(mss) = mss {
+            t[12] = 6 << 4;
+            t.extend_from_slice(&[2, 4, (mss >> 8) as u8, mss as u8]);
+        }
+        t
+    }
+
+    fn udp(sport: u16, dport: u16) -> Vec<u8> {
+        let mut u = vec![0u8; 12];
+        u[0..2].copy_from_slice(&sport.to_be_bytes());
+        u[2..4].copy_from_slice(&dport.to_be_bytes());
+        u[4..6].copy_from_slice(&12u16.to_be_bytes());
+        u[8..12].copy_from_slice(b"ping");
+        u
+    }
+
+    fn icmp(kind: u8, rest: [u8; 4], body: &[u8]) -> Vec<u8> {
+        [&[kind, 0, 0, 0][..], &rest, body].concat()
+    }
+
+    const SYN: u8 = 0x02;
+    const SYN_ACK: u8 = 0x12;
+    const ACK: u8 = 0x10;
+    const SERVER: [u8; 4] = [1, 2, 3, 4];
+
+    /// IPv4 TCP SYN 100.64.0.1 → 1.2.3.4 with an MSS option.
+    fn ipv4_syn(mss: u16) -> Vec<u8> {
+        ipv4(
+            PROTO_TCP,
+            [100, 64, 0, 1],
+            SERVER,
+            tcp(40000, 443, SYN, Some(mss)),
+        )
     }
 
     fn tcp_checksum_ok(pkt: &[u8]) -> bool {
         let tcp = &pkt[20..];
         let pseudo = [&pkt[12..20], &[0, 6, 0, tcp.len() as u8]].concat();
         csum(&[&pseudo, tcp]) == 0
+    }
+
+    fn mss_of(pkt: &[u8]) -> u16 {
+        u16::from_be_bytes([pkt[42], pkt[43]])
     }
 
     #[test]
@@ -494,6 +637,14 @@ mod tests {
         udp[6] = 17;
         assert_eq!(unwrap(&udp, &exit), None);
         assert_eq!(unwrap(&reply[..reply.len() - 1], &exit), None);
+        // An IHL below 5, or a payload too short for an IPv4 header.
+        let mut short_ihl = reply.clone();
+        short_ihl[40] = 0x44;
+        assert_eq!(unwrap(&short_ihl, &exit), None);
+        let mut tiny = wrap(&inner[..8], &exit, &ours);
+        assert_eq!(unwrap(&tiny, &exit), None);
+        tiny[5] = 200; // a payload length past the end
+        assert_eq!(unwrap(&tiny, &exit), None);
     }
 
     #[test]
@@ -501,7 +652,7 @@ mod tests {
         let mut syn = ipv4_syn(1460);
         assert!(tcp_checksum_ok(&syn));
         clamp_mss(&mut syn, 1200);
-        assert_eq!(u16::from_be_bytes([syn[42], syn[43]]), 1200);
+        assert_eq!(mss_of(&syn), 1200);
         assert!(tcp_checksum_ok(&syn));
         // Already below: untouched.
         let mut small = ipv4_syn(1000);
@@ -510,90 +661,117 @@ mod tests {
         assert_eq!(small, before);
         // Not a SYN: untouched.
         let mut ack = ipv4_syn(1460);
-        ack[33] = 0x10;
+        ack[33] = ACK;
         let before = ack.clone();
         clamp_mss(&mut ack, 1200);
         assert_eq!(ack, before);
     }
 
-    fn ipv4_checksum_ok(pkt: &[u8]) -> bool {
-        csum(&[&pkt[..20]]) == 0
+    struct Setup {
+        sw: ExitSwitch,
+        exit: [u8; 16],
+        npub: String,
+        /// The tunnel's IPv4 address: the inner address.
+        me: [u8; 4],
     }
 
-    fn switch() -> (ExitSwitch, [u8; 16], String) {
+    fn switch() -> Setup {
         let ours = *fips::Identity::generate().address().as_bytes();
         let exit_id = fips::Identity::generate();
-        let sw = ExitSwitch::new(ours, 1395, "[::1]:9".parse().unwrap());
-        (sw, *exit_id.address().as_bytes(), exit_id.npub())
+        let sw = ExitSwitch::new(ours, "[::1]:9".parse().unwrap());
+        let me = sw.inner().octets();
+        Setup {
+            sw,
+            exit: *exit_id.address().as_bytes(),
+            npub: exit_id.npub(),
+            me,
+        }
+    }
+
+    fn selected() -> Setup {
+        let s = switch();
+        s.sw.set(Some(&s.npub)).unwrap();
+        s
+    }
+
+    impl Setup {
+        /// Send `pkt` (from the app) and expect it to go to the exit.
+        fn send(&self, pkt: &[u8]) -> Vec<u8> {
+            match self.sw.outbound(pkt) {
+                Outbound::Mesh(outer) => {
+                    assert_eq!(&outer[24..40], &self.exit[..]);
+                    outer[40..].to_vec()
+                }
+                other => panic!("expected the exit, got {other:?}"),
+            }
+        }
+
+        /// `inner` as the exit would send it to us.
+        fn reply(&self, inner: &[u8]) -> Inbound {
+            self.sw.inbound(&wrap(inner, &self.exit, &self.sw.ours))
+        }
     }
 
     #[test]
     fn no_exit_means_the_forwarder() {
-        let (sw, _, _) = switch();
-        assert_eq!(sw.outbound(&ipv4_syn(1460)), Outbound::Forwarder);
-        assert_eq!(sw.selected(), None);
+        let s = switch();
+        assert_eq!(s.sw.outbound(&ipv4_syn(1460)), Outbound::Forwarder);
+        assert_eq!(s.sw.selected(), None);
     }
 
     #[test]
-    fn a_bad_npub_is_an_error_and_selects_nothing() {
-        let (sw, _, _) = switch();
-        assert!(sw.set(Some("npub1nonsense")).is_err());
-        assert_eq!(sw.outbound(&ipv4_syn(1460)), Outbound::Forwarder);
+    fn a_bad_npub_or_our_own_is_an_error_and_selects_nothing() {
+        let s = switch();
+        assert!(s.sw.set(Some("npub1nonsense")).is_err());
+        assert_eq!(s.sw.outbound(&ipv4_syn(1460)), Outbound::Forwarder);
+
+        let id = fips::Identity::generate();
+        let own = ExitSwitch::new(*id.address().as_bytes(), "[::1]:9".parse().unwrap());
+        assert!(own.set(Some(&id.npub())).is_err());
+        assert_eq!(own.selected(), None);
     }
 
     #[test]
-    fn with_an_exit_ipv4_is_wrapped_and_ipv6_is_dropped() {
-        let (sw, exit, npub) = switch();
-        sw.set(Some(&npub)).unwrap();
-        assert_eq!(sw.selected(), Some(npub));
+    fn with_an_exit_ipv4_is_wrapped_unchanged_but_clamped_and_ipv6_is_refused() {
+        let s = selected();
+        assert_eq!(s.sw.selected(), Some(s.npub.clone()));
 
-        // The app's packet leaves from the tunnel address 10.111.222.1.
-        let mut app = ipv4_syn(1460);
-        rewrite_ipv4_addr(&mut app, 12, [10, 111, 222, 1]);
-        assert!(ipv4_checksum_ok(&app) && tcp_checksum_ok(&app));
-        let Outbound::Mesh(outer) = sw.outbound(&app) else {
-            panic!("IPv4 must go to the exit");
-        };
-        assert_eq!(&outer[24..40], &exit[..]);
-        let inner = &outer[40..];
-        assert_eq!(&inner[12..16], &sw.inner().octets()[..]);
-        assert!(ipv4_checksum_ok(inner) && tcp_checksum_ok(inner));
-        assert_eq!(
-            u16::from_be_bytes([inner[42], inner[43]]),
-            mss_ceiling(1395)
-        );
+        // The app sends from the tunnel's address, which is the inner one:
+        // nothing is rewritten, only the MSS lowered.
+        let syn = ipv4(PROTO_TCP, s.me, SERVER, tcp(40000, 443, SYN, Some(1460)));
+        let inner = s.send(&syn);
+        assert_eq!(&inner[12..20], &syn[12..20]);
+        assert_eq!(mss_of(&inner), MSS_IPV4);
+        assert!(tcp_checksum_ok(&inner));
 
-        // The exit's reply (addresses swapped) comes back to 10.111.222.1.
-        let mut reply = inner.to_vec();
-        let (src, dst) = (reply[12..16].to_vec(), reply[16..20].to_vec());
-        reply[12..16].copy_from_slice(&dst);
-        reply[16..20].copy_from_slice(&src);
-        let from_exit = wrap(&reply, &exit, &[0; 16]);
-        let back = sw.inbound(&from_exit).expect("reply from the exit");
-        assert_eq!(&back[16..20], &[10, 111, 222, 1]);
-        assert!(ipv4_checksum_ok(&back) && tcp_checksum_ok(&back));
         // A SYN-ACK offering 1460 comes back clamped as well.
-        let mut synack = ipv4_syn(1460);
-        rewrite_ipv4_addr(&mut synack, 12, [1, 2, 3, 4]);
-        rewrite_ipv4_addr(&mut synack, 16, sw.inner().octets());
-        synack[33] = 0x12; // SYN+ACK
-        let ack_fix = {
-            let tcp = &synack[20..];
-            let pseudo = [&synack[12..20], &[0, 6, 0, tcp.len() as u8]].concat();
-            let mut t = tcp.to_vec();
-            t[16..18].copy_from_slice(&[0, 0]);
-            csum(&[&pseudo, &t])
+        let synack = ipv4(
+            PROTO_TCP,
+            SERVER,
+            s.me,
+            tcp(443, 40000, SYN_ACK, Some(1460)),
+        );
+        let Inbound::Deliver(back) = s.reply(&synack) else {
+            panic!("the SYN-ACK of a flow the app opened");
         };
-        synack[36..38].copy_from_slice(&ack_fix.to_be_bytes());
-        let back = sw
-            .inbound(&wrap(&synack, &exit, &[0; 16]))
-            .expect("SYN-ACK");
-        assert_eq!(u16::from_be_bytes([back[42], back[43]]), mss_ceiling(1395));
+        assert_eq!(mss_of(&back), MSS_IPV4);
         assert!(tcp_checksum_ok(&back));
+
+        // Not from the tunnel's address, or malformed: refused, unanswered.
+        let other_src = ipv4(
+            PROTO_TCP,
+            [10, 111, 222, 1],
+            SERVER,
+            tcp(40000, 443, SYN, None),
+        );
+        assert_eq!(s.sw.outbound(&other_src), Outbound::Refuse(None));
+        let mut bad_ihl = syn.clone();
+        bad_ihl[0] = 0x44;
+        assert_eq!(s.sw.outbound(&bad_ihl), Outbound::Refuse(None));
 
         // IPv6 internet traffic does not go around the exit.
         let v6 = crate::packet::build_ipv6_udp([0x20; 16], [0x26; 16], 1, 2, b"x");
-        let Outbound::Refuse(Some(icmp)) = sw.outbound(&v6) else {
+        let Outbound::Refuse(Some(icmp)) = s.sw.outbound(&v6) else {
             panic!("IPv6 internet traffic must be refused with an ICMPv6 error");
         };
         // From the address the app tried, to the app, type 1 code 1, and a
@@ -608,40 +786,179 @@ mod tests {
         assert_eq!(icmpv6_prohibited(&icmp), None);
 
         // Back to the phone's connection.
-        sw.set(None).unwrap();
-        assert_eq!(sw.outbound(&app), Outbound::Forwarder);
-        assert_eq!(sw.inbound(&from_exit), None);
+        s.sw.set(None).unwrap();
+        assert_eq!(s.sw.outbound(&syn), Outbound::Forwarder);
+        assert_eq!(s.reply(&synack), Inbound::Drop);
     }
 
     #[test]
-    fn udp_checksum_follows_the_rewrite_and_zero_stays_zero() {
-        let src = [10, 111, 222, 1];
-        let dst = [9, 9, 9, 9];
-        let mut udp = vec![0u8; 12];
-        udp[0..2].copy_from_slice(&5353u16.to_be_bytes());
-        udp[2..4].copy_from_slice(&53u16.to_be_bytes());
-        udp[4..6].copy_from_slice(&12u16.to_be_bytes());
-        udp[8..12].copy_from_slice(b"ping");
-        let pseudo = [&src[..], &dst[..], &[0, 17, 0, 12]].concat();
-        let c = csum(&[&pseudo, &udp]);
-        udp[6..8].copy_from_slice(&c.to_be_bytes());
-        let mut ip = vec![0x45, 0, 0, 32, 0, 0, 0x40, 0, 64, 17, 0, 0];
-        ip.extend_from_slice(&src);
-        ip.extend_from_slice(&dst);
-        let c = csum(&[&ip]);
-        ip[10..12].copy_from_slice(&c.to_be_bytes());
-        ip.extend_from_slice(&udp);
+    fn an_unsolicited_connection_from_the_exit_is_dropped() {
+        let s = selected();
+        // A SYN to a port an app listens on, from anywhere, as the exit's
+        // operator could send it: nothing on the phone asked for it.
+        let syn = ipv4(
+            PROTO_TCP,
+            [5, 6, 7, 8],
+            s.me,
+            tcp(50000, 8080, SYN, Some(1460)),
+        );
+        assert_eq!(s.reply(&syn), Inbound::Drop);
+        let dgram = ipv4(PROTO_UDP, [5, 6, 7, 8], s.me, udp(53, 5353));
+        assert_eq!(s.reply(&dgram), Inbound::Drop);
+        let ping = ipv4(PROTO_ICMP, [5, 6, 7, 8], s.me, icmp(8, [0, 7, 0, 1], b"x"));
+        assert_eq!(s.reply(&ping), Inbound::Drop);
+        // The same from any other node, or IPv4-in-IPv6 with no exit at all.
+        let stranger = [0xfd; 16];
+        assert_eq!(
+            s.sw.inbound(&wrap(&syn, &stranger, &s.sw.ours)),
+            Inbound::Drop
+        );
+        s.sw.set(None).unwrap();
+        assert_eq!(s.reply(&syn), Inbound::Drop);
+        // Anything that is not IPv4-in-IPv6 is not the exit's to decide.
+        let mesh = crate::packet::build_ipv6_udp(s.exit, s.sw.ours, 1, 2, b"x");
+        assert_eq!(s.sw.inbound(&mesh), Inbound::NotTunnel);
+    }
 
-        let mut pkt = ip.clone();
-        rewrite_ipv4_addr(&mut pkt, 12, [100, 99, 1, 2]);
-        let pseudo = [&pkt[12..20], &[0, 17, 0, 12]].concat();
-        assert!(ipv4_checksum_ok(&pkt));
-        assert_eq!(csum(&[&pseudo, &pkt[20..]]), 0);
+    #[test]
+    fn replies_pass_only_for_the_flow_the_app_opened() {
+        let s = selected();
+        s.send(&ipv4(PROTO_TCP, s.me, SERVER, tcp(40000, 443, SYN, None)));
+        s.send(&ipv4(PROTO_UDP, s.me, SERVER, udp(41000, 53)));
 
-        let mut none = ip.clone();
-        none[26..28].copy_from_slice(&[0, 0]);
-        rewrite_ipv4_addr(&mut none, 12, [100, 99, 1, 2]);
-        assert_eq!(&none[26..28], &[0, 0]);
+        let reply = ipv4(PROTO_TCP, SERVER, s.me, tcp(443, 40000, ACK, None));
+        assert!(matches!(s.reply(&reply), Inbound::Deliver(p) if p == reply));
+        let answer = ipv4(PROTO_UDP, SERVER, s.me, udp(53, 41000));
+        assert!(matches!(s.reply(&answer), Inbound::Deliver(_)));
+
+        // Another port on our side, another remote port, another remote, the
+        // other protocol: none of them is the flow.
+        for (proto, src, sport, dport) in [
+            (PROTO_TCP, SERVER, 443, 40001),
+            (PROTO_TCP, SERVER, 444, 40000),
+            (PROTO_TCP, [1, 2, 3, 5], 443, 40000),
+            (PROTO_UDP, SERVER, 443, 40000),
+        ] {
+            let l4 = if proto == PROTO_TCP {
+                tcp(sport, dport, ACK, None)
+            } else {
+                udp(sport, dport)
+            };
+            assert_eq!(s.reply(&ipv4(proto, src, s.me, l4)), Inbound::Drop);
+        }
+        // Addressed to another inner address: not ours.
+        let elsewhere = ipv4(
+            PROTO_TCP,
+            SERVER,
+            [100, 64, 0, 9],
+            tcp(443, 40000, ACK, None),
+        );
+        assert_eq!(s.reply(&elsewhere), Inbound::Drop);
+    }
+
+    #[test]
+    fn a_reply_after_the_idle_limit_is_dropped() {
+        let s = selected();
+        s.send(&ipv4(PROTO_UDP, s.me, SERVER, udp(41000, 53)));
+        s.send(&ipv4(PROTO_TCP, s.me, SERVER, tcp(40000, 443, SYN, None)));
+        s.sw.flows
+            .backdate(crate::filter::UDP_IDLE + Duration::from_secs(1));
+        // UDP has expired; TCP's limit is longer and has not.
+        assert_eq!(
+            s.reply(&ipv4(PROTO_UDP, SERVER, s.me, udp(53, 41000))),
+            Inbound::Drop
+        );
+        let tcp_reply = ipv4(PROTO_TCP, SERVER, s.me, tcp(443, 40000, ACK, None));
+        assert!(matches!(s.reply(&tcp_reply), Inbound::Deliver(_)));
+        s.sw.flows
+            .backdate(crate::filter::TCP_IDLE + Duration::from_secs(1));
+        assert_eq!(s.reply(&tcp_reply), Inbound::Drop);
+    }
+
+    #[test]
+    fn icmp_passes_only_for_an_echo_or_a_flow_the_app_opened() {
+        let s = selected();
+        let ping = ipv4(PROTO_ICMP, s.me, SERVER, icmp(8, [0, 7, 0, 1], b"x"));
+        s.send(&ping);
+        let pong = ipv4(PROTO_ICMP, SERVER, s.me, icmp(0, [0, 7, 0, 1], b"x"));
+        assert!(matches!(s.reply(&pong), Inbound::Deliver(_)));
+        let other_id = ipv4(PROTO_ICMP, SERVER, s.me, icmp(0, [0, 8, 0, 1], b"x"));
+        assert_eq!(s.reply(&other_id), Inbound::Drop);
+
+        // Errors quoting a packet the app sent, from a router on the way.
+        let syn = ipv4(PROTO_TCP, s.me, SERVER, tcp(40000, 443, SYN, None));
+        s.send(&syn);
+        let router = [9, 9, 9, 9];
+        for kind in [3, 11, 12] {
+            let err = ipv4(PROTO_ICMP, router, s.me, icmp(kind, [0; 4], &syn[..28]));
+            assert!(matches!(s.reply(&err), Inbound::Deliver(_)), "type {kind}");
+        }
+        let echo_err = ipv4(PROTO_ICMP, router, s.me, icmp(11, [0; 4], &ping[..28]));
+        assert!(matches!(s.reply(&echo_err), Inbound::Deliver(_)));
+
+        // Quoting a flow nobody opened, or a packet not from us.
+        let unknown = ipv4(PROTO_TCP, s.me, SERVER, tcp(40001, 443, SYN, None));
+        let err = ipv4(PROTO_ICMP, router, s.me, icmp(3, [0; 4], &unknown[..28]));
+        assert_eq!(s.reply(&err), Inbound::Drop);
+        let not_ours = ipv4(
+            PROTO_TCP,
+            [100, 64, 0, 9],
+            SERVER,
+            tcp(40000, 443, SYN, None),
+        );
+        let err = ipv4(PROTO_ICMP, router, s.me, icmp(3, [0; 4], &not_ours[..28]));
+        assert_eq!(s.reply(&err), Inbound::Drop);
+        // Quoting too little to know the flow.
+        let err = ipv4(PROTO_ICMP, router, s.me, icmp(3, [0; 4], &syn[..24]));
+        assert_eq!(s.reply(&err), Inbound::Drop);
+        // Any other ICMP: a redirect, a timestamp, an echo request.
+        for kind in [5, 13, 8] {
+            let other = ipv4(
+                PROTO_ICMP,
+                SERVER,
+                s.me,
+                icmp(kind, [0, 7, 0, 1], &syn[..28]),
+            );
+            assert_eq!(s.reply(&other), Inbound::Drop, "type {kind}");
+        }
+    }
+
+    #[test]
+    fn later_fragments_and_short_headers_are_dropped() {
+        let s = selected();
+        s.send(&ipv4(PROTO_UDP, s.me, SERVER, udp(41000, 53)));
+        let answer = ipv4(PROTO_UDP, SERVER, s.me, udp(53, 41000));
+        // A first fragment (more-fragments set, offset 0) has its ports.
+        let mut first = answer.clone();
+        first[6] = 0x20;
+        assert!(matches!(s.reply(&first), Inbound::Deliver(_)));
+        // A later one has none, whatever its first bytes look like.
+        let mut later = answer.clone();
+        later[6..8].copy_from_slice(&[0x00, 0x10]);
+        assert_eq!(s.reply(&later), Inbound::Drop);
+        // IHL below 5: never read as ports.
+        let mut short = answer.clone();
+        short[0] = 0x44;
+        assert_eq!(s.reply(&short), Inbound::Drop);
+    }
+
+    #[test]
+    fn switching_exits_empties_the_flow_table() {
+        let s = selected();
+        s.send(&ipv4(PROTO_TCP, s.me, SERVER, tcp(40000, 443, SYN, None)));
+        assert_eq!(s.sw.flows.len(), 1);
+        // Selecting the same exit again changes nothing.
+        s.sw.set(Some(&s.npub)).unwrap();
+        assert_eq!(s.sw.flows.len(), 1);
+        let other = fips::Identity::generate();
+        s.sw.set(Some(&other.npub())).unwrap();
+        assert_eq!(s.sw.flows.len(), 0);
+        // So the new exit cannot answer the old exit's flow.
+        let reply = ipv4(PROTO_TCP, SERVER, s.me, tcp(443, 40000, ACK, None));
+        let from_new = wrap(&reply, other.address().as_bytes(), &s.sw.ours);
+        assert_eq!(s.sw.inbound(&from_new), Inbound::Drop);
+        s.sw.set(None).unwrap();
+        assert_eq!(s.sw.flows.len(), 0);
     }
 
     /// The premise of the whole feature: fips carries an IPv4-in-IPv6 packet

@@ -215,13 +215,23 @@ impl Pump {
                                 let Some(pkt) = divert.claim(pkt) else {
                                     continue; // an in-process flow's reply
                                 };
-                                // Internet replies through the exit node:
-                                // NATed by the exit, so no firewall here.
-                                if let Some(reply) = exit.inbound(&pkt) {
-                                    if writer_tx.send(reply).is_err() {
-                                        break;
+                                // IPv4-in-IPv6 is the exit's to decide, ahead
+                                // of the mesh firewall and whatever its
+                                // settings: only replies to flows an app
+                                // opened through the selected exit get in,
+                                // never a connection the exit starts.
+                                match exit.inbound(&pkt) {
+                                    crate::exit::Inbound::NotTunnel => {}
+                                    crate::exit::Inbound::Deliver(reply) => {
+                                        if writer_tx.send(reply).is_err() {
+                                            break;
+                                        }
+                                        continue;
                                     }
-                                    continue;
+                                    crate::exit::Inbound::Drop => {
+                                        tracing::trace!("dropped IPv4-in-IPv6 that answers no flow through the exit");
+                                        continue;
+                                    }
                                 }
                                 if let Some(f) = filter.as_deref()
                                     && !f.allow_inbound(&pkt)
@@ -616,17 +626,16 @@ fn run_reader(
                             break; // forwarder gone
                         }
                     }
+                    // The processor forwards every fd00::/8 destination
+                    // that is not this node (one with no route yet is the
+                    // node's to queue or refuse), and the exit is never this
+                    // node (`ExitSwitch::set` refuses our own npub). Anything
+                    // else would be dropped, never sent around the exit.
                     crate::exit::Outbound::Mesh(mut outer) => {
-                        match processor.process(&mut outer) {
-                            TunPacketAction::Forward => {
-                                if outbound_tx.blocking_send(outer).is_err() {
-                                    break; // node gone
-                                }
-                            }
-                            // No route to the exit yet, or the node does not
-                            // know its identity: blocked, never sent around
-                            // it. Registering again is what usually helps.
-                            _ => exit.refused(),
+                        if matches!(processor.process(&mut outer), TunPacketAction::Forward)
+                            && outbound_tx.blocking_send(outer).is_err()
+                        {
+                            break; // node gone
                         }
                     }
                     crate::exit::Outbound::Refuse(answer) => {
@@ -694,7 +703,7 @@ mod tests {
         let web = crate::packet::build_ipv6_udp(me, [0x26; 16], 4000, 443, b"x");
         assert_eq!(classify(&web, &DNS), Class::Internet);
         let mut v4 = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0];
-        v4.extend_from_slice(&[10, 111, 222, 1, 1, 1, 1, 1]);
+        v4.extend_from_slice(&[100, 64, 0, 1, 1, 1, 1, 1]);
         assert_eq!(classify(&v4, &DNS), Class::Internet);
         let tcp_dns = tcp_to(me, DNS, 53);
         assert_eq!(classify(&tcp_dns, &DNS), Class::DnsTcp);

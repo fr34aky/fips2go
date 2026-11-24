@@ -90,6 +90,14 @@ pub trait Lookup: Send + Sync {
     /// record type never over fips — where the answer is back before the
     /// upstream would be.
     fn lookup(&self, query: &[u8], pending: &dyn Fn()) -> Outcome;
+
+    /// True if a domain `query`'s name could belong to is pinned. With an
+    /// exit selected the proxy asks [`Self::lookup`] about such names only:
+    /// they are answered from the pin, everything else goes to the exit's
+    /// resolver. The default, for a lookup with no pins, is false.
+    fn pinned(&self, _query: &[u8]) -> bool {
+        false
+    }
 }
 
 /// What a finished lookup means to the proxy — the one mapping, whether
@@ -284,6 +292,23 @@ impl Names {
     }
 }
 
+impl Names {
+    /// An exit was selected (`true`) or cleared. While one is, the resolver
+    /// is set offline: a pinned domain then answers from its pin with no
+    /// TXT query and no relay, where online it would ask the phone's
+    /// upstreams for the domain's record — around the exit. The proxy hands
+    /// it pinned names only ([`Lookup::pinned`]), since offline an unpinned
+    /// name would be asked of the relays, the public ones included. Cleared,
+    /// the resolver is online again: this app never sets it offline
+    /// otherwise (see [`Self::set_internet_validated`]). A change drops the
+    /// cached decisions, which is what a switch wants. The cost: pins are
+    /// not refreshed while an exit is selected, so a domain that moved its
+    /// server is noticed only afterwards.
+    pub fn set_exit_selected(&self, selected: bool) {
+        self.resolver.set_online(!selected);
+    }
+}
+
 /// When after the names resolver starts the pinned servers are warmed
 /// ([`Names::warm_soon`]).
 const WARM_AT: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(10)];
@@ -337,6 +362,10 @@ impl TxtSource for PhoneTxt {
 }
 
 impl Lookup for Names {
+    fn pinned(&self, query: &[u8]) -> bool {
+        self.resolver.has_pin_for(query)
+    }
+
     fn lookup(&self, query: &[u8], pending: &dyn Fn()) -> Outcome {
         let Some(rt) = self.rt.as_ref() else {
             return Outcome::Legacy;

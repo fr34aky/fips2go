@@ -245,7 +245,7 @@ fn start_inner(
                     return;
                 }
                 // Processor needs the started transports' MTU floor.
-                let _ = ready_tx.send(Ok((node.tun_packet_processor(), node.effective_ipv6_mtu())));
+                let _ = ready_tx.send(Ok(node.tun_packet_processor()));
                 // Relay-pool refresher for the UI: the pool lives inside the
                 // Nostr runtime, which only this runtime may await on. Runs
                 // once per status poll (Notify permit), so it costs nothing
@@ -282,8 +282,8 @@ fn start_inner(
         })
         .map_err(|e| format!("spawn node thread: {e}"))?;
 
-    let (processor, ipv6_mtu) = match ready_rx.recv_timeout(START_TIMEOUT) {
-        Ok(Ok(ready)) => ready,
+    let processor = match ready_rx.recv_timeout(START_TIMEOUT) {
+        Ok(Ok(processor)) => processor,
         Ok(Err(e)) => {
             let _ = node_thread.join();
             return Err(e);
@@ -315,7 +315,6 @@ fn start_inner(
     // fails the start rather than quietly falling back to the phone.
     let exit = Arc::new(crate::exit::ExitSwitch::new(
         *our_fips_addr.as_bytes(),
-        ipv6_mtu,
         LOCAL_RESPONDER.parse().unwrap(),
     ));
     if let Err(e) = exit.set(shim_config.exit_node.as_deref()) {
@@ -343,6 +342,8 @@ fn start_inner(
                 // A rebind rebuilt the resolver; Kotlin last spoke when the
                 // answer changed, which may be long ago.
                 n.set_internet_validated(INTERNET_VALIDATED.load(Ordering::SeqCst));
+                // Pins only while an exit is selected (`select_exit`).
+                n.set_exit_selected(exit.selected().is_some());
                 Some(n)
             }
             Err(e) => {
@@ -362,7 +363,7 @@ fn start_inner(
         names: names.clone().map(|n| n as Arc<dyn crate::names::Lookup>),
         exit: Some(crate::dns::ExitDns {
             switch: exit.clone(),
-            link: mesh.clone(),
+            link: Some(mesh.clone()),
         }),
         in_flight: Default::default(),
     });
@@ -562,9 +563,13 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
                 // start refuses it — never the old route.
                 let mut same_node = config_json == stored_config;
                 if !same_node && same_but_exit(config_json, &stored_config) {
-                    let exit = lock(&ENGINE).as_ref().map(|e| e.exit.clone());
-                    let switched = match (exit, ShimConfig::from_json(config_json)) {
-                        (Some(exit), Ok(c)) => exit.set(c.exit_node.as_deref()),
+                    let parts = lock(&ENGINE)
+                        .as_ref()
+                        .map(|e| (e.exit.clone(), e.names.clone()));
+                    let switched = match (parts, ShimConfig::from_json(config_json)) {
+                        (Some((exit, names)), Ok(c)) => {
+                            select_exit(&exit, names.as_deref(), c.exit_node.as_deref())
+                        }
                         (None, _) => Err("engine gone".into()),
                         (_, Err(e)) => Err(e),
                     };
@@ -599,6 +604,28 @@ pub fn network_changed(tun_fd: RawFd, config_json: Option<&str>) -> Result<(), S
     };
     if let Err(e) = &result {
         tracing::error!(error = %e, "node rebuild after network change failed");
+    }
+    result
+}
+
+/// Switch the running engine's exit, keeping the names resolver in step:
+/// while an exit is selected the DNS proxy hands it pinned names only, and
+/// it answers those from the pins (offline) — online it would ask the
+/// phone's upstreams for the domain's TXT record, around the exit. Offline
+/// goes on before the exit, online comes back after it, so no pinned query
+/// is ever looked up online with an exit selected.
+fn select_exit(
+    exit: &crate::exit::ExitSwitch,
+    names: Option<&crate::names::Names>,
+    npub: Option<&str>,
+) -> Result<(), String> {
+    let selecting = npub.is_some_and(|n| !n.trim().is_empty());
+    if selecting && let Some(n) = names {
+        n.set_exit_selected(true);
+    }
+    let result = exit.set(npub);
+    if let Some(n) = names {
+        n.set_exit_selected(exit.selected().is_some());
     }
     result
 }
