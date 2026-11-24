@@ -204,6 +204,10 @@ mesh, which never goes through the exit.
   bytes, and implementations that probe for a larger size fall back). The
   container is meant to move to `fips-exit`'s daemon, which fragments the
   outer packet (RFC 2473 §7.1), once that is public.
+- **A fragmented reply never arrives.** The phone reads the ports of a
+  reply to match it to a flow an app opened, and only the first fragment
+  carries them, so later fragments are dropped. In practice this is the same
+  limit: a reply the exit had to fragment was over 1240 bytes.
 
 ## Files
 

@@ -422,6 +422,11 @@ impl ExitSwitch {
     /// echo reply by its identifier, an ICMP error (destination unreachable,
     /// time exceeded, parameter problem) by the packet it quotes, which must
     /// be one this phone sent. Any other ICMP is dropped.
+    ///
+    /// Nothing here refreshes a flow: only what the apps send does
+    /// ([`Self::outbound`]). The sender on this path is the exit, and a
+    /// table it could keep alive by sending would let it hold a port open
+    /// after the app closed its socket, for whichever app binds it next.
     fn admits(&self, inner: &[u8]) -> bool {
         let ihl = usize::from(inner[0] & 0x0f) * 4;
         let Some(l4) = inner.get(ihl..) else {
@@ -434,7 +439,7 @@ impl ExitSwitch {
                 let (Some(sport), Some(dport)) = (port(0), port(2)) else {
                     return false;
                 };
-                self.flows.admits(&FlowKey {
+                self.flows.contains(&FlowKey {
                     proto,
                     local_port: dport,
                     remote_addr,
@@ -443,7 +448,7 @@ impl ExitSwitch {
             }
             PROTO_ICMP => match l4.first() {
                 Some(0) => port(4).is_some_and(|id| {
-                    self.flows.admits(&FlowKey {
+                    self.flows.contains(&FlowKey {
                         proto: PROTO_ICMP,
                         local_port: id,
                         remote_addr,
@@ -873,6 +878,26 @@ mod tests {
         s.sw.flows
             .backdate(crate::filter::TCP_IDLE + Duration::from_secs(1));
         assert_eq!(s.reply(&tcp_reply), Inbound::Drop);
+    }
+
+    /// The exit cannot keep a flow alive by sending on it: only the app's
+    /// own packets refresh it.
+    #[test]
+    fn replies_do_not_keep_a_flow_alive() {
+        let s = selected();
+        let query = ipv4(PROTO_UDP, s.me, SERVER, udp(41000, 53));
+        let answer = ipv4(PROTO_UDP, SERVER, s.me, udp(53, 41000));
+        s.send(&query);
+        // Two thirds of the limit pass, twice, with a reply in between.
+        let step = crate::filter::UDP_IDLE * 2 / 3;
+        s.sw.flows.backdate(step);
+        assert!(matches!(s.reply(&answer), Inbound::Deliver(_)));
+        s.sw.flows.backdate(step);
+        assert_eq!(s.reply(&answer), Inbound::Drop, "the reply did not refresh it");
+        // The app sending again does.
+        s.send(&query);
+        s.sw.flows.backdate(step);
+        assert!(matches!(s.reply(&answer), Inbound::Deliver(_)));
     }
 
     #[test]

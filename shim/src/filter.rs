@@ -94,8 +94,10 @@ impl FlowTable {
         }
     }
 
-    /// True if `key` is a live flow, without refreshing it (an ICMP error
-    /// says nothing about whether the flow is still wanted).
+    /// True if `key` is a live flow, without refreshing it: for the exit
+    /// node's replies, where the sender must not be able to keep a flow
+    /// alive, and for an ICMP error, which says nothing about whether the
+    /// flow is still wanted.
     pub fn contains(&self, key: &FlowKey) -> bool {
         let flows = self.flows.lock().unwrap();
         flows

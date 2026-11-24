@@ -370,6 +370,14 @@ impl Lookup for Names {
         let Some(rt) = self.rt.as_ref() else {
             return Outcome::Legacy;
         };
+        // Offline means an exit is selected ([`Self::set_exit_selected`]),
+        // and offline the resolver asks the relays, the public ones
+        // included, about a name with no pin. The proxy already keeps such
+        // names away while it sees the exit, but the two are switched one
+        // after the other; this holds whatever the order.
+        if !self.resolver.is_online() && !self.resolver.has_pin_for(query) {
+            return Outcome::Legacy;
+        }
         let mut fut = Box::pin({
             let (resolver, q) = (self.resolver.clone(), query.to_vec());
             async move { resolver.lookup(&q).await }
