@@ -291,6 +291,14 @@ def nft_public_ip(addrs):
     return out
 
 
+# TCP MSS through a tunnel, IPv4 (the phone's `exit::MSS_IPV4`): a fips hop
+# carries at least 1280-byte packets; minus 40 for the outer IPv6 header that
+# leaves 1240 for the inner packet, minus 20 + 20 for its IPv4 and TCP
+# headers. A Linux ip6tnl does not fragment the outer packet, so a bigger
+# segment would be lost on such a hop.
+TCP_MSS = 1200
+
+
 def nft_ruleset(rows, wan: str, extra_blocked=(), published=(), public=()):
     """The exit's whole firewall, as one atomic nft script.
 
@@ -306,6 +314,9 @@ def nft_ruleset(rows, wan: str, extra_blocked=(), published=(), public=()):
       loopback, port-forwarded LAN services. Nothing else is
       forwarded: not IPv6, not mesh to mesh, not WAN to a client unless it
       is a reply.
+    - TCP SYNs through a tunnel, both ways, get their MSS lowered to
+      TCP_MSS (the phone clamps to the same), so an inner packet fits a
+      1280-byte mesh packet once wrapped.
     - Tunnel interfaces reach nothing on the exit itself.
     """
     wan = _ifname(wan)
@@ -370,6 +381,8 @@ table inet fips_exit {{
 	chain forward {{
 		type filter hook forward priority filter; policy drop;
 		ct state invalid drop
+		iifname "fx*" tcp flags & (syn | rst) == syn tcp option maxseg size > {TCP_MSS} tcp option maxseg size set {TCP_MSS}
+		oifname "fx*" tcp flags & (syn | rst) == syn tcp option maxseg size > {TCP_MSS} tcp option maxseg size set {TCP_MSS}
 		iifname "fx*" oifname "{wan}" iifname . ip saddr @client_src ip daddr != @blocked4 ip daddr != @blocked_dyn accept
 		iifname "{wan}" oifname "fx*" ct state established,related accept
 	}}
