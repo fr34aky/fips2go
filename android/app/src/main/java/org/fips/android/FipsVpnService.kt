@@ -80,10 +80,6 @@ class FipsVpnService : VpnService() {
         private const val CHANNEL_ID = "fips_vpn"
         private const val NOTIFICATION_ID = 1
         private const val MESH_MTU = 1280
-        // The tun's IPv4 source address for captured apps' clearnet (any
-        // private range not on the LAN; forwarded flows are re-sourced to the
-        // real egress IP anyway).
-        private const val TUN_IPV4 = "10.111.222.1"
         // A Wi-Fi ↔ cellular hand-over emits a burst of network callbacks over
         // several seconds; wait this long before rebinding so one node restart
         // serves the whole burst. Only route flips and hotspot transitions
@@ -132,6 +128,8 @@ class FipsVpnService : VpnService() {
     private val rebindRequested = AtomicBoolean(false)
     /** The mesh address the current tunnel was established with. */
     @Volatile private var meshAddress: String? = null
+    /** The tunnel's IPv4 address: the node's inner address (see [Identity]). */
+    @Volatile private var meshInner: String? = null
     /** Whether the current tunnel claims `::/0` (IPv6 clearnet via forwarder). */
     @Volatile private var tunnelHasIpv6Clearnet = false
 
@@ -266,7 +264,8 @@ class FipsVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
-                val (nsec, address) = identity() ?: return START_NOT_STICKY
+                val id = identity() ?: return START_NOT_STICKY
+                val address = id.address
                 // One tunnel per service. The UI tries not to send this twice,
                 // but it cannot be the guard: a second CONNECT landing while
                 // isRunning() is still false (starting, or mid-rebind) used to
@@ -294,7 +293,7 @@ class FipsVpnService : VpnService() {
                     startForegroundWithNotification(address)
                     return START_STICKY
                 }
-                beginConnect(nsec, address)
+                beginConnect(id)
                 return START_STICKY
             }
         }
@@ -302,27 +301,38 @@ class FipsVpnService : VpnService() {
     }
 
     /**
-     * The nsec and the mesh address it derives, or null on an identity error
-     * (logged). Re-read from the Keystore on every use: the secret must not
-     * linger in a field, and never rides in an Intent.
+     * The nsec and the tunnel addresses it derives: the mesh address, and the
+     * IPv4 address — the node's inner address in 100.64.0.0/10, which an exit
+     * node expects as the source of this phone's IPv4 traffic (the shim's
+     * exit.rs; replies and ICMP errors then reach the app's socket with no
+     * address rewriting). Without an exit the forwarder re-sources flows to
+     * the real egress address anyway.
      */
-    private fun identity(): Pair<String, String>? {
+    private class Identity(val nsec: String, val address: String, val innerIpv4: String)
+
+    /**
+     * The [Identity], or null on an identity error (logged). Re-read from the
+     * Keystore on every use: the secret must not linger in a field, and never
+     * rides in an Intent.
+     */
+    private fun identity(): Identity? {
         val nsec = IdentityStore.getOrCreate(this)
         val identity = JSONObject(FipsNative.deriveIdentity(nsec))
         if (identity.has("error")) {
             Log.e(TAG, "identity error: ${identity.getString("error")}")
             return null
         }
-        return nsec to identity.getString("address")
+        return Identity(nsec, identity.getString("address"), identity.getString("inner_ipv4"))
     }
 
-    private fun beginConnect(nsec: String, address: String) {
-        val config = ConfigStore.buildConfigJson(this, nsec)
+    private fun beginConnect(id: Identity) {
+        val config = ConfigStore.buildConfigJson(this, id.nsec)
         tunnelActive = true
         rebindAfterConnect.set(false)
         val attempt = connectAttempt.incrementAndGet()
-        startForegroundWithNotification(address)
-        thread(name = "fips-connect") { connect(config, address, attempt) }
+        startForegroundWithNotification(id.address)
+        val (address, inner) = id.address to id.innerIpv4
+        thread(name = "fips-connect") { connect(config, address, inner, attempt) }
     }
 
     /**
@@ -335,13 +345,14 @@ class FipsVpnService : VpnService() {
      */
     private fun stillWanted(attempt: Int) = tunnelActive && connectAttempt.get() == attempt
 
-    private fun connect(config: String, address: String, attempt: Int) {
+    private fun connect(config: String, address: String, inner: String, attempt: Int) {
         if (FipsNative.isRunning()) {
             Log.w(TAG, "already running")
             return
         }
         connectivity = getSystemService(ConnectivityManager::class.java)
         meshAddress = address
+        meshInner = inner
         if (ConfigStore.lanMdns(this) ||
             ConfigStore.hotspotEnabled(this)
         ) {
@@ -354,7 +365,7 @@ class FipsVpnService : VpnService() {
         // callback corrects the routes if this was wrong (or changes later).
         val wantIpv6 = wantIpv6Route(connectivity?.activeNetwork)
 
-        val pfd = establishTunnel(address, wantIpv6)
+        val pfd = establishTunnel(address, inner, wantIpv6)
         if (pfd == null) {
             Log.e(TAG, "VPN not prepared or establish() returned null")
             shutdown()
@@ -738,7 +749,11 @@ class FipsVpnService : VpnService() {
         (prefs().getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()).toSet()
 
     /** Build and establish the TUN. `ipv6Clearnet` decides whether `::/0` is claimed. */
-    private fun establishTunnel(address: String, ipv6Clearnet: Boolean): ParcelFileDescriptor? {
+    private fun establishTunnel(
+        address: String,
+        inner: String,
+        ipv6Clearnet: Boolean,
+    ): ParcelFileDescriptor? {
         val meshApps = currentMeshApps()
         // Logged so a "my app is not captured" report can be settled from
         // logcat alone: this is the set the tunnel is built from, whatever
@@ -753,7 +768,7 @@ class FipsVpnService : VpnService() {
                 .setSession("fips2go")
                 .setMtu(MESH_MTU)
                 .addAddress(address, 128)          // mesh IPv6 address
-                .addAddress(TUN_IPV4, 32)          // IPv4 source for clearnet
+                .addAddress(inner, 32)             // IPv4 source: the inner address
                 .addRoute("fd00::", 8)             // the mesh
 
             // Per-app split tunnel: only the chosen apps are captured; every
@@ -1124,8 +1139,9 @@ class FipsVpnService : VpnService() {
         val appsChanged = tunFd != null && currentMeshApps() != tunnelMeshApps
         if (wantIpv6 != tunnelHasIpv6Clearnet || appsChanged) {
             val address = meshAddress ?: return
+            val inner = meshInner ?: return
             Log.i(TAG, "re-establishing tunnel, ipv6Clearnet=$wantIpv6 appsChanged=$appsChanged")
-            val fresh = establishTunnel(address, wantIpv6)
+            val fresh = establishTunnel(address, inner, wantIpv6)
             if (fresh == null) {
                 Log.e(TAG, "re-establish failed; keeping old tunnel")
                 return
@@ -1193,7 +1209,7 @@ class FipsVpnService : VpnService() {
             val id = identity()
             if (id != null) {
                 Log.i(TAG, "shutdown complete; serving the queued connect")
-                beginConnect(id.first, id.second)
+                beginConnect(id)
                 return
             }
             tunnelActive = false

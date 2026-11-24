@@ -331,7 +331,6 @@ class OverviewFragment : Fragment() {
         updateBatteryCard()
         updateMeshApps()
         updateMeshNames()
-        updateInternetRoute()
         poller.post(pollStatus)
     }
 
@@ -346,12 +345,48 @@ class OverviewFragment : Fragment() {
         super.onPause()
     }
 
-    private fun updateInternetRoute() {
-        val exit = ConfigStore.selectedExit(requireContext())
-        view?.findViewById<TextView>(R.id.internet_route_summary)?.text = if (exit == null) {
-            "Mesh apps use this phone's connection."
-        } else {
-            "Through exit node ${ConfigStore.exitLabel(exit)} — blocked if it cannot be reached."
+    /**
+     * "Internet route" card. While the node runs it says what the node does
+     * (`status.exit`, null for the phone's connection), not what is stored:
+     * the two differ while a change is being applied, and after a rebind
+     * that could not build the new tunnel. Disconnected, no exit is in use
+     * and nothing is blocked — covered apps are not covered then — so the
+     * stored choice is shown as what applies once connected.
+     */
+    private fun updateInternetRoute(status: JSONObject) {
+        val ctx = context ?: return
+        val stored = ConfigStore.selectedExit(ctx)
+        val running = status.optBoolean("running")
+        val live = if (running) {
+            status.optJSONObject("exit")?.optString("npub")?.takeIf { it.isNotEmpty() }
+        } else null
+        val label = { npub: String ->
+            ConfigStore.exitNodes(ctx).firstOrNull { it.npub == npub }
+                ?.let { ConfigStore.exitLabel(it) }
+                ?: ConfigStore.exitLabel(ConfigStore.ExitNode("", npub))
+        }
+        val noApps = (ConfigStore.prefs(ctx)
+            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()).isEmpty()
+        view?.findViewById<TextView>(R.id.internet_route_summary)?.text = when {
+            !running && stored == null -> "Mesh apps use this phone's connection."
+            // Starting, or a rebind restarting the node: the tunnel is up and
+            // nothing leaves it until the node is.
+            !running && FipsVpnService.tunnelActive ->
+                "Exit node ${ConfigStore.exitLabel(stored!!)} — waiting for the node to start."
+            !running ->
+                "Exit node ${ConfigStore.exitLabel(stored!!)} — used while connected. " +
+                    "Until then, apps use this phone's connection."
+            live != null && stored?.npub != live ->
+                "Through exit node ${label(live)} — switching to " +
+                    (stored?.let { ConfigStore.exitLabel(it) } ?: "this phone's connection") + "…"
+            live != null && noApps ->
+                "Exit node ${label(live)} — no mesh apps are selected, so no app uses it."
+            live != null ->
+                "Through exit node ${label(live)} — blocked if it cannot be reached."
+            stored != null ->
+                "Mesh apps use this phone's connection — switching to exit node " +
+                    "${ConfigStore.exitLabel(stored)}…"
+            else -> "Mesh apps use this phone's connection."
         }
     }
 
@@ -427,6 +462,7 @@ class OverviewFragment : Fragment() {
         try {
             val status = JSONObject(FipsNative.status())
             renderRelays(status)
+            updateInternetRoute(status)
             val running = status.optBoolean("running")
             val s = status.optJSONObject("status")
             if (running) MainActivity.connectSettled()
