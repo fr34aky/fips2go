@@ -11,10 +11,14 @@
     android:paddingStart="8dp"
     android:paddingEnd="4dp">
 
+    <!-- saveEnabled off: every row shares this id, so after a rotation Android
+         would restore one saved "checked" into all of them, over what
+         ExitsActivity.render() set from the stored choice. -->
     <com.google.android.material.radiobutton.MaterialRadioButton
         android:id="@+id/exit_radio"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:saveEnabled="false"
         android:clickable="false"
         android:focusable="false" />
 
