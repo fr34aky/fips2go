@@ -425,12 +425,16 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
 - **Exit nodes**: with an exit selected, each IPv4 internet packet from a
   covered app is wrapped in an IPv6 packet (next header 4, IPv4-in-IPv6) from
   the node's fips address to the exit's and sent over the mesh; replies are
-  unwrapped before the TUN (`shim/src/exit.rs`). Its inner source address is
-  derived from the node's address (`100.64.0.0/10`), so the exit computes it
-  from the npub with nothing negotiated. On the exit, a Linux `ip6tnl` per
+  unwrapped before the TUN (`shim/src/exit.rs`) — only replies to flows an
+  app opened, so the exit cannot open connections to the phone. The inner
+  address is derived from the node's address (`100.64.0.0/10`), so the exit
+  computes it from the npub with nothing negotiated; it is also the tunnel's
+  IPv4 address, so nothing is rewritten. TCP MSS is clamped to 1200 both ways
+  (a 1280-byte mesh packet once wrapped). On the exit, a Linux `ip6tnl` per
   allowed npub and a NAT take it from there. Non-`.fips` DNS goes to port 53
-  on the exit's fips address only, the public-names lookup is skipped (its TXT
-  queries would leave through the phone's upstreams), and `::/0` is always
+  on the exit's fips address only; public domain names over fips keep
+  resolving from their pins, but new ones are not looked up (the lookup's TXT
+  queries would leave through the phone's upstreams); and `::/0` is always
   claimed so IPv6 internet traffic is refused inside the tunnel rather than
   leaking around the exit. Switching exits while connected keeps the node
   running.
