@@ -21,8 +21,8 @@ android {
         applicationId = "org.fips.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 37
-        versionName = "0.12.0"
+        versionCode = 38
+        versionName = "0.13.0"
     }
 
     signingConfigs {
