@@ -20,6 +20,10 @@ OPEN=${OPEN:-0}
 OPEN_MAX_CLIENTS=${OPEN_MAX_CLIENTS:-64}
 OPEN_IDLE_SECS=${OPEN_IDLE_SECS:-600}
 OPEN_BLOCK_TCP_PORTS=${OPEN_BLOCK_TCP_PORTS-25}
+# Advert: say on Nostr that this exit exists, so phones can find it.
+ADVERTISE=${ADVERTISE:-0}
+ADVERT_INTERVAL=${ADVERT_INTERVAL:-3600}
+ADV="python3 -I /opt/exit/advert.py"
 
 log() { echo "exit-node: $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
@@ -55,6 +59,23 @@ if [ "$OPEN" = 1 ]; then
 else
   [ -s "$RUN/clients" ] ||
     die "no allowed npubs: list them in data/allowed_npubs (one per line) or ALLOWED_NPUBS (or set OPEN=1 to serve anyone)"
+fi
+
+# The advert, checked like everything else an operator types: a bad relay
+# URL or an over-long name stops the exit here rather than failing quietly
+# every hour.
+case "$ADVERTISE" in
+  0 | 1) ;;
+  *) die "ADVERTISE must be 0 or 1" ;;
+esac
+ADVERT_ACCESS=allow-list
+[ "$OPEN" = 1 ] && ADVERT_ACCESS=open
+if [ "$ADVERTISE" = 1 ]; then
+  [[ "$ADVERT_INTERVAL" =~ ^[0-9]+$ ]] && [ "$ADVERT_INTERVAL" -ge 300 ] && [ "$ADVERT_INTERVAL" -le 86400 ] ||
+    die "ADVERT_INTERVAL must be a number of seconds from 300 to 86400"
+  # shellcheck disable=SC2086
+  $ADV check "$ADVERT_ACCESS" "${ADVERT_NAME:-}" "${ADVERT_ABOUT:-}" ${ADVERT_RELAYS:-} ||
+    die "the advert is invalid (see above)"
 fi
 
 # Services published to the clients (PUBLISH): checked here, before the
@@ -101,7 +122,11 @@ ip -6 tunnel del fxprobe
 ip link set ip6tnl0 down 2> /dev/null || true
 
 # 5. fips, with a persistent identity in /data.
-$CTL fips-yaml "${FIPS_PEERS:-}" > "$DATA/fips.yaml" || die "invalid FIPS_PEERS"
+FIPS_YAML_OPTS=()
+# The advert publisher asks fips's own resolver (loopback only) for a relay
+# on the mesh.
+[ "$ADVERTISE" = 1 ] && FIPS_YAML_OPTS=(--dns)
+$CTL fips-yaml "${FIPS_YAML_OPTS[@]}" "${FIPS_PEERS:-}" > "$DATA/fips.yaml" || die "invalid FIPS_PEERS"
 fips -c "$DATA/fips.yaml" &
 FIPS_PID=$!
 EXIT_FD=""
@@ -234,6 +259,28 @@ if [ "$PUBLIC_IP_LOOKUP" != off ]; then
 fi
 if [ "$OPEN" = 1 ]; then
   open_loop &
+  PIDS+=($!)
+fi
+
+# 9b. The advert: published now and every ADVERT_INTERVAL, valid for three
+#     intervals, so two missed rounds do not make the exit vanish and an exit
+#     that is gone drops out of the lists within three. A relay that is down
+#     is not a reason to stop serving clients: failures are logged.
+advertise() {
+  sleep 20 # the mesh needs a moment before a relay on it is reachable
+  while :; do
+    # shellcheck disable=SC2086
+    if $ADV publish "$DATA/fips.key" "$ADVERT_ACCESS" "${ADVERT_NAME:-}" "${ADVERT_ABOUT:-}" \
+      $((ADVERT_INTERVAL * 3)) ${ADVERT_RELAYS:-} > "$RUN/advert.out" 2>&1; then
+      log "advert published ($ADVERT_ACCESS): $(tr '\n' ' ' < "$RUN/advert.out")"
+    else
+      log "advert NOT published: $(tr '\n' ' ' < "$RUN/advert.out")"
+    fi
+    sleep "$ADVERT_INTERVAL"
+  done
+}
+if [ "$ADVERTISE" = 1 ]; then
+  advertise &
   PIDS+=($!)
 fi
 

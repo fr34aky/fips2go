@@ -32,6 +32,15 @@ services:
       # OPEN_MAX_CLIENTS: "64"         # open clients at once
       # OPEN_IDLE_SECS: "600"          # an open client silent this long is dropped
       # OPEN_BLOCK_TCP_PORTS: "25"     # ports open clients may not connect to ("" = none)
+      # Advert: publish a signed Nostr event saying this exit exists, so
+      # phones can find it (Internet route → Find exit nodes). It names the
+      # exit's npub and whether it is open or allow-list only. Off unless
+      # set. Relays: wss://…, or one on the mesh as ws://<npub>.fips[:port].
+      # ADVERTISE: "1"
+      # ADVERT_RELAYS: "wss://relay.example.org ws://npub1….fips:7777"
+      # ADVERT_NAME: "My exit"          # up to 40 characters
+      # ADVERT_ABOUT: "Zurich, Init7"   # up to 200 characters
+      # ADVERT_INTERVAL: "3600"         # seconds between publications
       # Extra destinations clients may never reach. Private ranges and this
       # network's public address (below) are always blocked.
       # BLOCK_CIDRS: "203.0.113.7/32"

@@ -34,8 +34,8 @@ npub and every phone has to be told. Back it up with
 Settings are environment variables in `compose.yaml`: `ALLOWED_NPUBS`,
 `FIPS_PEERS` (default: the public bootstrap servers the app uses), `WAN_IFACE`,
 `BLOCK_CIDRS` (extra destinations clients may never reach), `DNS_UPSTREAMS`,
-`PUBLISH`, `PUBLIC_IP_LOOKUP` / `PUBLIC_IP_INTERVAL` and `OPEN` with its
-limits (all below).
+`PUBLISH`, `PUBLIC_IP_LOOKUP` / `PUBLIC_IP_INTERVAL`, `OPEN` with its limits
+and `ADVERTISE` with its relays (all below).
 
 ## Open mode
 
@@ -72,6 +72,41 @@ is still nothing to negotiate — and only then lets its traffic in. The first
 packet or two are lost while that happens (about two seconds); TCP retries.
 DNS is answered for the whole mesh in this mode, limited to 20 queries a
 second per address.
+
+## Being found
+
+An exit is used by telling people its npub. With `ADVERTISE: "1"` it also
+says so on Nostr, so the app can list it (Internet route → *Find exit nodes*):
+
+```yaml
+      ADVERTISE: "1"
+      ADVERT_RELAYS: "wss://relay.example.org ws://npub1….fips:7777"
+      ADVERT_NAME: "My exit"
+      ADVERT_ABOUT: "Zurich, on Init7. Ask me on Nostr to be added."
+```
+
+- The advert is one Nostr event **signed with the exit's own fips key**. A
+  fips identity is a Nostr key, so the advert's author is the exit itself:
+  what a phone adds from it is the npub it will route to, and nobody else can
+  advertise your exit.
+- It says whether the exit is `open` ([open mode](#open-mode)) or
+  `allow-list`. Advertising an allow-list exit is useful too: people find it,
+  and ask you to add the npub the app shows them.
+- **Relays**: at least one. `wss://…` for public relays, and
+  `ws://<npub>.fips[:port]` for a relay on a fips node — the one kind a phone
+  with no internet of its own can still read. The phone looks on the mesh
+  relays set in its Settings, and on public relays only while it is online.
+- Published at start and every `ADVERT_INTERVAL` (default 3600 s), valid for
+  three intervals: an exit that is switched off disappears from the lists by
+  itself. A relay that is down is logged, not fatal.
+- What it reveals: that this npub runs an exit, its name and note, and — to
+  the relays you publish on — the exit's address when it connects to them. It
+  does not contain the exit's IP address or location unless you write them.
+
+The event, for anyone writing another client: kind `30078`, tags
+`["d","fips-exit"]`, `["v","1"]`, `["access","open"|"allow-list"]`, optional
+`["name",…]` and `["about",…]`, and a NIP-40 `["expiration",…]`; empty
+content. `advert.py` is the whole implementation, standard library only.
 
 ## This network's public address
 
