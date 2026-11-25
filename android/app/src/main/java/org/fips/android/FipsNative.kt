@@ -100,6 +100,17 @@ object FipsNative {
     ): String
 
     /**
+     * Can the selected exit be used right now? Two pings to it through the
+     * node: a small one, and one that is a full-size mesh packet (1280
+     * bytes). Returns `{"exit": npub | null, "reachable": bool, "full_size":
+     * bool}` or `{"error": "..."}`. `reachable` without `full_size` means the
+     * exit answers but large packets are lost on the way, so names resolve
+     * and no page loads. Blocking (up to twice [timeoutMs]) — call off the
+     * main thread.
+     */
+    external fun exitProbe(timeoutMs: Int): String
+
+    /**
      * Look for exits that advertise themselves on Nostr (`exitfind.rs`): the
      * mesh relays from Settings and, while online, the public relays.
      * Returns `{"exits": [{npub, name, about, access, created_at, expires}],

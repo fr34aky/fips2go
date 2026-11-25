@@ -821,6 +821,42 @@ pub fn connect_peer_json(npub: &str, address: &str) -> String {
     }
 }
 
+/// Can the selected exit be used right now? Two echoes to its fips address
+/// through the node ([`crate::meshudp::ping_sized`]): a small one, and one
+/// that is a full-size mesh packet. Blocking, up to twice `timeout` — call
+/// off the UI thread; the `ENGINE` lock is not held while it runs. Answers
+/// `{"exit": <npub> | null, "reachable": <bool>, "full_size": <bool>}` or
+/// `{"error": "..."}`.
+///
+/// `reachable` with `full_size` false is the state nothing else in the app
+/// shows: the exit answers, its DNS answers, the route card says "through
+/// exit node", and no page loads, because the route between the two loses
+/// packets near 1280 bytes (a hop that carries less, and a node on the way
+/// too old to split for it). Seen on a Pixel 9 Pro against a node on an
+/// older fips: echoes up to 1198 bytes arrived, none from 1228.
+pub fn exit_probe_json(timeout: Duration) -> String {
+    let error = |message: String| serde_json::json!({ "error": message }).to_string();
+    let Some((link, exit)) = lock(&ENGINE)
+        .as_ref()
+        .map(|e| (e.mesh.clone(), e.exit.clone()))
+    else {
+        return error("not connected".into());
+    };
+    let (Some(npub), Some(addr)) = (exit.selected(), exit.selected_addr()) else {
+        return serde_json::json!({ "exit": null, "reachable": false, "full_size": false })
+            .to_string();
+    };
+    let ping = |payload| crate::meshudp::ping_sized(&link, addr, payload, timeout);
+    // The small one first: without it a failed large one says nothing.
+    let reachable = match ping(24) {
+        Ok(answered) => answered,
+        Err(e) if e.restarted => return error("the engine restarted".into()),
+        Err(_) => false,
+    };
+    let full_size = reachable && ping(crate::meshudp::FULL_PAYLOAD).unwrap_or(false);
+    serde_json::json!({ "exit": npub, "reachable": reachable, "full_size": full_size }).to_string()
+}
+
 /// Look for exit adverts on the relays (see [`crate::exitfind`]). Blocking,
 /// up to about `timeout` — call off the UI thread; the `ENGINE` lock is not
 /// held while searching. Answers `{"exits": [{npub, name, about, access,

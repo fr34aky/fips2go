@@ -30,6 +30,7 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.concurrent.thread
 
 /** Overview page: identity, live status, connect/disconnect, mesh apps. */
 class OverviewFragment : Fragment() {
@@ -353,6 +354,42 @@ class OverviewFragment : Fragment() {
      * and nothing is blocked — covered apps are not covered then — so the
      * stored choice is shown as what applies once connected.
      */
+    /**
+     * What the last probe of an exit found ([FipsNative.exitProbe]): can it
+     * be reached, and do full-size packets get through. For [npub] only: a
+     * result is not shown for another exit than the one it was made for.
+     */
+    private data class ExitProbe(val npub: String, val reachable: Boolean, val fullSize: Boolean)
+    @Volatile private var exitProbe: ExitProbe? = null
+    @Volatile private var probing = false
+    private var probedAt = 0L
+
+    /**
+     * Probe [npub], the exit in use, unless that was done in the last
+     * [PROBE_EVERY_MS]. Only from the status poll, so only while this page
+     * is on screen: two small exchanges every half minute, and nothing at
+     * all in the background.
+     */
+    private fun probeExit(npub: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (probing || (exitProbe?.npub == npub && now - probedAt < PROBE_EVERY_MS)) return
+        probing = true
+        probedAt = now
+        thread(name = "fips-exit-probe") {
+            val result = try {
+                val json = JSONObject(FipsNative.exitProbe(PROBE_TIMEOUT_MS))
+                if (json.has("error") || json.optString("exit") != npub) null
+                else ExitProbe(npub, json.optBoolean("reachable"), json.optBoolean("full_size"))
+            } catch (e: Throwable) {
+                null
+            }
+            // No result (not connected, the exit changed meanwhile) says
+            // nothing about the exit: keep quiet rather than guess.
+            exitProbe = result
+            probing = false
+        }
+    }
+
     private fun updateInternetRoute(status: JSONObject) {
         val ctx = context ?: return
         val stored = ConfigStore.selectedExit(ctx)
@@ -381,8 +418,22 @@ class OverviewFragment : Fragment() {
                     (stored?.let { ConfigStore.exitLabel(it) } ?: "this phone's connection") + "…"
             live != null && noApps ->
                 "Exit node ${label(live)} — no mesh apps are selected, so no app uses it."
-            live != null ->
-                "Through exit node ${label(live)} — blocked if it cannot be reached."
+            live != null -> {
+                probeExit(live)
+                val probe = exitProbe?.takeIf { it.npub == live }
+                when {
+                    probe != null && !probe.reachable ->
+                        "Through exit node ${label(live)} — it does not answer right now, " +
+                            "so internet traffic is blocked."
+                    // Names resolve and nothing loads: say why, since nothing
+                    // else on the phone does.
+                    probe != null && !probe.fullSize ->
+                        "Through exit node ${label(live)} — it answers, but large packets " +
+                            "are lost on the way, so pages will not load. The exit, or a " +
+                            "node between it and this phone, needs a newer fips."
+                    else -> "Through exit node ${label(live)} — blocked if it cannot be reached."
+                }
+            }
             stored != null ->
                 "Mesh apps use this phone's connection — switching to exit node " +
                     "${ConfigStore.exitLabel(stored)}…"
@@ -612,6 +663,11 @@ class OverviewFragment : Fragment() {
     private companion object {
         /** Extra renders after a toggle tap, until the 2 s poll takes over. */
         val FOLLOW_UP_POLLS_MS = longArrayOf(400, 1000, 2000, 3500)
+
+        /** How often the exit in use is probed while this page is shown. */
+        const val PROBE_EVERY_MS = 30_000L
+        /** Per echo; a probe sends up to two (small, then full-size). */
+        const val PROBE_TIMEOUT_MS = 3000
 
         const val HALO_ALPHA = 0.16f
         const val HALO_FADE_MS = 250L

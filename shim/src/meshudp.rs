@@ -183,6 +183,27 @@ fn exchange<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
 /// this is the only positive signal short of a full session (the public
 /// names resolver asks before handing an application a node's address).
 pub fn ping(link: &MeshLink, addr: Ipv6Addr, timeout: Duration) -> Result<bool, FetchError> {
+    ping_sized(link, addr, PING_PAYLOAD, timeout)
+}
+
+/// Bytes of data in an ordinary reachability echo.
+const PING_PAYLOAD: usize = 24;
+/// Bytes of data that make an echo a full-size mesh packet: 1280 (the IPv6
+/// minimum, and the tunnel's MTU) less the IPv6 and ICMPv6 headers.
+pub const FULL_PAYLOAD: usize = 1280 - 40 - 8;
+
+/// [`ping`] with `payload` bytes of data, answered only by a reply of the
+/// same size. With [`FULL_PAYLOAD`] this asks whether the path carries a
+/// full-size packet both ways: a route can pass small packets and lose
+/// large ones (a hop that carries less than 1280 bytes and a node that does
+/// not split for it), which a small echo and a DNS query never notice and
+/// every page load does.
+pub fn ping_sized(
+    link: &MeshLink,
+    addr: Ipv6Addr,
+    payload: usize,
+    timeout: Duration,
+) -> Result<bool, FetchError> {
     if addr == link.our_addr {
         return Ok(true);
     }
@@ -211,17 +232,20 @@ pub fn ping(link: &MeshLink, addr: Ipv6Addr, timeout: Duration) -> Result<bool, 
         link.our_addr,
         addr,
         ident,
+        payload.min(FULL_PAYLOAD),
         Instant::now() + timeout,
         &link.running,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
     egress: E,
     rx: &Receiver<Vec<u8>>,
     local: Ipv6Addr,
     remote: Ipv6Addr,
     ident: u16,
+    payload: usize,
     deadline: Instant,
     alive: &AtomicBool,
 ) -> Result<bool, FetchError> {
@@ -239,9 +263,11 @@ fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
         let _ = addrs.push(IpCidr::new(IpAddress::Ipv6(local), 8));
     });
     let socket = icmp::Socket::new(
-        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 1024]),
-        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 1024]),
+        // Room for two requests going out and two replies coming back.
+        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 2 * (payload + 64)]),
+        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 2 * (payload + 64)]),
     );
+    let data = vec![0xa5u8; payload];
     let mut sockets = SocketSet::new(Vec::new());
     let handle = sockets.add(socket);
     sockets
@@ -252,7 +278,7 @@ fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
         let repr = Icmpv6Repr::EchoRequest {
             ident,
             seq_no,
-            data: b"fips-pubdom reachability",
+            data: &data,
         };
         let mut buf = vec![0u8; repr.buffer_len()];
         // The socket recomputes the checksum on dispatch.
@@ -269,7 +295,7 @@ fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
     };
     send(&mut sockets, 0)?;
     let mut resent = false;
-    let mut buf = vec![0u8; 1024];
+    let mut buf = vec![0u8; payload + 64];
     loop {
         if !alive.load(Ordering::Relaxed) {
             return Err(FetchError::restarted());
@@ -286,6 +312,8 @@ fn echo<E: FnMut(Vec<u8>) -> Result<(), FetchError>>(
             if from == IpAddress::Ipv6(remote)
                 && let Ok(p) = Icmpv6Packet::new_checked(&buf[..n])
                 && p.msg_type() == Icmpv6Message::EchoReply
+                // The whole of it: a reply cut short on the way is not one.
+                && n >= 8 + payload
             {
                 return Ok(true);
             }
@@ -447,6 +475,7 @@ mod tests {
             client_addr,
             server_addr,
             61234,
+            PING_PAYLOAD,
             Instant::now() + Duration::from_secs(5),
             &AtomicBool::new(true),
         )
@@ -462,11 +491,104 @@ mod tests {
             client_addr,
             "fd00::9".parse().unwrap(),
             61235,
+            PING_PAYLOAD,
             Instant::now() + Duration::from_millis(300),
             &AtomicBool::new(true),
         )
         .unwrap();
         assert!(!ok, "silence is not reachability");
+    }
+
+    /// A peer on the far side of a path that drops every packet over
+    /// `limit` bytes (both ways), run until `stop`.
+    #[allow(clippy::type_complexity)]
+    fn peer_behind_a_path(
+        limit: usize,
+        server_addr: Ipv6Addr,
+        stop: Arc<AtomicBool>,
+    ) -> (
+        impl FnMut(Vec<u8>) -> Result<(), FetchError>,
+        Receiver<Vec<u8>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (to_server, server_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (to_client, client_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let server = std::thread::spawn(move || {
+            let start = Instant::now();
+            let now = || smoltcp::time::Instant::from_millis(start.elapsed().as_millis() as i64);
+            let mut device = Device {
+                rx: VecDeque::new(),
+                egress: move |p: Vec<u8>| {
+                    if p.len() <= limit {
+                        let _ = to_client.send(p);
+                    }
+                    Ok(())
+                },
+                failed: None,
+            };
+            let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut device, now());
+            iface.update_ip_addrs(|a| {
+                let _ = a.push(IpCidr::new(IpAddress::Ipv6(server_addr), 8));
+            });
+            let mut sockets = SocketSet::new(Vec::new());
+            while !stop.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(10) {
+                while let Ok(p) = server_rx.try_recv() {
+                    device.rx.push_back(p);
+                }
+                iface.poll(now(), &mut device, &mut sockets);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let egress = move |p: Vec<u8>| {
+            if p.len() <= limit {
+                let _ = to_server.send(p);
+            }
+            Ok(())
+        };
+        (egress, client_rx, server)
+    }
+
+    /// The case the full-size echo exists for: a path that carries small
+    /// packets and loses large ones. The small echo says "reachable", the
+    /// full-size one says no; on a path that carries 1280 bytes both pass.
+    #[test]
+    fn a_full_size_echo_tells_a_path_that_loses_large_packets() {
+        let client: Ipv6Addr = "fd00::1".parse().unwrap();
+        let server: Ipv6Addr = "fd00::2".parse().unwrap();
+        for (limit, full_passes) in [(1280, true), (1203, false)] {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (egress, rx, thread) = peer_behind_a_path(limit, server, stop.clone());
+            let alive = AtomicBool::new(true);
+            let mut egress = egress;
+            let small = echo(
+                &mut egress,
+                &rx,
+                client,
+                server,
+                61300,
+                PING_PAYLOAD,
+                Instant::now() + Duration::from_secs(5),
+                &alive,
+            )
+            .unwrap();
+            assert!(small, "a small echo passes a {limit}-byte path");
+            let full = echo(
+                &mut egress,
+                &rx,
+                client,
+                server,
+                61301,
+                FULL_PAYLOAD,
+                Instant::now() + Duration::from_millis(if full_passes { 5000 } else { 600 }),
+                &alive,
+            )
+            .unwrap();
+            stop.store(true, Ordering::Relaxed);
+            thread.join().unwrap();
+            assert_eq!(full, full_passes, "a full-size echo over a {limit}-byte path");
+        }
+        // 1280 bytes on the wire, exactly.
+        assert_eq!(40 + 8 + FULL_PAYLOAD, 1280);
     }
 
     #[test]
