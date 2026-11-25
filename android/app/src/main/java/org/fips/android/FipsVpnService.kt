@@ -4,7 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.IntentFilter
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -153,6 +156,7 @@ class FipsVpnService : VpnService() {
     private val connectQueued = AtomicBoolean(false)
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val bleLock = Any()
 
     // FIPS Hotspot ("!FIPS") state — see [startHotspot] for the two join
     // paths. A specifier-joined network is local-only (no INTERNET
@@ -401,8 +405,64 @@ class FipsVpnService : VpnService() {
             pushNamesOnline(force = true)
             registerNetworkMonitoring()
             startHotspot()
+            startBle()
             HostsSync.onConnected(this)
             if (rebindAfterConnect.getAndSet(false)) rebindNode()
+        }
+    }
+
+    // ---- Bluetooth (FipsBle.kt) ---------------------------------------------
+
+    private var ble: FipsBle? = null
+    private var bleStateReceiver: BroadcastReceiver? = null
+
+    /**
+     * Bring the Bluetooth radio up if the setting is on, and follow the
+     * adapter being switched off and on. The node's Bluetooth transport runs
+     * either way (the shim's `ble` knob); the radio is what comes and goes,
+     * and neither a late start nor a restart of it restarts the node.
+     */
+    private fun startBle() {
+        if (!ConfigStore.bleEnabled(this) || !FipsBle.supported(this)) return
+        synchronized(bleLock) {
+            if (bleStateReceiver == null) {
+                val receiver = object : BroadcastReceiver() {
+                    override fun onReceive(context: Context, intent: Intent) = syncBle()
+                }
+                registerReceiver(receiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+                bleStateReceiver = receiver
+            }
+        }
+        syncBle()
+    }
+
+    /** Install or remove the radio to match what is wanted and possible now. */
+    private fun syncBle() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        synchronized(bleLock) {
+            val want = tunnelActive && ConfigStore.bleEnabled(this) && FipsBle.usable(this)
+            val have = ble
+            if (want && have == null) {
+                Log.i(TAG, "Bluetooth radio up")
+                ble = FipsBle(this).also { FipsNative.bleInstall(it) }
+            } else if (!want && have != null) {
+                Log.i(TAG, "Bluetooth radio down")
+                FipsNative.bleClear()
+                have.shutdown()
+                ble = null
+            }
+        }
+    }
+
+    private fun stopBle() {
+        synchronized(bleLock) {
+            bleStateReceiver?.let { runCatching { unregisterReceiver(it) } }
+            bleStateReceiver = null
+            ble?.let {
+                FipsNative.bleClear()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) it.shutdown()
+            }
+            ble = null
         }
     }
 
@@ -1120,6 +1180,8 @@ class FipsVpnService : VpnService() {
         // stopped the engine, so without this a late pass could establish a
         // replacement tunnel — the VPN coming back after Disconnect.
         if (!tunnelActive) return
+        // The setting or its permissions may have changed since connect.
+        syncBle()
         // Regenerate the config so the rebuilt node reflects current
         // per-network state (the FIPS Hotspot transport overlay). The nsec
         // is re-decrypted from the Keystore — it must not linger in a field.
@@ -1184,6 +1246,7 @@ class FipsVpnService : VpnService() {
         if (!stopping.compareAndSet(false, true)) return
         HostsSync.onDisconnected()
         stopHotspot()
+        stopBle()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
         // Take THIS session's fd now. The thread below runs for seconds, and
@@ -1222,6 +1285,7 @@ class FipsVpnService : VpnService() {
         tunnelActive = false
         HostsSync.onDisconnected()
         stopHotspot()
+        stopBle()
         unregisterNetworkMonitoring()
         releaseMulticastLock()
         FipsNative.stop()

@@ -65,6 +65,8 @@ object ConfigStore {
      */
     const val NAMES_DNSSEC = "names_dnssec"
     const val HOTSPOT = "hotspot_enabled"
+    /** Bluetooth as a mesh transport (FipsBle.kt). */
+    const val BLE = "ble_enabled"
     const val INBOUND_FILTER = "inbound_filter"
     const val INBOUND_PORTS = "inbound_ports"
     const val LOG_LEVEL = "log_level"
@@ -147,6 +149,8 @@ object ConfigStore {
     /** How many servers [NAMES_DIRECT_SERVERS] links: each is one kept-alive link. */
     const val NAMES_DIRECT_SERVER_COUNT = 2
     const val DEF_HOTSPOT = true
+    /** Off: it needs three runtime permissions and is new. */
+    const val DEF_BLE = false
     const val DEF_AUTO_UPDATE = true
     const val DEF_FORWARD_CLEARNET = true
     const val DEF_WORKER_THREADS = 1
@@ -485,6 +489,7 @@ object ConfigStore {
         if (!p.contains(LAN_MDNS)) e.putBoolean(LAN_MDNS, DEF_LAN_MDNS)
         if (!p.contains(PUBLIC_NAMES)) e.putBoolean(PUBLIC_NAMES, DEF_PUBLIC_NAMES)
         if (!p.contains(HOTSPOT)) e.putBoolean(HOTSPOT, DEF_HOTSPOT)
+        if (!p.contains(BLE)) e.putBoolean(BLE, DEF_BLE)
         if (!p.contains(AUTO_UPDATE)) e.putBoolean(AUTO_UPDATE, DEF_AUTO_UPDATE)
         if (!p.contains(FORWARD_CLEARNET)) e.putBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET)
         if (!p.contains(WORKER_THREADS)) e.putInt(WORKER_THREADS, DEF_WORKER_THREADS)
@@ -537,6 +542,9 @@ object ConfigStore {
 
     /** FIPS Hotspot auto-join, honouring the default. */
     fun hotspotEnabled(context: Context) = prefs(context).getBoolean(HOTSPOT, DEF_HOTSPOT)
+
+    /** Bluetooth as a mesh transport, honouring the default. */
+    fun bleEnabled(context: Context) = prefs(context).getBoolean(BLE, DEF_BLE)
 
     /**
      * Build the shim config JSON from prefs + the (decrypted) nsec. Mirrors
@@ -595,6 +603,9 @@ object ConfigStore {
             .put("forward_clearnet", p.getBoolean(FORWARD_CLEARNET, DEF_FORWARD_CLEARNET))
             .put("battery_saver", p.getBoolean(BATTERY_SAVER, DEF_BATTERY_SAVER))
             .put("enable_lan_mdns", p.getBoolean(LAN_MDNS, DEF_LAN_MDNS))
+            // The transport only; the radio is installed by the service
+            // when Bluetooth is on and permitted (FipsBle.kt).
+            .put("ble", bleEnabled(context) && FipsBle.supported(context))
             .put("inbound_filter", p.getBoolean(INBOUND_FILTER, DEF_INBOUND_FILTER))
             .put("log_level", p.getString(LOG_LEVEL, DEF_LOG_LEVEL))
             // Always sent, file or no file: the shim watches the path, so the
