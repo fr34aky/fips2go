@@ -9,8 +9,11 @@ system — every subcommand prints, so all of it can be tested.
     exitctl.py publish SPEC               mesh-port host port, per published service
     exitctl.py public-ip LOOKUP           this network's public IPv4 address(es),
                                           one line; LOOKUP "" = the defaults
-    exitctl.py nft ALLOWLIST WAN PUBLISH PUBLIC_IPS [CIDR..]
+    exitctl.py nft [--open] [--open-block-tcp=PORTS] ALLOWLIST WAN PUBLISH PUBLIC_IPS [CIDR..]
                                           the nftables ruleset (stdout)
+    exitctl.py open-plan STATE KNOCKS COUNTERS CLIENTS MAX IDLE_SECS
+                                          open mode: who to admit and who to
+                                          drop now, and the new state (stdout)
     exitctl.py nft-public-ip [ADDR..]     nft script that swaps the blocked
                                           public addresses (stdout)
     exitctl.py fips-yaml PEERS            the fips daemon config (stdout)
@@ -30,8 +33,10 @@ rule below can key on it.
 import concurrent.futures
 import hashlib
 import ipaddress
+import json
 import re
 import sys
+import time
 import urllib.request
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -299,7 +304,31 @@ def nft_public_ip(addrs):
 TCP_MSS = 1200
 
 
-def nft_ruleset(rows, wan: str, extra_blocked=(), published=(), public=()):
+# Open mode (OPEN=1): TCP ports clients admitted without being on the
+# allow-list may not connect to. 25 is mail between servers, which nobody
+# sends from a phone and every spammer sends from an open exit.
+DEFAULT_OPEN_BLOCK_TCP = [25]
+# A fips address that sent a first packet waits here to be admitted.
+KNOCK_TIMEOUT = 60
+KNOCK_SIZE = 256
+# DNS queries per second a single address may send in open mode, where the
+# resolver answers the whole mesh.
+OPEN_DNS_RATE = 20
+
+
+def parse_ports(text: str):
+    """TCP ports from a comma or space separated list ("" = none)."""
+    out = []
+    for spec in _split_specs(text):
+        if not re.fullmatch(r"\d{1,5}", spec) or not 1 <= int(spec) <= 65535:
+            raise ConfigError(f"not a TCP port: {spec!r}")
+        if int(spec) not in out:
+            out.append(int(spec))
+    return out
+
+
+def nft_ruleset(rows, wan: str, extra_blocked=(), published=(), public=(), open_mode=False,
+                open_block_tcp=()):
     """The exit's whole firewall, as one atomic nft script.
 
     - Mesh side (fips0): new traffic only from allowed clients' fips
@@ -318,6 +347,13 @@ def nft_ruleset(rows, wan: str, extra_blocked=(), published=(), public=()):
       TCP_MSS (the phone clamps to the same), so an inner packet fits a
       1280-byte mesh packet once wrapped.
     - Tunnel interfaces reach nothing on the exit itself.
+    - Open mode (`open_mode`): any fips address may become a client. Its
+      first IPv4-in-IPv6 packet or DNS query puts it in `knock6`, where the
+      entrypoint's loop finds it, builds its tunnel and adds it to `open6`
+      (and to `client_src`/`clients4`, like a listed client). Such a client
+      gets internet and DNS and nothing else: the published services stay
+      with the allow-list (`clients6`), and `open_block_tcp` ports are
+      refused. DNS is answered for the whole mesh, rate-limited per address.
     """
     wan = _ifname(wan)
     blocked = BLOCKED_V4 + [str(ipaddress.IPv4Network(c, strict=False)) for c in extra_blocked]
@@ -331,6 +367,37 @@ def nft_ruleset(rows, wan: str, extra_blocked=(), published=(), public=()):
     setports = f"elements = {{ {ports} }}" if published else ""
     pub = ", ".join(str(ipaddress.IPv4Address(a)) for a in public)
     setpub = f"elements = {{ {pub} }}" if public else ""
+    open_sets = open_mesh = open_fwd = ""
+    if open_mode:
+        open_sets = f"""
+	set open6 {{
+		type ipv6_addr
+	}}
+	set knock6 {{
+		type ipv6_addr
+		size {KNOCK_SIZE}
+		flags dynamic,timeout
+		timeout {KNOCK_TIMEOUT}s
+	}}
+	set dnsrate {{
+		type ipv6_addr
+		size 4096
+		flags dynamic,timeout
+		timeout 1m
+	}}
+"""
+        # A full knock set makes `add` fail, so the rule does not match and
+        # the packet falls through to the chain's drop: bounded either way.
+        open_mesh = f"""		ip6 saddr @open6 meta l4proto 4 accept
+		ip6 saddr fd00::/8 meta l4proto 4 add @knock6 {{ ip6 saddr }} drop
+		ip6 saddr fd00::/8 udp dport 53 add @dnsrate {{ ip6 saddr limit rate over {OPEN_DNS_RATE}/second burst {OPEN_DNS_RATE * 2} packets }} drop
+		ip6 saddr fd00::/8 udp dport 53 add @knock6 {{ ip6 saddr }} accept
+		ip6 saddr fd00::/8 udp dport 53 accept
+"""
+        if open_block_tcp:
+            ports_blocked = ", ".join(str(int(p)) for p in open_block_tcp)
+            open_fwd = f"""		iifname "fxo*" tcp dport {{ {ports_blocked} }} drop
+"""
     return f"""\
 table inet fips_exit
 delete table inet fips_exit
@@ -361,7 +428,7 @@ table inet fips_exit {{
 		type ipv4_addr
 		{setpub}
 	}}
-
+{open_sets}
 	chain input {{
 		type filter hook input priority filter; policy accept;
 		iifname "fips0" jump mesh_in
@@ -374,7 +441,7 @@ table inet fips_exit {{
 		ip6 saddr @clients6 meta l4proto 4 accept
 		ip6 saddr @clients6 udp dport 53 accept
 		ip6 saddr @clients6 tcp dport @published_tcp accept
-		icmpv6 type {{ echo-request, packet-too-big, destination-unreachable, time-exceeded, parameter-problem }} accept
+{open_mesh}		icmpv6 type {{ echo-request, packet-too-big, destination-unreachable, time-exceeded, parameter-problem }} accept
 		drop
 	}}
 
@@ -383,7 +450,7 @@ table inet fips_exit {{
 		ct state invalid drop
 		iifname "fx*" tcp flags & (syn | rst) == syn tcp option maxseg size > {TCP_MSS} tcp option maxseg size set {TCP_MSS}
 		oifname "fx*" tcp flags & (syn | rst) == syn tcp option maxseg size > {TCP_MSS} tcp option maxseg size set {TCP_MSS}
-		iifname "fx*" oifname "{wan}" iifname . ip saddr @client_src ip daddr != @blocked4 ip daddr != @blocked_dyn accept
+{open_fwd}		iifname "fx*" oifname "{wan}" iifname . ip saddr @client_src ip daddr != @blocked4 ip daddr != @blocked_dyn accept
 		iifname "{wan}" oifname "fx*" ct state established,related accept
 	}}
 
@@ -393,6 +460,81 @@ table inet fips_exit {{
 	}}
 }}
 """
+
+
+def knocked(nft_json: str):
+    """The addresses in `nft -j list set inet fips_exit knock6`."""
+    out = []
+    try:
+        doc = json.loads(nft_json or "{}")
+    except ValueError:
+        return out
+    for item in doc.get("nftables", []):
+        for elem in (item.get("set") or {}).get("elem", []):
+            # With a timeout an element is {"elem": {"val": addr, ...}}.
+            if isinstance(elem, dict):
+                elem = (elem.get("elem") or {}).get("val")
+            if isinstance(elem, str):
+                out.append(elem)
+    return out
+
+
+def plan_open(state, knocks, counters, now, static_rows, max_clients, idle_secs):
+    """Open mode's bookkeeping, as a pure function.
+
+    `state` maps a client's fips address to {dev, inner, rx, seen}: the
+    clients admitted so far. `knocks` are addresses that sent a first packet;
+    `counters` the received-packet count of each open tunnel now.
+
+    Returns (actions, new state, notes). An action is ("ADD" | "DEL", dev,
+    fips address, inner address); the entrypoint carries them out.
+
+    - A client whose tunnel received nothing for `idle_secs` is dropped, so
+      the table holds people using the exit, not everyone who ever tried.
+    - A knock is admitted unless the exit is full (`max_clients`), or its
+      inner address is taken by a listed client or another open one (22 bits:
+      their replies could not be told apart, so the first one keeps it).
+    - Only fd00::/8 can knock, and never a listed client's own address.
+    """
+    actions, notes = [], []
+    clients = {a: dict(c) for a, c in state.get("clients", {}).items()}
+    for addr in sorted(clients):
+        c = clients[addr]
+        rx = counters.get(c["dev"])
+        if rx is None:
+            # The tunnel is gone (removed by hand?): forget it cleanly.
+            actions.append(("DEL", c["dev"], addr, c["inner"]))
+            del clients[addr]
+            continue
+        if rx != c["rx"]:
+            c["rx"], c["seen"] = rx, now
+        elif now - c["seen"] > idle_secs:
+            actions.append(("DEL", c["dev"], addr, c["inner"]))
+            del clients[addr]
+    static_addrs = {str(r[2]) for r in static_rows}
+    taken = {str(r[3]) for r in static_rows} | {c["inner"] for c in clients.values()}
+    used = {c["dev"] for c in clients.values()}
+    for raw in sorted(set(knocks)):
+        try:
+            addr = ipaddress.IPv6Address(raw)
+        except ValueError:
+            continue
+        key = str(addr)
+        if addr.packed[0] != 0xFD or key in clients or key in static_addrs:
+            continue
+        inner = str(inner_ipv4(addr))
+        if inner in taken:
+            notes.append(f"{key}: inner address {inner} is in use by another client")
+            continue
+        if len(clients) >= max_clients:
+            notes.append(f"{key}: the exit is full ({max_clients} open clients)")
+            continue
+        dev = next(f"fxo{i}" for i in range(max_clients) if f"fxo{i}" not in used)
+        used.add(dev)
+        taken.add(inner)
+        clients[key] = {"dev": dev, "inner": inner, "rx": 0, "seen": now}
+        actions.append(("ADD", dev, key, inner))
+    return actions, {"clients": clients}, notes
 
 
 def parse_peer(spec: str):
@@ -457,9 +599,41 @@ def main(argv):
             log = lambda m: print(f"exitctl: public IP lookup: {m}", file=sys.stderr)  # noqa: E731
             print(*public_ips(parse_lookup(args[0] if args else ""), log=log))
         elif cmd == "nft":
+            open_mode, block_tcp = False, list(DEFAULT_OPEN_BLOCK_TCP)
+            while args and args[0].startswith("--"):
+                flag = args.pop(0)
+                if flag == "--open":
+                    open_mode = True
+                elif flag.startswith("--open-block-tcp="):
+                    block_tcp = parse_ports(flag.split("=", 1)[1])
+                else:
+                    raise ConfigError(f"unknown option: {flag}")
             rows = clients(parse_allowlist(open(args[0]).read()))
             public = [ipaddress.IPv4Address(a) for a in args[3].split()]
-            sys.stdout.write(nft_ruleset(rows, args[1], args[4:], parse_publish(args[2]), public))
+            sys.stdout.write(
+                nft_ruleset(rows, args[1], args[4:], parse_publish(args[2]), public,
+                            open_mode=open_mode, open_block_tcp=block_tcp)
+            )
+        elif cmd == "open-plan":
+            state_file, knock_file, counter_file, clients_file, max_clients, idle = args
+            try:
+                state = json.loads(open(state_file).read() or "{}")
+            except (OSError, ValueError):
+                state = {}
+            counters = {}
+            for line in open(counter_file):
+                dev, _, rx = line.partition(" ")
+                counters[dev] = int(rx)
+            static_rows = [line.split() for line in open(clients_file) if line.strip()]
+            actions, new_state, notes = plan_open(
+                state, knocked(open(knock_file).read()), counters, int(time.time()),
+                static_rows, int(max_clients), int(idle),
+            )
+            for note in notes:
+                print(f"exitctl: open mode: {note}", file=sys.stderr)
+            for action in actions:
+                print(*action)
+            print("STATE", json.dumps(new_state, separators=(",", ":")))
         elif cmd == "nft-public-ip":
             sys.stdout.write(nft_public_ip(args))
         elif cmd == "fips-yaml":

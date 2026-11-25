@@ -301,5 +301,130 @@ class FipsConfig(unittest.TestCase):
         self.assertEqual(y.count("- npub:"), len(x.DEFAULT_PEERS))
 
 
+
+class OpenMode(unittest.TestCase):
+    """OPEN=1: anyone on the mesh may become a client, for internet only."""
+
+    NPUB = "npub12yu4dny6chzwghtq68ygmkyj7ugz93e403skz3y075mykjsheg7sp0yyzz"
+
+    def rules(self, **kw):
+        rows = x.clients([self.NPUB])
+        return x.nft_ruleset(rows, "eth0", published=[(8000, "192.168.1.20", 8000)], **kw)
+
+    def test_without_open_mode_nothing_knocks(self):
+        rs = self.rules()
+        for word in ("knock6", "open6", "dnsrate", "fxo"):
+            self.assertNotIn(word, rs)
+
+    def test_open_rules_admit_by_knock_and_keep_published_services_listed_only(self):
+        rs = self.rules(open_mode=True, open_block_tcp=[25])
+        mesh = rs.split("chain mesh_in {")[1].split("chain forward")[0]
+        # An admitted open client: its tunnel traffic, nothing else by name.
+        self.assertIn("ip6 saddr @open6 meta l4proto 4 accept", mesh)
+        self.assertEqual(mesh.count("@open6"), 1)
+        # The published ports stay with the allow-list.
+        self.assertIn("ip6 saddr @clients6 tcp dport @published_tcp accept", mesh)
+        self.assertEqual(mesh.count("@published_tcp"), 1)
+        # An unknown address knocks, and its first tunnel packet is dropped.
+        self.assertIn("ip6 saddr fd00::/8 meta l4proto 4 add @knock6 { ip6 saddr } drop", mesh)
+        # DNS for the mesh, rate-limited per address, ahead of the accept.
+        self.assertLess(mesh.index("limit rate over"), mesh.index("udp dport 53 add @knock6"))
+        # Listed clients are matched before anything open.
+        self.assertLess(mesh.index("@clients6 meta l4proto 4"), mesh.index("@open6"))
+        fwd = rs.split("chain forward {")[1].split("chain postrouting")[0]
+        self.assertIn('iifname "fxo*" tcp dport { 25 } drop', fwd)
+        self.assertLess(fwd.index("tcp dport { 25 } drop"), fwd.index("accept"))
+        # Still exactly the two accepts: an open client forwards through the
+        # same source-bound, destination-checked rule as a listed one.
+        self.assertEqual(fwd.count("accept"), 2)
+
+    def test_no_port_block_when_none_is_asked_for(self):
+        self.assertNotIn("fxo", self.rules(open_mode=True, open_block_tcp=[]))
+
+    def test_ports(self):
+        self.assertEqual(x.parse_ports("25, 465 25"), [25, 465])
+        self.assertEqual(x.parse_ports(""), [])
+        for bad in ("0", "65536", "smtp", "25;drop"):
+            with self.assertRaises(x.ConfigError):
+                x.parse_ports(bad)
+
+    def test_knocked_reads_nfts_json(self):
+        doc = (
+            '{"nftables": [{"metainfo": {}}, {"set": {"name": "knock6", "elem": '
+            '[{"elem": {"val": "fd00::1", "expires": 59}}, "fd00::2"]}}]}'
+        )
+        self.assertEqual(x.knocked(doc), ["fd00::1", "fd00::2"])
+        self.assertEqual(x.knocked('{"nftables": [{"set": {"name": "knock6"}}]}'), [])
+        self.assertEqual(x.knocked("not json"), [])
+
+    # Different bytes 1..3, so different inner addresses.
+    A, B = "fd00:100::a", "fd00:200::b"
+
+    def plan(self, state, knocks, counters=None, now=1000, static=(), max_clients=4, idle=600):
+        return x.plan_open(state, knocks, counters or {}, now, static, max_clients, idle)
+
+    def test_a_knock_is_admitted_with_the_address_the_phone_derives(self):
+        actions, state, notes = self.plan({}, [self.A])
+        inner = str(x.inner_ipv4(x.ipaddress.IPv6Address(self.A)))
+        self.assertEqual(actions, [("ADD", "fxo0", self.A, inner)])
+        self.assertEqual(state["clients"][self.A], {"dev": "fxo0", "inner": inner, "rx": 0, "seen": 1000})
+        self.assertEqual(notes, [])
+        # Knocking again changes nothing.
+        actions, again, _ = self.plan(state, [self.A], {"fxo0": 0}, now=1010)
+        self.assertEqual(actions, [])
+        self.assertEqual(again, state)
+
+    def test_only_mesh_addresses_knock_and_never_a_listed_client(self):
+        static = x.clients([self.NPUB])
+        listed = str(static[0][2])
+        actions, _, _ = self.plan({}, ["2001:db8::1", "garbage", listed], static=static)
+        self.assertEqual(actions, [])
+
+    def test_an_inner_address_in_use_is_not_given_twice(self):
+        # Same bytes 1..3, so the same inner address.
+        twin = "fd00:0a00::1:2"
+        self.assertEqual(
+            x.inner_ipv4(x.ipaddress.IPv6Address(twin)),
+            x.inner_ipv4(x.ipaddress.IPv6Address("fd00:0a00::9")),
+        )
+        actions, state, notes = self.plan({}, [twin, "fd00:0a00::9"])
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(len(state["clients"]), 1)
+        self.assertEqual(len(notes), 1)
+        # Nor one a listed client has.
+        static = [("fx0", "npub", "fd00:0a00::77", str(x.inner_ipv4(x.ipaddress.IPv6Address(twin))))]
+        actions, _, notes = self.plan({}, [twin], static=static)
+        self.assertEqual(actions, [])
+        self.assertEqual(len(notes), 1)
+
+    def test_a_full_exit_admits_nobody_new(self):
+        knocks = [f"fd00:{i:x}00::1" for i in range(1, 4)]
+        actions, state, notes = self.plan({}, knocks, max_clients=2)
+        self.assertEqual([a[1] for a in actions], ["fxo0", "fxo1"])
+        self.assertEqual(len(state["clients"]), 2)
+        self.assertIn("full", notes[0])
+
+    def test_traffic_keeps_a_client_and_silence_drops_it(self):
+        _, state, _ = self.plan({}, [self.A, self.B], now=1000)
+        devs = {a: state["clients"][a]["dev"] for a in (self.A, self.B)}
+        # A sent packets, B did not; the idle limit has not passed yet.
+        counters = {devs[self.A]: 5, devs[self.B]: 0}
+        actions, state, _ = self.plan(state, [], counters, now=1500)
+        self.assertEqual(actions, [])
+        # Past the limit: B goes, A (seen at 1500) stays.
+        actions, state, _ = self.plan(state, [], counters, now=1601)
+        self.assertEqual([(a[0], a[2]) for a in actions], [("DEL", self.B)])
+        self.assertEqual(list(state["clients"]), [self.A])
+        # Its tunnel name is free again for the next knock.
+        actions, _, _ = self.plan(state, [self.B], {devs[self.A]: 5}, now=1602)
+        self.assertEqual(actions[0][:2], ("ADD", devs[self.B]))
+
+    def test_a_tunnel_that_vanished_is_forgotten(self):
+        _, state, _ = self.plan({}, [self.A])
+        actions, state, _ = self.plan(state, [], {}, now=1001)
+        self.assertEqual(actions[0][0], "DEL")
+        self.assertEqual(state["clients"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

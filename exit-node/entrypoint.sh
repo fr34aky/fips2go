@@ -15,6 +15,11 @@ WAN=${WAN_IFACE:-eth0}
 DNS_UPSTREAMS=${DNS_UPSTREAMS:-1.1.1.1 9.9.9.9}
 PUBLIC_IP_LOOKUP=${PUBLIC_IP_LOOKUP:-}
 PUBLIC_IP_INTERVAL=${PUBLIC_IP_INTERVAL:-300}
+# Open mode: serve any fips node, not only the allow-list. See README.md.
+OPEN=${OPEN:-0}
+OPEN_MAX_CLIENTS=${OPEN_MAX_CLIENTS:-64}
+OPEN_IDLE_SECS=${OPEN_IDLE_SECS:-600}
+OPEN_BLOCK_TCP_PORTS=${OPEN_BLOCK_TCP_PORTS-25}
 
 log() { echo "exit-node: $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
@@ -37,8 +42,20 @@ chmod 700 "$DATA"
 [ -f "$ALLOWED_FILE" ] && cat "$ALLOWED_FILE" >> "$RUN/allowed"
 printf '%s\n' ${ALLOWED_NPUBS:-} >> "$RUN/allowed"
 $CTL clients "$RUN/allowed" > "$RUN/clients" || die "the allow-list is invalid (see above)"
-[ -s "$RUN/clients" ] ||
-  die "no allowed npubs: list them in data/allowed_npubs (one per line) or ALLOWED_NPUBS"
+case "$OPEN" in
+  0 | 1) ;;
+  *) die "OPEN must be 0 or 1" ;;
+esac
+if [ "$OPEN" = 1 ]; then
+  [[ "$OPEN_MAX_CLIENTS" =~ ^[0-9]+$ ]] && [ "$OPEN_MAX_CLIENTS" -ge 1 ] && [ "$OPEN_MAX_CLIENTS" -le 1024 ] ||
+    die "OPEN_MAX_CLIENTS must be a number from 1 to 1024"
+  [[ "$OPEN_IDLE_SECS" =~ ^[0-9]+$ ]] && [ "$OPEN_IDLE_SECS" -ge 30 ] ||
+    die "OPEN_IDLE_SECS must be a number of seconds, at least 30"
+  log "OPEN MODE: any fips node may use this exit for internet access (up to $OPEN_MAX_CLIENTS at once)"
+else
+  [ -s "$RUN/clients" ] ||
+    die "no allowed npubs: list them in data/allowed_npubs (one per line) or ALLOWED_NPUBS (or set OPEN=1 to serve anyone)"
+fi
 
 # Services published to the clients (PUBLISH): checked here, before the
 # firewall, so a bad entry stops the exit like a bad npub does.
@@ -67,8 +84,10 @@ ip link show "$WAN" > /dev/null 2>&1 || die "WAN interface $WAN does not exist (
 
 # 3. Firewall first: default-deny forwarding, mesh input only from allowed
 #    clients. Loaded atomically; nothing below runs if it does not load.
+NFT_OPTS=()
+[ "$OPEN" = 1 ] && NFT_OPTS=(--open "--open-block-tcp=$OPEN_BLOCK_TCP_PORTS")
 # shellcheck disable=SC2086
-$CTL nft "$RUN/allowed" "$WAN" "${PUBLISH:-}" "$PUBLIC_IPS" ${BLOCK_CIDRS:-} > "$RUN/rules.nft" || die "cannot build the firewall"
+$CTL nft "${NFT_OPTS[@]}" "$RUN/allowed" "$WAN" "${PUBLISH:-}" "$PUBLIC_IPS" ${BLOCK_CIDRS:-} > "$RUN/rules.nft" || die "cannot build the firewall"
 nft -f "$RUN/rules.nft" || die "cannot load the firewall"
 log "firewall loaded"
 
@@ -108,6 +127,59 @@ while read -r dev npub client_fd inner; do
   log "allowed $npub (inner $inner, $dev)"
 done < "$RUN/clients"
 ip link set ip6tnl0 down 2> /dev/null || true
+
+# 6b. Open mode: admit whoever knocks. The firewall notes the address of a
+#     first packet (set knock6); this loop builds that client's tunnel and
+#     only then lets its traffic in (set open6), and removes clients that
+#     have gone quiet. exitctl decides; this only carries it out. Order
+#     matters both ways: the tunnel exists before the firewall accepts for
+#     it, and the firewall stops accepting before the tunnel goes.
+open_loop() {
+  local verb dev addr inner tick=0
+  echo '{}' > "$RUN/open.state"
+  # A reply for a client that has been removed must not find the default
+  # route (the /32 of a live client is more specific than this).
+  ip route replace blackhole 100.64.0.0/10
+  while sleep 2; do
+    nft -j list set inet fips_exit knock6 > "$RUN/knock.json" 2> /dev/null || continue
+    tick=$((tick + 1))
+    # Nobody knocking: only look again every 30 s, for clients gone idle.
+    grep -q '"elem"' "$RUN/knock.json" || [ $((tick % 15)) = 0 ] || continue
+    : > "$RUN/open.counters"
+    for d in /sys/class/net/fxo*; do
+      [ -e "$d" ] && echo "${d##*/} $(cat "$d/statistics/rx_packets")" >> "$RUN/open.counters"
+    done
+    $CTL open-plan "$RUN/open.state" "$RUN/knock.json" "$RUN/open.counters" \
+      "$RUN/clients" "$OPEN_MAX_CLIENTS" "$OPEN_IDLE_SECS" > "$RUN/open.plan" || continue
+    while read -r verb dev addr inner; do
+      case "$verb" in
+        ADD)
+          ip -6 tunnel del "$dev" 2> /dev/null || true
+          if ip -6 tunnel add "$dev" mode ipip6 local "$EXIT_FD" remote "$addr" encaplimit none hoplimit 64 &&
+            ip link set "$dev" mtu $((FIPS_MTU - 40)) up &&
+            ip route replace "$inner/32" dev "$dev" &&
+            nft "add element inet fips_exit client_src { \"$dev\" . $inner }; add element inet fips_exit clients4 { $inner }; add element inet fips_exit open6 { $addr }"; then
+            ip link set ip6tnl0 down 2> /dev/null || true
+            log "open: admitted $addr (inner $inner, $dev)"
+          else
+            log "open: could not admit $addr; it is not served"
+            nft "delete element inet fips_exit open6 { $addr }" 2> /dev/null || true
+            ip -6 tunnel del "$dev" 2> /dev/null || true
+          fi
+          ;;
+        DEL)
+          nft "delete element inet fips_exit open6 { $addr }" 2> /dev/null || true
+          nft "delete element inet fips_exit clients4 { $inner }" 2> /dev/null || true
+          nft "delete element inet fips_exit client_src { \"$dev\" . $inner }" 2> /dev/null || true
+          ip route del "$inner/32" dev "$dev" 2> /dev/null || true
+          ip -6 tunnel del "$dev" 2> /dev/null || true
+          log "open: dropped $addr (idle)"
+          ;;
+        STATE) echo "$dev" > "$RUN/open.state" ;;
+      esac
+    done < "$RUN/open.plan"
+  done
+}
 
 # 7. DNS for the clients, on the exit's fips address only (the firewall
 #    lets only allowed clients reach it).
@@ -158,6 +230,10 @@ watch_public_ip() {
 }
 if [ "$PUBLIC_IP_LOOKUP" != off ]; then
   watch_public_ip &
+  PIDS+=($!)
+fi
+if [ "$OPEN" = 1 ]; then
+  open_loop &
   PIDS+=($!)
 fi
 

@@ -14,6 +14,10 @@
 #     address by the client only, and an unpublished port is not;
 #   - the exit network's own public address is blocked, and the block follows
 #     it when it changes (a fake lookup service stands in for the real ones).
+#   - restarted in open mode (OPEN=1), the intruder gets internet and DNS but
+#     still not the published service, private addresses or another client's
+#     address, the listed client keeps everything, and an idle open client
+#     is dropped.
 #
 # Needs: docker with compose, internet access, and ip6_tunnel on the host
 # (sudo modprobe ip6_tunnel). Build first: docker build -t fips2go-exit:dev .
@@ -331,6 +335,64 @@ else
 fi
 docker ps -q -f name="$P-exit" | grep -q . && ok "the exit kept running through the change" ||
   bad "the exit stopped during the change"
+
+# Open mode: the same exit, restarted with OPEN=1 (same identity, same
+# allow-list and PUBLISH). The intruder is now a client like anyone on the
+# mesh — for internet and DNS only. 1.1.1.1 is the "public address" by now,
+# so 1.0.0.1 stands for the internet.
+echo "--- open mode"
+sed -i 's|      RUST_LOG: warn|      RUST_LOG: warn\n      OPEN: "1"\n      OPEN_IDLE_SECS: "30"|' "$WORK/override.yaml"
+docker compose -p "$P" --project-directory "$WORK" \
+  -f "$WORK/compose.yaml" -f "$WORK/override.yaml" up -d --no-build > /dev/null
+for _ in $(seq 90); do
+  docker logs "$P-exit" 2>&1 | grep -q "OPEN MODE" &&
+    docker logs "$P-exit" 2>&1 | grep -c "exit node up" | grep -q . && break
+  sleep 1
+done
+for _ in $(seq 60); do
+  docker logs --since 5s "$P-exit" > /dev/null 2>&1
+  [ "$(docker inspect -f '{{.State.Running}}' "$P-exit" 2> /dev/null)" = true ] &&
+    docker exec "$P-exit" test -f /run/exit/open.state 2> /dev/null && break
+  sleep 1
+done
+if ! docker exec "$P-exit" test -f /run/exit/open.state 2> /dev/null; then
+  docker logs "$P-exit" 2>&1 | tail -30
+  bad "the exit did not come up in open mode"
+else
+  docker exec "$P-intruder" sh -c "ip addr del $(inner client)/32 dev t0" 2> /dev/null || true
+  r=$(tcp intruder 1.0.0.1 80 60 "$(inner intruder)")
+  [ "$r" = ok ] && ok "open: a node not on the allow-list reaches the internet" || bad "open internet: $r"
+  docker logs "$P-exit" 2>&1 | grep -q "open: admitted" &&
+    ok "open: the exit admitted it on its first packet" || bad "open: no admission in the exit's log"
+  r=$(dns intruder 30)
+  [ "$r" = ok ] && ok "open: it resolves names with the exit's DNS" || bad "open DNS: $r"
+  r=$(http6 intruder 8000 10)
+  [ "$r" = timeout ] && ok "open: it cannot reach the published service (allow-list only)" ||
+    bad "OPEN CLIENT REACHED THE PUBLISHED SERVICE: $r"
+  r=$(tcp intruder "$LAN_IP" 8080 10 "$(inner intruder)")
+  [ "$r" = timeout ] && ok "open: it cannot reach a private address through the exit" ||
+    bad "OPEN CLIENT REACHED A PRIVATE ADDRESS: $r"
+  r=$(tcp intruder 1.1.1.1 80 10 "$(inner intruder)")
+  [ "$r" = timeout ] && ok "open: it cannot reach the exit network's public address" ||
+    bad "OPEN CLIENT REACHED THE EXIT NETWORK'S PUBLIC ADDRESS: $r"
+  docker exec "$P-intruder" sh -c "ip addr add $(inner client)/32 dev t0"
+  r=$(tcp intruder 1.0.0.1 80 12 "$(inner client)")
+  [ "$r" = timeout ] && ok "open: spoofing another client's inner address gets no internet" ||
+    bad "OPEN CLIENT REACHED THE INTERNET WITH A SPOOFED ADDRESS: $r"
+  r=$(tcp client 1.0.0.1 80 45 "$(inner client)")
+  [ "$r" = ok ] && ok "open: the listed client still reaches the internet" || bad "open, listed client: $r"
+  r=$(http6 client 8000 30)
+  [ "$r" = ok ] && ok "open: the listed client still reaches the published service" ||
+    bad "open, listed client published service: $r"
+  # Quiet for longer than OPEN_IDLE_SECS: the open client is dropped again.
+  for _ in $(seq 100); do
+    docker logs "$P-exit" 2>&1 | grep -q "open: dropped" && break
+    sleep 1
+  done
+  docker logs "$P-exit" 2>&1 | grep -q "open: dropped" &&
+    ok "open: an idle client is dropped" || bad "open: the idle client was not dropped"
+  docker ps -q -f name="$P-exit" | grep -q . && ok "open: the exit kept running" || bad "open: the exit stopped"
+fi
 
 echo "passed $pass, failed $fail"
 [ "$fail" = 0 ]
