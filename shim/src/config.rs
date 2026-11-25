@@ -68,6 +68,13 @@ pub struct ShimConfig {
     /// while this is enabled AND the underlying network is Wi-Fi.
     #[serde(default)]
     pub enable_lan_mdns: bool,
+    /// Bluetooth (BLE) as a transport: nodes in radio range find each other
+    /// and link with no network at all. Off by default. The radio is the
+    /// app's (`ble.rs`); this only adds the transport to the node, which
+    /// then runs with or without a radio installed. Ignored (with a warning)
+    /// in `fips_yaml` mode — declare `transports.ble` in the YAML instead.
+    #[serde(default)]
+    pub ble: bool,
     /// tracing filter, e.g. "info" or "fips=debug".
     #[serde(default)]
     pub log_level: Option<String>,
@@ -280,6 +287,9 @@ pub struct IdentityInfo {
     pub inner_ipv4: String,
 }
 
+/// Bluetooth links a phone holds at once (`ShimConfig::ble`).
+pub const BLE_MAX_CONNECTIONS: usize = 3;
+
 /// Derive (or generate, when `nsec` is empty) the node identity.
 pub fn derive_identity(nsec: &str) -> Result<IdentityInfo, String> {
     let identity = if nsec.trim().is_empty() {
@@ -330,6 +340,11 @@ impl ShimConfig {
                 tracing::warn!(
                     "hotspot overlay is ignored in fips_yaml mode — declare a dial-scoped \
                      UDP instance in the YAML instead"
+                );
+            }
+            if self.ble {
+                tracing::warn!(
+                    "ble is ignored in fips_yaml mode — declare transports.ble in the YAML instead"
                 );
             }
             if self.nostr_discovery {
@@ -420,6 +435,20 @@ impl ShimConfig {
         // Joining a FIPS Hotspot without LAN discovery would be pointless, so
         // the hotspot overlay forces mDNS on for the duration of the join
         // (the Kotlin side holds the MulticastLock accordingly).
+        if self.ble {
+            config.transports.ble =
+                fips::config::TransportInstances::Single(fips::config::BleConfig {
+                    // A neighbour found by its advert is linked to: that is
+                    // the point of looking. (fips's default is to link only
+                    // to configured peers.)
+                    auto_connect: Some(true),
+                    // Every held link costs radio time for its keep-alives,
+                    // connected to anything or not. fips's default is 7.
+                    max_connections: Some(BLE_MAX_CONNECTIONS),
+                    ..Default::default()
+                });
+            tracing::info!("Bluetooth transport enabled");
+        }
         let lan_mdns = self.enable_lan_mdns || self.hotspot.is_some();
         config.node.rendezvous.lan.enabled = lan_mdns;
         if lan_mdns {
@@ -750,6 +779,27 @@ mod tests {
         assert_eq!(shim.upstream_addrs().len(), 2, "default upstreams parse");
         assert_eq!(shim.worker_threads, 1, "mobile worker cap defaults to 1");
         assert!(!config.node.rendezvous.lan.enabled, "mDNS defaults off");
+    }
+
+    /// `ble` adds one Bluetooth transport that links to what it finds and
+    /// holds few links; without the knob there is none.
+    #[test]
+    fn ble_knob_adds_the_transport() {
+        let id = derive_identity("").unwrap();
+        let config = |ble: bool| {
+            let json = format!(r#"{{ "nsec": "{}", "ble": {ble} }}"#, id.nsec);
+            ShimConfig::from_json(&json)
+                .unwrap()
+                .to_fips_config()
+                .unwrap()
+        };
+        assert!(config(false).transports.ble.is_empty());
+        let on = config(true);
+        assert_eq!(on.transports.ble.len(), 1);
+        let (_, ble) = on.transports.ble.iter().next().unwrap();
+        assert!(ble.auto_connect() && ble.scan() && ble.advertise() && ble.accept_connections());
+        assert_eq!(ble.max_connections(), BLE_MAX_CONNECTIONS);
+        assert_eq!(on.transports.udp.len(), 1, "UDP is still there");
     }
 
     /// `enable_lan_mdns` flips the fips knob and excludes both tunnel

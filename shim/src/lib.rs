@@ -6,6 +6,7 @@
 //! a DNS proxy that splits `.fips` queries to the in-process responder and
 //! everything else to upstream resolvers, and the JNI surface.
 
+pub mod ble;
 pub mod config;
 pub mod dns;
 pub mod engine;

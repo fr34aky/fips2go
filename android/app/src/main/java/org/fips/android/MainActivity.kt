@@ -23,6 +23,18 @@ import kotlin.concurrent.thread
  */
 class MainActivity : AppCompatActivity() {
 
+    // While the app is on screen the Bluetooth radio looks for neighbours
+    // whatever links the node has (FipsBle's scan policy).
+    override fun onStart() {
+        super.onStart()
+        FipsBle.setForeground(true)
+    }
+
+    override fun onStop() {
+        FipsBle.setForeground(false)
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)

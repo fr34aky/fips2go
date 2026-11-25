@@ -101,4 +101,93 @@ object FipsNative {
 
     /** The most recent node log lines (newline-joined). */
     external fun recentLogs(maxLines: Int): String
+
+    // ---- Bluetooth: the app's radio (shim/src/ble.rs) ----------------------
+    //
+    // fips links to nodes in radio range over BLE, but cannot open a radio on
+    // Android: scanning, advertising and the L2CAP sockets are Java APIs. So
+    // the app runs the radio and fips commands it through [BleRadio], while
+    // the app reports what happens with the functions below.
+    //
+    // Channel and dial ids are opaque: pass back exactly what was given. An
+    // id from before a node restart or a radio replacement reads as closed.
+
+    /**
+     * What fips asks of the radio. Every method is called from the node's
+     * own thread and must return at once: start the work on another thread
+     * and report the outcome with the matching `ble…` function.
+     */
+    interface BleRadio {
+        /** Open the L2CAP listener; return its PSM, or 0 if it failed. */
+        fun bleListen(): Int
+
+        /**
+         * Dial [addr] (6 bytes) on [psm]. Answer with [bleConnectResult],
+         * passing [connectId] back.
+         */
+        fun bleConnect(connectId: Long, addr: ByteArray, psm: Int)
+
+        /** Advertise the FIPS service with [psm] in its service data. */
+        fun bleStartAdvertising(psm: Int)
+        fun bleStopAdvertising()
+
+        /**
+         * Scanning is wanted. When the chip actually scans is the radio's
+         * decision; an advert it does not report is a link fips never makes.
+         */
+        fun bleStartScanning()
+        fun bleStopScanning()
+
+        /** fips dropped the channel: close its socket. */
+        fun bleCloseChannel(chId: Long)
+    }
+
+    /**
+     * The radio is up; fips may command it. Call again with a new object to
+     * replace it. Allowed before the node starts and kept across restarts.
+     */
+    external fun bleInstall(radio: BleRadio)
+
+    /** The radio is gone (Bluetooth off, a permission withdrawn, setting off). */
+    external fun bleClear()
+
+    /**
+     * A peer connected to our listener. Returns the channel id, or 0: close
+     * the socket.
+     */
+    external fun bleInbound(addr: ByteArray, sendMtu: Int, recvMtu: Int): Long
+
+    /**
+     * The outcome of a [BleRadio.bleConnect]. Returns the channel id when
+     * [ok], or 0 (it failed, or fips stopped waiting): close the socket.
+     */
+    external fun bleConnectResult(
+        connectId: Long, ok: Boolean, addr: ByteArray, sendMtu: Int, recvMtu: Int,
+    ): Long
+
+    /**
+     * One FIPS advert seen. [psm] is 0 when it carried none; [rssi] is
+     * `Int.MIN_VALUE` when unknown.
+     */
+    external fun bleScan(addr: ByteArray, psm: Int, rssi: Int)
+
+    /**
+     * The first [len] bytes of [data], read from channel [chId]. False: the
+     * channel is gone — stop reading and close the socket. Blocks while fips
+     * is behind, so call it from the channel's own reader thread.
+     */
+    external fun bleRecv(chId: Long, data: ByteArray, len: Int): Boolean
+
+    /**
+     * The next packet to write to channel [chId], or null: nothing within
+     * [timeoutMs], or the channel is gone ([bleChannelOpen] tells which).
+     * Blocks up to the timeout — call it from the channel's writer thread.
+     */
+    external fun bleNextSend(chId: Long, timeoutMs: Int): ByteArray?
+
+    /** Whether fips still holds channel [chId]. */
+    external fun bleChannelOpen(chId: Long): Boolean
+
+    /** The socket of channel [chId] closed (the peer left, or an error). */
+    external fun bleChannelClosed(chId: Long)
 }

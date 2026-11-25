@@ -200,9 +200,25 @@ fn start_inner(
     let shim_config = ShimConfig::from_json(config_json)?;
     crate::init_logging(shim_config.log_level.as_deref());
     apply_worker_thread_caps(shim_config.worker_threads);
-    let fips_config = shim_config.to_fips_config()?;
+    #[allow(unused_mut)]
+    let mut fips_config = shim_config.to_fips_config()?;
+    // The app's radio exists on Android only. Anywhere else (host tests)
+    // fips would open the machine's own Bluetooth adapter instead.
+    #[cfg(not(target_os = "android"))]
+    {
+        fips_config.transports.ble = Default::default();
+    }
+    // Whatever a previous node left: its slot is not this node's.
+    crate::ble::GLOBAL.detach();
 
     let mut node = fips::Node::new(fips_config).map_err(|e| format!("node init: {e}"))?;
+    // The Bluetooth seam, before start(): the transport is built over this
+    // slot, and runs with or without a radio in it (`ble.rs`).
+    #[cfg(target_os = "android")]
+    if shim_config.ble {
+        let slot = node.enable_app_owned_ble_radio();
+        crate::ble::GLOBAL.attach(Arc::new(crate::ble::android::Slot(slot)));
+    }
     let npub = node.npub();
     let our_fips_addr = *node.identity().address();
     let address = our_fips_addr.to_ipv6().to_string();
@@ -464,6 +480,7 @@ fn stop_locked() {
         return;
     };
     tracing::info!("fips engine stopping");
+    crate::ble::GLOBAL.detach();
     if let Some(stop_tx) = engine.stop_tx.take() {
         let _ = stop_tx.send(());
     }

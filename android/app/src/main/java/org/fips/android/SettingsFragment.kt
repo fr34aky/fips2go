@@ -52,6 +52,21 @@ class SettingsFragment : Fragment() {
         }
     }
 
+    /**
+     * The Bluetooth permissions, requested when its toggle is switched on.
+     * A denial leaves the setting on and the radio off; the summary under
+     * the switch says what it needs.
+     */
+    private val blePermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        if (result.values.any { !it }) {
+            view?.let {
+                Ui.snack(it, "Without that permission, Bluetooth stays off", long = true)
+            }
+        }
+    }
+
     private fun ensureLocationPermission() {
         if (requireContext().checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) !=
             PackageManager.PERMISSION_GRANTED
@@ -82,6 +97,12 @@ class SettingsFragment : Fragment() {
             if (checked) {
                 HotspotLocation.markAsked(requireContext())
                 ensureLocationPermission()
+            }
+            syncSaveButton(view)
+        }
+        sw(view, R.id.ble).setOnCheckedChangeListener { _, checked ->
+            if (checked && !FipsBle.granted(requireContext())) {
+                blePermissions.launch(FipsBle.permissions())
             }
             syncSaveButton(view)
         }
@@ -171,8 +192,9 @@ class SettingsFragment : Fragment() {
      */
     private fun watchForEdits(view: View) {
         for (id in SWITCHES) {
-            // The hotspot switch already reports from its own listener.
-            if (id != R.id.hotspot) {
+            // The hotspot and Bluetooth switches already report from their
+            // own listeners.
+            if (id != R.id.hotspot && id != R.id.ble) {
                 sw(view, id).setOnCheckedChangeListener { _, _ -> syncSaveButton(view) }
             }
         }
@@ -301,6 +323,7 @@ class SettingsFragment : Fragment() {
             sw(view, R.id.bootstrap_fallbacks).isChecked !=
             p.getBoolean(CS.BOOTSTRAP_FALLBACKS, CS.DEF_BOOTSTRAP_FALLBACKS) ||
             sw(view, R.id.hotspot).isChecked != CS.hotspotEnabled(requireContext()) ||
+            sw(view, R.id.ble).isChecked != CS.bleEnabled(requireContext()) ||
             sw(view, R.id.auto_update).isChecked !=
             p.getBoolean(CS.AUTO_UPDATE, CS.DEF_AUTO_UPDATE) ||
             sw(view, R.id.forward_clearnet).isChecked !=
@@ -425,6 +448,8 @@ class SettingsFragment : Fragment() {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
             sw(view, R.id.hotspot).isEnabled = false
         }
+        sw(view, R.id.ble).isChecked = CS.bleEnabled(requireContext())
+        sw(view, R.id.ble).isEnabled = FipsBle.supported(requireContext())
         sw(view, R.id.forward_clearnet).isChecked =
             p.getBoolean(CS.FORWARD_CLEARNET, CS.DEF_FORWARD_CLEARNET)
         edit(view, R.id.worker_threads)
@@ -467,6 +492,7 @@ class SettingsFragment : Fragment() {
             .putBoolean(CS.NOSTR_DISCOVERY, sw(view, R.id.nostr_discovery).isChecked)
             .putBoolean(CS.BOOTSTRAP_FALLBACKS, sw(view, R.id.bootstrap_fallbacks).isChecked)
             .putBoolean(CS.HOTSPOT, sw(view, R.id.hotspot).isChecked)
+            .putBoolean(CS.BLE, sw(view, R.id.ble).isChecked)
             .putBoolean(CS.AUTO_UPDATE, sw(view, R.id.auto_update).isChecked)
             .putBoolean(CS.FORWARD_CLEARNET, sw(view, R.id.forward_clearnet).isChecked)
             .putInt(CS.WORKER_THREADS, workers.coerceIn(0, 16))
@@ -489,7 +515,7 @@ class SettingsFragment : Fragment() {
 
         /** Every persisted widget; [watchForEdits] must see all of them. */
         val SWITCHES = intArrayOf(
-            R.id.inbound_filter, R.id.lan_mdns, R.id.hotspot, R.id.battery_saver,
+            R.id.inbound_filter, R.id.lan_mdns, R.id.hotspot, R.id.ble, R.id.battery_saver,
             R.id.bootstrap_fallbacks, R.id.nostr_discovery, R.id.public_names, R.id.names_dnssec,
             R.id.names_witnesses_from_hosts, R.id.names_direct_servers,
             R.id.auto_update, R.id.forward_clearnet,

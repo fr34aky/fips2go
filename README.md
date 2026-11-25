@@ -54,6 +54,11 @@ usable on a device you also use for everything else.
   with [fips-ui](https://github.com/fr34aky/fips-ui) — the same sync its own
   nodes use: hourly and on demand, over the mesh, with that node admitting
   this device by its npub as a viewer.
+- **Bluetooth** (Settings, off by default, Android 10+). Links to fips nodes
+  in Bluetooth range with no network at all, over fips's BLE transport. Slow:
+  enough for messages and names. To spare the battery the phone only looks
+  for neighbours while the mesh has no link or the app is open; it can always
+  be found.
 - **Exit nodes.** The mesh apps' internet traffic can leave through a fips
   node you trust instead of the phone's own connection, like a VPN server
   (Overview → *Internet route*). The exit is a Docker container

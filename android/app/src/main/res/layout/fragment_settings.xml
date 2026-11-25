@@ -238,6 +238,14 @@
                 <TextView
                     style="@style/Widget.Fips.Summary"
                     android:text="While connected, automatically joins nearby open hotspots named “!FIPS” — anywhere — and looks for fips peers there. Internet stays on your normal network. Needs the location permission (asked when enabling): Android hides Wi-Fi names without it. When you are already on another Wi-Fi, dual-Wi-Fi phones additionally join “!FIPS” as a second, local-only connection (one-time approval per hotspot). Requires Android 10+, full auto-join Android 12+." />
+            <View style="@style/Widget.Fips.Divider" />
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/ble"
+                    style="@style/Widget.Fips.SettingSwitch"
+                    android:text="Bluetooth" />
+                <TextView
+                    style="@style/Widget.Fips.Summary"
+                    android:text="Links to fips nodes in Bluetooth range, with no network at all. Slow: enough for messages and names, not for browsing. To save battery it only looks for neighbours while the mesh has no link, or while this app is open; others can always find you. Needs the Nearby devices permission (asked when enabling) and Bluetooth switched on. Requires Android 10+. Reconnect to apply." />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
