@@ -68,6 +68,19 @@ Everything crosses JNI as JSON strings.
    the app parses what arrives on a channel. The app holds at most
    `BLE_MAX_CONNECTIONS` links; an accepted socket costs two threads until
    fips drops it.
+9. **Exit adverts from Nostr relays** (only when the user presses Search on
+   the Internet route screen): events fetched in `shim/src/exitfind.rs` from
+   the mesh relays and, while online, the public ones. Anyone can publish
+   one. The signature makes the author the exit it names and nothing more;
+   name, note and "open" are the author's claims. Events are read as a
+   stream, reduced at once to an advert's six short tags, and no more than
+   2000 are read in one search, so a relay cannot decide how much the phone
+   holds. Each event is checked for
+   kind, marker, contract version, access word and validity window, the two
+   text fields are reduced to one printable line each (no control or
+   bidi-formatting characters, 40 / 200 characters), and at most 100 are
+   listed. The app shows them as plain text, and adding one does not select
+   it.
 
 ## Things that would be serious in this codebase
 
@@ -142,3 +155,9 @@ Everything crosses JNI as JSON strings.
 - The Bluetooth channels are "insecure" L2CAP (no pairing, no BLE
   encryption) on purpose: strangers must be able to link, and fips encrypts
   and authenticates above it.
+- A search for exit adverts asks the public relays while online, which
+  tells them this address is looking for an exit. It runs only when the user
+  presses Search, and the screen says so.
+- An advert saying "open" is not verified. Selecting an exit that will not
+  serve this phone blocks its mesh apps' internet (as any unreachable exit
+  does) until the user switches back; nothing is leaked.

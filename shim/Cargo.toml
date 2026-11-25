@@ -30,6 +30,9 @@ jni = "0.21"
 # names.rs / meshudp.rs here.
 pubdom-core = { git = "https://github.com/fr34aky/fips-pub-domains", rev = "8a64884" }
 pubdom-resolve = { git = "https://github.com/fr34aky/fips-pub-domains", rev = "8a64884" }
+# Exit adverts (exitfind.rs) are fetched with the relay client the tree
+# already has through fips and pubdom-resolve: same version, same features.
+nostr-sdk = { version = "0.44", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

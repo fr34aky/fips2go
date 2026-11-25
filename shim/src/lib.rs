@@ -11,6 +11,7 @@ pub mod config;
 pub mod dns;
 pub mod engine;
 pub mod exit;
+pub mod exitfind;
 pub mod filter;
 pub mod forward;
 mod jni_api;
