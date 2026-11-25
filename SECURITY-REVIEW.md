@@ -56,6 +56,18 @@ Everything crosses JNI as JSON strings.
    answers of its DNS resolver
    (`dns.rs` via `meshudp.rs`), which carry every non-`.fips` name while it
    is selected.
+8. **Anyone in Bluetooth range** (only with Settings → Bluetooth on, off by
+   default, and only while connected): BLE adverts and L2CAP connections,
+   from strangers, with no pairing and no link-layer encryption. The radio
+   is the app's (`FipsBle.kt`); what it hears goes through the JNI exports in
+   `jni_api.rs` (`bleScan`, `bleInbound`, `bleRecv`: a 6-byte address or the
+   call is dropped, lengths clamped, only the bytes read are copied) into
+   fips's own BLE transport, which does the pubkey exchange, the handshake
+   and the framing. A peer that completes them is a link like any other: its
+   traffic for covered apps still meets `filter.rs`. Nothing in the shim or
+   the app parses what arrives on a channel. The app holds at most
+   `BLE_MAX_CONNECTIONS` links; an accepted socket costs two threads until
+   fips drops it.
 
 ## Things that would be serious in this codebase
 
@@ -74,6 +86,11 @@ Everything crosses JNI as JSON strings.
   public-names resolver is offline and asked about pinned domains only, so it
   sends no TXT query and asks no relay. A path that sends a packet or a name
   around the exit is a finding.
+- **Stale Bluetooth channels.** A node restart or a radio restart builds a
+  new fips bridge that numbers channels from 1 again, while the app may still
+  hold sockets from the one before. Every id that crosses to Kotlin carries
+  the bridge's generation (`ble::tag`); anything that lets an old id reach
+  the new bridge would splice one peer's bytes into another peer's channel.
 - **Packet parsing.** Out-of-bounds reads, integer overflow in length or offset
   arithmetic, extension-header/fragment handling, and checksum logic. Note the
   design intent that non-TCP/UDP/ICMPv6 next-headers are dropped *unparsed*.
@@ -116,3 +133,12 @@ Everything crosses JNI as JSON strings.
   screen says so.
 - An unreachable exit blocks internet traffic rather than falling back to the
   phone's connection. That is the point of selecting one.
+- With Bluetooth on, the phone links to any fips node in range
+  (`auto_connect`), as LAN discovery does on a Wi-Fi. That is the feature.
+  It also means anyone in range who runs fips can tell that this phone does,
+  and learn its npub by connecting, so a known npub can be noticed at a
+  place. Android rotates the Bluetooth address; the npub does not rotate.
+  The setting is off by default and its summary says so.
+- The Bluetooth channels are "insecure" L2CAP (no pairing, no BLE
+  encryption) on purpose: strangers must be able to link, and fips encrypts
+  and authenticates above it.

@@ -210,12 +210,16 @@ fn start_inner(
     }
     // Whatever a previous node left: its slot is not this node's.
     crate::ble::GLOBAL.detach();
+    #[allow(unused_variables)]
+    let has_ble = !fips_config.transports.ble.is_empty();
 
     let mut node = fips::Node::new(fips_config).map_err(|e| format!("node init: {e}"))?;
     // The Bluetooth seam, before start(): the transport is built over this
     // slot, and runs with or without a radio in it (`ble.rs`).
+    // Armed for any Bluetooth transport in the config, so one declared in
+    // `fips_yaml` gets its radio too.
     #[cfg(target_os = "android")]
-    if shim_config.ble {
+    if has_ble {
         let slot = node.enable_app_owned_ble_radio();
         crate::ble::GLOBAL.attach(Arc::new(crate::ble::android::Slot(slot)));
     }

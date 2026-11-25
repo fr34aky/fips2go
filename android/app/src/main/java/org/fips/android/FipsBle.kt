@@ -44,7 +44,9 @@ import kotlin.concurrent.thread
  *   the app is on screen ([foreground]). With a link over Wi-Fi or mobile
  *   data there is nothing to look for, the scanner is off, and no advert
  *   reaches fips, so it makes no Bluetooth link either. Checked every
- *   [POLICY_MS] on a timer that does not run while the phone sleeps.
+ *   [POLICY_MS] on a timer that does not run while the phone sleeps: a scan
+ *   that was running keeps running through sleep, but one that was off is
+ *   only reconsidered when the phone next wakes.
  * - A scan is filtered on the FIPS service UUID and low power, so matching
  *   happens in the Bluetooth controller and this process sleeps until a hit.
  * - Advertising is low power (about one advert a second) for as long as the
@@ -67,6 +69,7 @@ class FipsBle(context: Context) : FipsNative.BleRadio {
     private var advertising = false
     private var scanWanted = false
     private var scanning = false
+    private var scanStarted = 0L
 
     /** Open channels by the id fips gave them. */
     private val channels = ConcurrentHashMap<Long, BluetoothSocket>()
@@ -190,14 +193,28 @@ class FipsBle(context: Context) : FipsNative.BleRadio {
             main.removeCallbacks(this)
             if (closed) return
             val want = synchronized(lock) { scanWanted } && (foreground || !nodeHasLink())
+            // Android turns a scan that has run for 30 minutes into an
+            // "opportunistic" one, which reports nothing unless some other
+            // app happens to scan. A phone with no network for an hour would
+            // stop finding neighbours without a word; start afresh in time.
+            val stale = synchronized(lock) {
+                scanning && SystemClock.elapsedRealtime() - scanStarted > SCAN_RESTART_MS
+            }
+            if (want && stale) setScanning(false)
             setScanning(want)
             // uptimeMillis: this does not fire, or wake anything, in sleep.
             main.postDelayed(this, POLICY_MS)
         }
     }
 
+    /**
+     * The node's own count of links, over any transport. `query`, not
+     * `status()`: that one also wakes the relay-status refresh, which is
+     * meant to run only while someone is looking at the Overview.
+     */
     private fun nodeHasLink(): Boolean = try {
-        (JSONObject(FipsNative.status()).optJSONObject("status")?.optInt("link_count", 0) ?: 0) > 0
+        (JSONObject(FipsNative.query("show_status", ""))
+            .optJSONObject("data")?.optInt("link_count", 0) ?: 0) > 0
     } catch (e: Exception) {
         false
     }
@@ -213,6 +230,7 @@ class FipsBle(context: Context) : FipsNative.BleRadio {
                         .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
                         .build()
                     scanner.startScan(listOf(filter), settings, scanCallback)
+                    scanStarted = SystemClock.elapsedRealtime()
                 } else {
                     scanner.stopScan(scanCallback)
                 }
@@ -292,7 +310,8 @@ class FipsBle(context: Context) : FipsNative.BleRadio {
                 val input = socket.inputStream
                 while (true) {
                     val n = input.read(buf)
-                    if (n < 0 || !FipsNative.bleRecv(chId, buf, n)) break
+                    if (n < 0) break
+                    if (n > 0 && !FipsNative.bleRecv(chId, buf, n)) break
                 }
             } catch (e: IOException) {
                 // the peer left, or the socket was closed under us
@@ -359,6 +378,9 @@ class FipsBle(context: Context) : FipsNative.BleRadio {
 
         /** How often the scan decision is looked at again. */
         private const val POLICY_MS = 30_000L
+
+        /** A running scan is restarted after this long (see [policy]). */
+        private const val SCAN_RESTART_MS = 20 * 60_000L
 
         /** One advert per address is passed to fips at most this often. */
         private const val REPORT_MS = 10_000L

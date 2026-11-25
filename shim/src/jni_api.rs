@@ -491,10 +491,22 @@ pub extern "system" fn Java_org_fips_android_FipsNative_bleRecv(
     data: JByteArray,
     len: jint,
 ) -> jboolean {
-    let Ok(mut bytes) = env.convert_byte_array(&data) else {
+    let len = usize::try_from(len).unwrap_or(0);
+    if len == 0 {
+        // Nothing read. Not passed on: fips reads an empty chunk as the
+        // peer having closed.
+        return guarded(|| false, || crate::ble::GLOBAL.channel_open(ch_id)) as jboolean;
+    }
+    // Only the bytes read, not the whole read buffer (a channel's is as
+    // large as its biggest packet may be, tens of kilobytes).
+    let mut bytes = vec![0i8; len];
+    if env.get_byte_array_region(&data, 0, &mut bytes).is_err() {
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
         return 0;
-    };
-    bytes.truncate(usize::try_from(len).unwrap_or(0));
+    }
+    let bytes: Vec<u8> = bytes.into_iter().map(|b| b as u8).collect();
     guarded(|| false, || crate::ble::GLOBAL.recv(ch_id, &bytes)) as jboolean
 }
 

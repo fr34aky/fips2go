@@ -245,7 +245,7 @@
                     android:text="Bluetooth" />
                 <TextView
                     style="@style/Widget.Fips.Summary"
-                    android:text="Links to fips nodes in Bluetooth range, with no network at all. Slow: enough for messages and names, not for browsing. To save battery it only looks for neighbours while the mesh has no link, or while this app is open; others can always find you. Needs the Nearby devices permission (asked when enabling) and Bluetooth switched on. Requires Android 10+. Reconnect to apply." />
+                    android:text="Links to fips nodes in Bluetooth range, with no network at all. Slow: enough for messages and names, not for browsing. To save battery it only looks for neighbours while the mesh has no link, or while this app is open. While connected, anyone in range who runs fips can see that this phone does too, link to it and learn its npub. Needs the Nearby devices permission (asked when enabling) and Bluetooth switched on. Requires Android 10+. Reconnect to apply." />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
