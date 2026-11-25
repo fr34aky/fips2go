@@ -23,7 +23,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends iproute2 nftables dnsmasq-base socat python3 libnftnl11 libmnl0 libdbus-1-3 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/fips/target/release/fips /src/fips/target/release/fipsctl /usr/local/bin/
-COPY exitctl.py entrypoint.sh /opt/exit/
-RUN chmod 755 /opt/exit/entrypoint.sh /opt/exit/exitctl.py
+COPY exitctl.py advert.py entrypoint.sh /opt/exit/
+RUN chmod 755 /opt/exit/entrypoint.sh /opt/exit/exitctl.py /opt/exit/advert.py
 VOLUME /data
 ENTRYPOINT ["/opt/exit/entrypoint.sh"]

@@ -302,6 +302,13 @@ class FipsConfig(unittest.TestCase):
 
 
 
+
+class FipsYamlDns(unittest.TestCase):
+    def test_the_resolver_is_off_unless_asked_for(self):
+        self.assertIn("dns:\n  enabled: false\n", x.fips_yaml([]))
+        self.assertIn("dns:\n  enabled: true\n", x.fips_yaml([], dns=True))
+
+
 class OpenMode(unittest.TestCase):
     """OPEN=1: anyone on the mesh may become a client, for internet only."""
 

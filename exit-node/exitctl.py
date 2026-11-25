@@ -16,7 +16,7 @@ system — every subcommand prints, so all of it can be tested.
                                           drop now, and the new state (stdout)
     exitctl.py nft-public-ip [ADDR..]     nft script that swaps the blocked
                                           public addresses (stdout)
-    exitctl.py fips-yaml PEERS            the fips daemon config (stdout)
+    exitctl.py fips-yaml [--dns] PEERS    the fips daemon config (stdout)
 
 Addresses (the contract with the phone, shim/src/exit.rs `inner_ipv4`):
 
@@ -545,10 +545,12 @@ def parse_peer(spec: str):
     return m.group(1), m.group(2)
 
 
-def fips_yaml(peer_specs):
+def fips_yaml(peer_specs, dns=False):
     """The daemon config. Identity persists in fips.key next to this file;
     the TUN is fips0; fips's own .fips DNS responder is off (the exit runs
-    dnsmasq for its clients). Values are validated, then quoted."""
+    dnsmasq for its clients) unless `dns` asks for it: then it listens on
+    loopback only ([::1]:5354, fips's default), for the advert publisher to
+    look up a relay on the mesh. Values are validated, then quoted."""
     peers = [parse_peer(s) for s in peer_specs]
     lines = [
         "node:",
@@ -559,7 +561,7 @@ def fips_yaml(peer_specs):
         "  name: fips0",
         "  mtu: 1280",
         "dns:",
-        "  enabled: false",
+        f"  enabled: {'true' if dns else 'false'}",
         "transports:",
         "  udp:",
         '    bind_addr: "0.0.0.0:2121"',
@@ -637,11 +639,14 @@ def main(argv):
         elif cmd == "nft-public-ip":
             sys.stdout.write(nft_public_ip(args))
         elif cmd == "fips-yaml":
+            dns = bool(args) and args[0] == "--dns"
+            if dns:
+                args = args[1:]
             spec = args[0].strip() if args else ""
             # Empty: the app's default bootstrap servers. "none": no
             # static peers (others dial in, e.g. the e2e test's nodes).
             specs = [] if spec == "none" else _split_specs(spec) if spec else DEFAULT_PEERS
-            sys.stdout.write(fips_yaml(specs))
+            sys.stdout.write(fips_yaml(specs, dns=dns))
         else:
             print(f"unknown command: {cmd}", file=sys.stderr)
             return 2
