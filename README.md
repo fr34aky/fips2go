@@ -63,7 +63,8 @@ usable on a device you also use for everything else.
   node you trust instead of the phone's own connection, like a VPN server
   (Overview → *Internet route*). The exit is a Docker container
   ([`exit-node/`](exit-node/README.md)) that serves only the npubs on its
-  allow-list. Their DNS goes to the exit's resolver and nowhere else, and if
+  allow-list. It can also be run open, for any fips node
+  (internet access only; the operator's choice). Their DNS goes to the exit's resolver and nowhere else, and if
   the exit cannot be reached, traffic is blocked rather than sent out through
   the phone. IPv4 only: IPv6 internet traffic is refused at once, so apps
   fall back to IPv4. Mesh traffic never goes through the exit. The same

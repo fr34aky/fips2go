@@ -25,6 +25,13 @@ services:
       # bootstrap servers the app uses, so phones with default settings
       # find this exit.
       # FIPS_PEERS: "npub1...@host:2121"
+      # Open mode: serve ANY fips node, not only the allow-list, for
+      # internet and DNS (never the PUBLISHed services). Strangers' traffic
+      # then leaves from your address. Read README.md, "Open mode", first.
+      # OPEN: "1"
+      # OPEN_MAX_CLIENTS: "64"         # open clients at once
+      # OPEN_IDLE_SECS: "600"          # an open client silent this long is dropped
+      # OPEN_BLOCK_TCP_PORTS: "25"     # ports open clients may not connect to ("" = none)
       # Extra destinations clients may never reach. Private ranges and this
       # network's public address (below) are always blocked.
       # BLOCK_CIDRS: "203.0.113.7/32"

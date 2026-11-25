@@ -6,7 +6,8 @@ Phones select it under Overview → *Internet route*. It can also make chosen
 services on your LAN, such as a NAS's web page, reachable to those phones over
 the mesh, with no port opened on your router ([Publishing
 services](#publishing-services)). Nobody else on
-the fips mesh can use it.
+the fips mesh can use it — unless you switch on [open mode](#open-mode), which
+gives internet access (only that) to any fips node.
 
 ## Running it
 
@@ -33,7 +34,44 @@ npub and every phone has to be told. Back it up with
 Settings are environment variables in `compose.yaml`: `ALLOWED_NPUBS`,
 `FIPS_PEERS` (default: the public bootstrap servers the app uses), `WAN_IFACE`,
 `BLOCK_CIDRS` (extra destinations clients may never reach), `DNS_UPSTREAMS`,
-`PUBLISH` and `PUBLIC_IP_LOOKUP` / `PUBLIC_IP_INTERVAL` (both below).
+`PUBLISH`, `PUBLIC_IP_LOOKUP` / `PUBLIC_IP_INTERVAL` and `OPEN` with its
+limits (all below).
+
+## Open mode
+
+By default the exit serves only the npubs on its allow-list. With `OPEN: "1"`
+it serves **any fips node**: whoever sends it traffic becomes a client, with
+nothing to arrange. That is what makes an exit usable by people you have
+never met, and it is also the reason to think before switching it on:
+
+- **Strangers' traffic leaves from your address.** What they do with it is
+  attributed to your connection. Run an open exit where that is acceptable (a
+  hosted server, not your home line), and know your provider's terms.
+- An open client gets **internet and DNS, nothing else**. The `PUBLISH`ed
+  services stay with the allow-list, private ranges and this network's public
+  address stay blocked, and a client can still only send from its own inner
+  address.
+- TCP port 25 is refused for open clients (`OPEN_BLOCK_TCP_PORTS`, default
+  `25`): nobody sends server-to-server mail from a phone, and every spammer
+  does from an open exit. List more ports there, or `""` for none.
+- At most `OPEN_MAX_CLIENTS` (default 64) open clients at once. One that sends
+  nothing for `OPEN_IDLE_SECS` (default 600) is dropped and simply admitted
+  again when it next sends. A full exit refuses newcomers until someone goes
+  idle; anyone able to make 64 fips identities can fill it, so an open exit
+  is a best-effort service.
+- There is no per-client bandwidth limit. If you need one, shape the
+  container's traffic on the host.
+- The allow-list still works alongside: listed npubs are always served, are
+  not counted against the limit, and are the only ones that reach `PUBLISH`.
+  With `OPEN: "1"` the list may be empty.
+
+How it works: the firewall notes the fips address of a first packet (a tunnel
+packet or a DNS query) in a set, a loop in the entrypoint builds that
+client's tunnel — the inner address follows from the fips address, so there
+is still nothing to negotiate — and only then lets its traffic in. The first
+packet or two are lost while that happens (about two seconds); TCP retries.
+DNS is answered for the whole mesh in this mode, limited to 20 queries a
+second per address.
 
 ## This network's public address
 
@@ -110,6 +148,10 @@ address therefore came from the holder of that npub's secret key.
 
 On that, the exit puts several independent locks, so one mistake does not open
 it:
+
+The locks below describe the default, allow-list only. [Open mode](#open-mode)
+replaces 1 and 3 for internet access (anyone may knock, and a tunnel is built
+per admitted client) and leaves the rest standing.
 
 1. **Allow-list, checked strictly.** Every non-comment line must be a valid
    npub (checksum included); one bad line stops the container rather than
