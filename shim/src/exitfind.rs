@@ -225,6 +225,42 @@ pub fn find(
     })
 }
 
+/// The tags an advert has. Nothing else of an event is kept.
+const TAGS: [&str; 6] = ["d", "v", "access", "name", "about", "expiration"];
+/// A tag value is cut here before anything looks at it (the longest real
+/// one, `about`, is 200 characters; [`tidy`] does the exact trimming).
+const MAX_TAG_BYTES: usize = 1024;
+/// Events read from the relays in one search, all relays together.
+const MAX_EVENTS: usize = 2000;
+
+/// What [`advert_of`] needs of a received event, and nothing more. `None`
+/// when the signature does not verify: the pool checks too, but an advert is
+/// only its signature, so this is the line that must not be lost.
+fn raw_of(event: &Event) -> Option<Raw> {
+    event.verify().ok()?;
+    let mut tags: Vec<Vec<String>> = Vec::with_capacity(TAGS.len());
+    for tag in event.tags.iter() {
+        let [name, value, ..] = tag.as_slice() else {
+            continue;
+        };
+        // The first of each name, as `advert_of` reads them.
+        if !TAGS.contains(&name.as_str()) || tags.iter().any(|t| &t[0] == name) {
+            continue;
+        }
+        let mut end = value.len().min(MAX_TAG_BYTES);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        tags.push(vec![name.clone(), value[..end].to_string()]);
+    }
+    Some(Raw {
+        npub: event.pubkey.to_bech32().ok()?,
+        kind: event.kind.as_u16(),
+        created_at: event.created_at.as_secs(),
+        tags,
+    })
+}
+
 async fn fetch(urls: &[String], timeout: Duration) -> Vec<Raw> {
     let client = Client::default();
     for url in urls {
@@ -241,27 +277,25 @@ async fn fetch(urls: &[String], timeout: Duration) -> Vec<Raw> {
         // More than is shown: several relays hold the same adverts, and
         // expired ones are still stored by relays that ignore NIP-40.
         .limit(MAX_ADVERTS * 4);
-    let events = match client.fetch_events(filter, timeout).await {
-        Ok(events) => events,
-        Err(e) => {
-            tracing::debug!(error = %e, "no exit adverts fetched");
-            Events::default()
+    // Streamed, so the count is ours to bound: the library limits a
+    // message's size, not how many a relay sends. Each event is reduced at
+    // once to the few short tags an advert has ([`raw_of`]), so what a relay
+    // can make this hold is `MAX_EVENTS` small records, whatever it sends.
+    let mut raws = Vec::new();
+    match client.stream_events(filter, timeout).await {
+        Ok(mut stream) => {
+            while let Some(event) = stream.next().await {
+                if let Some(raw) = raw_of(&event) {
+                    raws.push(raw);
+                }
+                if raws.len() >= MAX_EVENTS {
+                    tracing::debug!("stopped reading exit adverts at the limit");
+                    break;
+                }
+            }
         }
-    };
-    let raws = events
-        .into_iter()
-        // The pool verifies; this is the line that must not be lost if that
-        // ever changes: an advert is only its signature.
-        .filter(|e| e.verify().is_ok())
-        .filter_map(|e| {
-            Some(Raw {
-                npub: e.pubkey.to_bech32().ok()?,
-                kind: e.kind.as_u16(),
-                created_at: e.created_at.as_secs(),
-                tags: e.tags.iter().map(|t| t.as_slice().to_vec()).collect(),
-            })
-        })
-        .collect();
+        Err(e) => tracing::debug!(error = %e, "no exit adverts fetched"),
+    }
     client.shutdown().await;
     raws
 }
@@ -400,6 +434,35 @@ mod tests {
         let list = select(&raws, ME, NOW);
         let names: Vec<&str> = list.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["c", "b", "new a"]);
+    }
+
+    /// Of a received event only an advert's own tags are kept, the first of
+    /// each, cut to a bound: whatever a relay sends, a record stays small.
+    #[test]
+    fn only_an_adverts_tags_are_kept_and_they_are_bounded() {
+        let keys = Keys::generate();
+        let long = "é".repeat(4000);
+        let event = EventBuilder::new(Kind::from(KIND), "ignored content")
+            .tags([
+                Tag::identifier(D_TAG),
+                Tag::parse(["v", "1"]).unwrap(),
+                Tag::parse(["access", "open"]).unwrap(),
+                Tag::parse(["access", "allow-list"]).unwrap(),
+                Tag::parse(["about", long.as_str()]).unwrap(),
+                Tag::parse(["p", "something else entirely"]).unwrap(),
+                Tag::parse(["lonely"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let raw = raw_of(&event).unwrap();
+        assert_eq!(raw.npub, keys.public_key().to_bech32().unwrap());
+        assert_eq!(raw.kind, KIND);
+        let names: Vec<&str> = raw.tags.iter().map(|t| t[0].as_str()).collect();
+        assert_eq!(names, ["d", "v", "access", "about"]);
+        assert_eq!(raw.tags[2][1], "open", "the first of a repeated tag");
+        let about = &raw.tags[3][1];
+        assert!(about.len() <= MAX_TAG_BYTES && about.len() > MAX_TAG_BYTES - 4);
+        assert!(about.chars().all(|c| c == 'é'), "cut on a character boundary");
     }
 
     /// Against a real relay holding adverts from `exit-node/advert.py`: set

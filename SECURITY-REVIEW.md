@@ -72,7 +72,10 @@ Everything crosses JNI as JSON strings.
    the Internet route screen): events fetched in `shim/src/exitfind.rs` from
    the mesh relays and, while online, the public ones. Anyone can publish
    one. The signature makes the author the exit it names and nothing more;
-   name, note and "open" are the author's claims. Each event is checked for
+   name, note and "open" are the author's claims. Events are read as a
+   stream, reduced at once to an advert's six short tags, and no more than
+   2000 are read in one search, so a relay cannot decide how much the phone
+   holds. Each event is checked for
    kind, marker, contract version, access word and validity window, the two
    text fields are reduced to one printable line each (no control or
    bidi-formatting characters, 40 / 200 characters), and at most 100 are
