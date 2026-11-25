@@ -289,6 +289,20 @@ pub extern "system" fn Java_org_fips_android_FipsNative_query(
     to_jstring(&env, &json)
 }
 
+/// `exitProbe(timeoutMs)` → JSON, see [`crate::engine::exit_probe_json`].
+/// Blocking (up to twice the timeout); call off the main thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_fips_android_FipsNative_exitProbe(
+    env: JNIEnv,
+    _class: JClass,
+    timeout_ms: jint,
+) -> jstring {
+    let timeout = std::time::Duration::from_millis(timeout_ms.clamp(500, 10_000) as u64);
+    let json = std::panic::catch_unwind(|| crate::engine::exit_probe_json(timeout))
+        .unwrap_or_else(|_| serde_json::json!({ "error": "panic in exitProbe" }).to_string());
+    to_jstring(&env, &json)
+}
+
 /// `findExits(timeoutMs)` → JSON, see [`crate::engine::find_exits_json`].
 /// Blocking; call off the main thread.
 #[unsafe(no_mangle)]
