@@ -821,6 +821,44 @@ pub fn connect_peer_json(npub: &str, address: &str) -> String {
     }
 }
 
+/// Look for exit adverts on the relays (see [`crate::exitfind`]). Blocking,
+/// up to about `timeout` — call off the UI thread; the `ENGINE` lock is not
+/// held while searching. Answers `{"exits": [{npub, name, about, access,
+/// created_at, expires}], "mesh_relays": n, "public_relays": n}` or
+/// `{"error": "..."}`.
+pub fn find_exits_json(timeout: Duration) -> String {
+    let error = |message: String| serde_json::json!({ "error": message }).to_string();
+    let Some((link, config_json, own_npub)) = lock(&ENGINE)
+        .as_ref()
+        .map(|e| (e.mesh.clone(), e.config_json.clone(), e.npub.clone()))
+    else {
+        return error("not connected".into());
+    };
+    let config = match ShimConfig::from_json(&config_json) {
+        Ok(c) => c,
+        Err(e) => return error(e),
+    };
+    // The same public relays the names resolver uses: the user's list, or
+    // the library's defaults.
+    let public = if config.nostr_relays.is_empty() {
+        pubdom_resolve::ResolverConfig::default().public_relays
+    } else {
+        config.nostr_relays.clone()
+    };
+    let online = INTERNET_VALIDATED.load(Ordering::SeqCst);
+    match crate::exitfind::find(
+        &link,
+        &config.names_mesh_relays,
+        &public,
+        online,
+        &own_npub,
+        timeout,
+    ) {
+        Ok(found) => serde_json::to_string(&found).unwrap_or_else(|e| error(e.to_string())),
+        Err(e) => error(e),
+    }
+}
+
 /// `GET http://[<npub's address>]:<port><path>` over the mesh, from inside
 /// the process (see [`crate::meshhttp`]). Blocking — call off the UI thread;
 /// the `ENGINE` lock is not held while fetching. `headers_json` is an object

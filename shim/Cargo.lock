@@ -1194,6 +1194,7 @@ dependencies = [
  "ipstack",
  "jni 0.21.1",
  "libc",
+ "nostr-sdk",
  "pubdom-core",
  "pubdom-resolve",
  "serde",

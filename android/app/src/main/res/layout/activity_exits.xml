@@ -121,6 +121,42 @@
             <TextView
                 style="@style/SettingsHeader"
                 android:layout_marginTop="16dp"
+                android:text="Find exit nodes" />
+
+            <TextView
+                style="@style/Widget.Fips.Summary"
+                android:layout_marginTop="0dp"
+                android:text="Exits can announce themselves on Nostr. Searching asks the mesh relays from Settings and, while you are online, the public relays — which then know this phone looked for an exit. What an exit says about itself is its operator's word; adding one does not select it." />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/exit_find"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Search" />
+
+            <TextView
+                android:id="@+id/exit_find_status"
+                style="@style/Widget.Fips.Summary"
+                android:visibility="gone" />
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/exit_found_card"
+                style="@style/Widget.Fips.Card"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/exit_found"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingVertical="4dp" />
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView
+                style="@style/SettingsHeader"
+                android:layout_marginTop="16dp"
                 android:text="This phone" />
 
             <com.google.android.material.card.MaterialCardView
@@ -135,7 +171,7 @@
                     <TextView
                         style="@style/Widget.Fips.Summary"
                         android:layout_marginTop="0dp"
-                        android:text="An exit only carries traffic for npubs its operator has allowed. Send them this one:" />
+                        android:text="An exit that is not open only carries traffic for npubs its operator has allowed. Send them this one:" />
 
                     <TextView
                         android:id="@+id/exit_own_npub"

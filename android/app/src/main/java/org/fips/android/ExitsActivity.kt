@@ -12,6 +12,7 @@ import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputLayout
 import org.json.JSONObject
+import kotlin.concurrent.thread
 import org.fips.android.ConfigStore as CS
 
 /**
@@ -29,6 +30,10 @@ class ExitsActivity : AppCompatActivity() {
 
     /** The exit npub the running node was given (null = the phone). */
     private var appliedExit: String? = null
+
+    /** The last search's answer ([FipsNative.findExits]), kept across a rotation. */
+    private var foundJson: String? = null
+    @Volatile private var searching = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,7 +67,119 @@ class ExitsActivity : AppCompatActivity() {
             if (action == EditorInfo.IME_ACTION_DONE) add()
             action == EditorInfo.IME_ACTION_DONE
         }
+        foundJson = savedInstanceState?.getString(STATE_FOUND)
+        findViewById<MaterialButton>(R.id.exit_find).setOnClickListener { search() }
         render()
+        renderFound()
+    }
+
+    /**
+     * Ask the relays for exit adverts (`shim/src/exitfind.rs`). Only ever
+     * from this button: the search tells a public relay that this phone is
+     * looking for an exit.
+     */
+    private fun search() {
+        if (searching) return
+        val status = findViewById<TextView>(R.id.exit_find_status)
+        if (!FipsNative.isRunning()) {
+            status.text = "Connect to the mesh first: the search runs through the node."
+            status.visibility = View.VISIBLE
+            return
+        }
+        searching = true
+        findViewById<MaterialButton>(R.id.exit_find).isEnabled = false
+        status.text = "Searching…"
+        status.visibility = View.VISIBLE
+        thread(name = "fips-find-exits") {
+            val json = try {
+                FipsNative.findExits(SEARCH_MS)
+            } catch (e: Throwable) {
+                JSONObject().put("error", e.toString()).toString()
+            }
+            runOnUiThread {
+                searching = false
+                foundJson = json
+                if (!isFinishing && !isDestroyed) {
+                    findViewById<MaterialButton>(R.id.exit_find).isEnabled = true
+                    renderFound()
+                }
+            }
+        }
+    }
+
+    /** Show [foundJson]: the adverts, or why there are none. */
+    private fun renderFound() {
+        val status = findViewById<TextView>(R.id.exit_find_status)
+        val card = findViewById<View>(R.id.exit_found_card)
+        val list = findViewById<LinearLayout>(R.id.exit_found)
+        list.removeAllViews()
+        val found = try {
+            foundJson?.let { JSONObject(it) }
+        } catch (e: Exception) {
+            null
+        }
+        if (found == null) {
+            card.visibility = View.GONE
+            if (!searching) status.visibility = View.GONE
+            return
+        }
+        val exits = found.optJSONArray("exits")
+        val meshRelays = found.optInt("mesh_relays")
+        val publicRelays = found.optInt("public_relays")
+        status.visibility = View.VISIBLE
+        status.text = when {
+            found.has("error") -> "Search failed: ${found.optString("error")}"
+            meshRelays + publicRelays == 0 ->
+                "No relay to ask. This phone has no internet right now and no mesh relay is " +
+                    "set: add one under Settings → Mesh relays for public names."
+            exits == null || exits.length() == 0 ->
+                "No exit is advertising on the ${relayCount(meshRelays, publicRelays)} asked."
+            else -> "${exits.length()} found on the ${relayCount(meshRelays, publicRelays)} asked."
+        }
+        if (exits == null || exits.length() == 0) {
+            card.visibility = View.GONE
+            return
+        }
+        card.visibility = View.VISIBLE
+        val ownNpub = ownNpub()
+        for (i in 0 until exits.length()) {
+            val exit = exits.optJSONObject(i) ?: continue
+            val npub = exit.optString("npub")
+            val name = exit.optString("name")
+            val open = exit.optString("access") == "open"
+            val v = layoutInflater.inflate(R.layout.item_found_exit, list, false)
+            v.findViewById<TextView>(R.id.found_title).text =
+                name.ifEmpty { CS.exitLabel(CS.ExitNode("", npub)) }
+            v.findViewById<TextView>(R.id.found_access).text = if (open) {
+                "Says it is open to anyone"
+            } else {
+                "Allow-list: its operator has to add this phone's npub"
+            }
+            v.findViewById<TextView>(R.id.found_about).apply {
+                text = exit.optString("about")
+                visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+            }
+            v.findViewById<TextView>(R.id.found_npub).text = npub
+            val add = v.findViewById<MaterialButton>(R.id.found_add)
+            val known = CS.exitNodes(this).any { it.npub == npub }
+            add.isEnabled = !known
+            add.text = if (known) "Added" else "Add"
+            add.contentDescription = "Add ${name.ifEmpty { npub }}"
+            add.setOnClickListener {
+                // Adds to the list above; choosing it stays a separate tap.
+                val error = addExit(name, npub, ownNpub)
+                if (error != null) Ui.snack(it, error) else renderFound()
+            }
+            list.addView(v)
+        }
+    }
+
+    private fun relayCount(mesh: Int, public: Int): String {
+        val parts = listOfNotNull(
+            mesh.takeIf { it > 0 }?.let { "$it mesh relay${if (it == 1) "" else "s"}" },
+            public.takeIf { it > 0 }?.let { "$it public relay${if (it == 1) "" else "s"}" },
+        )
+        return parts.joinToString(" and ")
     }
 
     private fun ownNpub(): String = try {
@@ -121,6 +238,8 @@ class ExitsActivity : AppCompatActivity() {
             }
         }
         updateHint()
+        // An exit removed above can be added again from the list below.
+        if (foundJson != null) renderFound()
     }
 
     private fun updateHint() {
@@ -137,6 +256,7 @@ class ExitsActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString(STATE_APPLIED, appliedExit)
+        outState.putString(STATE_FOUND, foundJson)
     }
 
     /** onPause: still in the foreground, so startService is legal; see RelaysActivity. */
@@ -151,5 +271,7 @@ class ExitsActivity : AppCompatActivity() {
 
     private companion object {
         const val STATE_APPLIED = "applied_exit"
+        const val STATE_FOUND = "found_exits"
+        const val SEARCH_MS = 8000
     }
 }

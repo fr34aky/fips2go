@@ -99,6 +99,17 @@ object FipsNative {
         npub: String, port: Int, path: String, headersJson: String, timeoutMs: Int,
     ): String
 
+    /**
+     * Look for exits that advertise themselves on Nostr (`exitfind.rs`): the
+     * mesh relays from Settings and, while online, the public relays.
+     * Returns `{"exits": [{npub, name, about, access, created_at, expires}],
+     * "mesh_relays": n, "public_relays": n}` or `{"error": "..."}`. `access`
+     * is `open` or `allow-list`; `name` and `about` are the operator's own
+     * words, already reduced to one printable line each. Blocking (up to
+     * about [timeoutMs]) — call off the main thread.
+     */
+    external fun findExits(timeoutMs: Int): String
+
     /** The most recent node log lines (newline-joined). */
     external fun recentLogs(maxLines: Int): String
 
