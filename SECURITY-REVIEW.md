@@ -127,9 +127,8 @@ Everything crosses JNI as JSON strings.
   mutating commands (`connect`, `disconnect`) as well as queries. Only the
   app's private directory keeps other UIDs out. Flag anything that moves it
   to a shared location, widens the directory's permissions, or lets text
-  from outside the app choose the command sent (`control.rs` sends only
-  `show_*` for a query, and `connect` with an npub and address from the
-  node's own mDNS sightings).
+  from outside the app choose the command sent (the shim sends only
+  `connect`, with an npub and address from the node's own mDNS sightings).
 - **Updater integrity.** `Updater.kt` must verify the downloaded APK against
   the release `.sha256` before handing it to the package installer, and must
   not fall back to installing an unverified file.
@@ -150,8 +149,9 @@ Everything crosses JNI as JSON strings.
   such a peer sent from inside `start` is lost and the link comes up on fips's
   retry.
 - The node's control socket is on, in the app's private directory. It is the
-  interface upstream fips offers for reading node state; the app used a
-  fork-only in-process handle before.
+  interface upstream fips offers for sending a running node a command; the
+  app uses it for Diagnostics' manual connect and for nothing else (status
+  is read in process).
 - The inbound firewall's default allowlist is empty and fips needs no inbound
   TUN ports; that is intentional, not a misconfiguration.
 - `enable_nostr` and the in-app `.fips` resolver are hardcoded on.

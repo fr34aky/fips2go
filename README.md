@@ -140,7 +140,8 @@ usable on a device you also use for everything else.
 
 Standalone repo — it depends on fips as a pinned **git dependency**
 (`fr34aky/fips` @ `android-hooks`: upstream fips plus a few additions it
-does not have yet — the `show_lan_peers` mDNS-sightings query, keeping
+does not have yet — a public read handle for node status, the
+`show_lan_peers` mDNS-sightings query, keeping
 tunnel addresses out of mDNS adverts, dial-scoped UDP instances sharing a
 port for the hotspot, the relay pool's connection state, and a ceiling on
 peers dialed from Nostr adverts), so it clones and builds without a sibling
@@ -451,10 +452,10 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   claimed so IPv6 internet traffic is refused inside the tunnel rather than
   leaking around the exit. Switching exits while connected keeps the node
   running.
-- **Status**: `FipsNative.status()`/`query()` ask the node over its control
-  socket (a file in the app's private directory) — same data as
-  `fipsctl show_*`. A poller is answered at once from the last reply, which
-  is refreshed behind it.
+- **Status**: `FipsNative.status()`/`query()` are served lock-free from the
+  node's `ControlReadHandle` snapshots — same data as `fipsctl show_*`.
+  Diagnostics' manual connect is the one thing sent over the node's control
+  socket (a file in the app's private directory).
 
 ## Status / caveats
 

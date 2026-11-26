@@ -73,11 +73,7 @@ object FipsNative {
      */
     external fun status(): String
 
-    /**
-     * Any `show_*` query, e.g. `query("show_peers", "")`. Asked again within a
-     * few seconds it answers at once from the last reply; otherwise it waits
-     * for the node, up to a second.
-     */
+    /** Any snapshot-served `show_*` query, e.g. `query("show_peers", "")`. */
     external fun query(command: String, paramsJson: String): String
 
     /**

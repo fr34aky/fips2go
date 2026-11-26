@@ -127,7 +127,7 @@ pub struct ShimConfig {
     #[serde(default)]
     pub hosts_path: Option<String>,
     /// Where the node binds its control socket, the Unix socket the shim
-    /// reads node state through (`control.rs`): a file in the app's private
+    /// sends it commands through (`control.rs`): a file in the app's private
     /// directory. Unset, the engine picks one in the system's temporary
     /// directory, which an Android app cannot write to.
     #[serde(default)]

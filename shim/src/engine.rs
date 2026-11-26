@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use crate::SocketProtect;
 use crate::config::ShimConfig;
-use crate::control::{Cached, Control};
+use crate::control::Control;
+use fips::control::read_handle::ControlReadHandle;
 use crate::dns::DnsProxy;
 use crate::forward::Forwarder;
 use crate::pump::{Pump, PumpConfig};
@@ -23,10 +24,7 @@ const FORWARD_MTU: u16 = 1280;
 
 /// How long `start()` waits for the node to reach a started state.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long `start()` then waits for the node's control socket, which the
-/// node binds on a task of its own once its rx loop runs. Milliseconds in
-/// practice; past this the engine runs with no node status to show.
-const CONTROL_WAIT: Duration = Duration::from_secs(2);
+
 /// The in-process FIPS DNS responder (`dns.enabled` default bind).
 const LOCAL_RESPONDER: &str = "[::1]:5354";
 
@@ -133,10 +131,13 @@ struct Engine {
     node_thread: Option<std::thread::JoinHandle<()>>,
     pump: Option<Pump>,
     forwarder: Option<Forwarder>,
-    /// The node's control socket: every `show_*` query (answered from the
-    /// last reply, see [`Cached`]: Kotlin polls on its main thread), and the
-    /// `connect` command (Diagnostics' manual dial of mDNS-seen peers).
-    control: Arc<Cached>,
+    /// Node state, read from memory: status and every `show_*` query, which
+    /// Kotlin polls on its main thread. The one hook the fips fork still
+    /// carries for the shim's own sake (upstream keeps this handle private).
+    read_handle: ControlReadHandle,
+    /// The node's control socket, for the `connect` command (Diagnostics'
+    /// manual dial of mDNS-seen peers): a command has to reach the rx loop.
+    control: Arc<Control>,
     npub: String,
     address: String,
     /// Our dup of the VpnService TUN fd; closed after the pump joins.
@@ -233,7 +234,7 @@ fn start_inner(
     #[allow(unused_variables)]
     let has_ble = !fips_config.transports.ble.is_empty();
 
-    // The control socket is how the shim asks the running node anything.
+    // The control socket is how the shim sends the running node a command.
     let control = Arc::new(Control::new(
         shim_config
             .control_path
@@ -242,7 +243,6 @@ fn start_inner(
     ));
     fips_config.node.control.enabled = true;
     fips_config.node.control.socket_path = control.path().to_string_lossy().into_owned();
-    let control = Arc::new(Cached::new(control));
 
     let mut node = fips::Node::new(fips_config).map_err(|e| format!("node init: {e}"))?;
     // The Bluetooth seam, before start(): the transport is built over this
@@ -272,6 +272,7 @@ fn start_inner(
     // the hole-punch sockets a traversed link runs over) are not announced
     // and for the same reason need not be.
     let udp_sockets = node.enable_app_owned_udp_fd();
+    let read_handle = node.control_read_handle();
     let node_protect = protect.clone();
     let netmon = node.netmon_trigger();
 
@@ -370,19 +371,19 @@ fn start_inner(
             let _ = node_thread.join();
             return Err(e);
         }
-        Err(RecvTimeoutError::Timeout) => return Err("node start timed out".into()),
+        Err(RecvTimeoutError::Timeout) => {
+            // Not joined (it may never return), but told to stop: a start
+            // that completes late must not leave a node running, holding
+            // the control socket and the DNS port of the next one.
+            let _ = stop_tx.send(());
+            return Err("node start timed out".into());
+        }
         Err(RecvTimeoutError::Disconnected) => {
             let _ = node_thread.join();
             return Err("node thread died during start".into());
         }
     }
     let processor = crate::meshout::MeshOut::new(*our_fips_addr.as_bytes());
-    if !control.wait_ready(CONTROL_WAIT) {
-        tracing::warn!(
-            path = %control.control().path().display(),
-            "node control socket did not come up: no node status, no queries"
-        );
-    }
 
     // Own a dup of the fd so Kotlin's ParcelFileDescriptor lifetime and ours
     // are independent.
@@ -523,6 +524,7 @@ fn start_inner(
         node_thread,
         pump: Some(pump),
         forwarder,
+        read_handle,
         control,
         npub: npub.clone(),
         address: address.clone(),
@@ -812,50 +814,39 @@ pub fn names_online(validated: bool) {
     }
 }
 
-/// Compact status JSON for the UI. Always answers, running or not, and
-/// without waiting for the node once it has answered a first time. `relays`
-/// lists the Nostr relay pool with per-relay connection state (empty when
-/// Nostr is off or the node has not published a snapshot yet); each call
-/// also asks the node runtime for a fresh snapshot, served by the next call.
+/// Compact status JSON for the UI. Always answers, running or not, from
+/// memory: Kotlin calls this on its main thread. `relays` lists the Nostr
+/// relay pool with per-relay connection state (empty when Nostr is off or
+/// the node has not published a snapshot yet); each call also asks the node
+/// runtime for a fresh snapshot, served by the next call.
 pub fn status_json() -> String {
-    // The node is asked with the `ENGINE` lock released: the answer comes
-    // over its control socket, and a stop must not wait behind that.
-    let (mut value, control) = {
-        let slot = lock(&ENGINE);
-        let Some(engine) = slot.as_ref() else {
-            return serde_json::json!({ "running": false }).to_string();
-        };
-        engine.relay_refresh.notify_one();
-        let value = serde_json::json!({
+    let slot = lock(&ENGINE);
+    let value = match slot.as_ref() {
+        None => serde_json::json!({ "running": false }),
+        Some(engine) => serde_json::json!({
             "running": true,
             "npub": engine.npub,
             "address": engine.address,
+            "status": engine.read_handle.query("show_status", None)
+                .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take)),
             "relays": lock(&engine.relay_status).clone(),
             "exit": engine.exit.selected().map(|npub| serde_json::json!({
                 "npub": npub,
                 "inner_ipv4": engine.exit.inner().to_string(),
             })),
-        });
-        (value, engine.control.clone())
+        }),
     };
-    // The last answer at once, refreshed for the next poll. A node that
-    // never answered (its control socket did not come up) is still a
-    // running node: an empty status, which the Overview shows as connected
-    // with no figures, not null, which it shows as still starting.
-    value["status"] = control
-        .query("show_status", None)
-        .ok()
-        .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take))
-        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(engine) = slot.as_ref() {
+        engine.relay_refresh.notify_one();
+    }
     value.to_string()
 }
 
-/// Generic read-only query passthrough (any `show_*`). A query asked within
-/// the last few seconds is answered at once from the last reply and
-/// refreshed behind it; otherwise it waits for the node, up to
-/// [`crate::control::QUERY_TIMEOUT`]. The `ENGINE` lock is not held meanwhile.
+/// Generic read-only query passthrough (any snapshot-served `show_*`), from
+/// memory like [`status_json`].
 pub fn query_json(command: &str, params_json: &str) -> String {
-    let Some(control) = lock(&ENGINE).as_ref().map(|e| e.control.clone()) else {
+    let slot = lock(&ENGINE);
+    let Some(engine) = slot.as_ref() else {
         return r#"{"status":"error","message":"not running"}"#.to_string();
     };
     let params = if params_json.trim().is_empty() {
@@ -872,9 +863,13 @@ pub fn query_json(command: &str, params_json: &str) -> String {
             }
         }
     };
-    match control.query(command, params) {
-        Ok(response) => response.to_string(),
-        Err(e) => serde_json::json!({ "status": "error", "message": e }).to_string(),
+    match engine.read_handle.query(command, params) {
+        Some(response) => response.to_string(),
+        None => serde_json::json!({
+            "status": "error",
+            "message": format!("unknown or non-snapshot command: {command}"),
+        })
+        .to_string(),
     }
 }
 
@@ -893,10 +888,7 @@ pub fn connect_peer_json(npub: &str, address: &str) -> String {
         "address": address,
         "transport": "udp",
     });
-    match handle
-        .control()
-        .request("connect", Some(params), crate::control::COMMAND_TIMEOUT)
-    {
+    match handle.request("connect", Some(params), crate::control::COMMAND_TIMEOUT) {
         Ok(response) => response.to_string(),
         Err(e) => serde_json::json!({ "status": "error", "message": e }).to_string(),
     }
