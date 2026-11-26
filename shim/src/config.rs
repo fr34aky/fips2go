@@ -126,6 +126,12 @@ pub struct ShimConfig {
     /// changes: an edit takes effect on the next query, no node restart.
     #[serde(default)]
     pub hosts_path: Option<String>,
+    /// Where the node binds its control socket, the Unix socket the shim
+    /// reads node state through (`control.rs`): a file in the app's private
+    /// directory. Unset, the engine picks one in the system's temporary
+    /// directory, which an Android app cannot write to.
+    #[serde(default)]
+    pub control_path: Option<String>,
     /// Public domain names over fips (`names.rs`): the app-private pin file
     /// (`domain → server npub`, JSON, same schema as the desktop daemon's).
     /// Set = the feature is on; the file is created on the first verified
@@ -173,7 +179,7 @@ pub struct ShimConfig {
     /// Advanced: a full `fips.yaml`. When non-empty it becomes the base
     /// `fips::Config` (all fips parameters — transports, node.*, rendezvous,
     /// dns, lookup, …); the shim then forces the non-negotiable Android bits
-    /// (Keystore identity, app-owned TUN, control socket off) and layers on the
+    /// (Keystore identity, app-owned TUN) and layers on the
     /// runtime knobs it owns. When empty, the structured fields above build the
     /// config programmatically.
     #[serde(default)]
@@ -312,7 +318,8 @@ impl ShimConfig {
 
     /// Build the in-memory `fips::Config` the same way `fips.yaml` would:
     /// one wildcard-ephemeral UDP transport, in-process DNS responder on
-    /// `[::1]:5354`, app-owned TUN, no control socket, no key files.
+    /// `[::1]:5354`, app-owned TUN, no key files. The control socket is
+    /// off here; the engine turns it on at a path of its choosing.
     pub fn to_fips_config(&self) -> Result<fips::Config, String> {
         let identity = derive_identity(&self.nsec)?;
 

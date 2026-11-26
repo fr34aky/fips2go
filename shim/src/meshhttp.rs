@@ -6,8 +6,8 @@
 //! `FipsVpnService.establishTunnel` for why it must stay out), and a VPN
 //! network refuses `bindSocket` from a UID it does not cover. So the request
 //! never touches the kernel: a small userspace TCP stack (smoltcp) speaks
-//! from the node's own address, its packets go through the node's
-//! `TunPacketProcessor` exactly like an app's, and the pump's bridge hands
+//! from the node's own address, its packets go through the outbound edge
+//! ([`crate::meshout`]) exactly like an app's, and the pump's bridge hands
 //! the replies back through [`Divert`] instead of writing them to the TUN.
 //!
 //! The same property fips-ui relies on holds here: FIPS delivers packets for
@@ -22,11 +22,12 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use fips::{TunPacketAction, TunPacketProcessor};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, DeviceCapabilities, Medium};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
+
+use crate::meshout::{Action, MeshOut};
 
 /// Tunnel MTU (the smoltcp interface sends nothing bigger).
 const MTU: usize = 1280;
@@ -41,11 +42,11 @@ const LOCAL_PORTS: std::ops::RangeInclusive<u16> = 61000..=65535;
 /// node on different channels), the node's SYN retransmits settle it.
 const UNREACHABLE_LIMIT: usize = 3;
 
-/// What the engine lends a request: the node's outbound pipeline and the
+/// What the engine lends a request: the outbound edge, the node's channel and the
 /// reply tap. Cloned out of the engine so no lock is held while fetching.
 pub struct MeshLink {
     pub our_addr: Ipv6Addr,
-    pub processor: TunPacketProcessor,
+    pub processor: MeshOut,
     pub outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     pub divert: Arc<Divert>,
     /// The in-process `.fips` responder: asking it for `<npub>.fips` is what
@@ -246,14 +247,13 @@ pub fn get(
     let outbound = link.outbound_tx.clone();
     let egress = move |mut packet: Vec<u8>| -> Result<(), FetchError> {
         match processor.process(&mut packet) {
-            TunPacketAction::Forward => outbound
+            Action::Forward => outbound
                 .blocking_send(packet)
                 .map_err(|_| FetchError::restarted()),
-            TunPacketAction::Hairpin => Err(FetchError::other("that is this node's own address")),
-            TunPacketAction::Respond(_) => Err(FetchError::unreachable(format!(
-                "the node refused to send to {addr}"
+            Action::Own => Err(FetchError::other("that is this node's own address")),
+            Action::Drop => Err(FetchError::unreachable(format!(
+                "{addr} is not a mesh address"
             ))),
-            TunPacketAction::Drop => Ok(()),
         }
     };
     let request = build_request(addr, port, path, headers);

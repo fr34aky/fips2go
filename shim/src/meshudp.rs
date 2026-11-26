@@ -4,8 +4,8 @@
 //!
 //! Same shape and reason as `meshhttp.rs`: the app's UID sits outside its
 //! own tunnel, so no kernel socket can reach `fd00::/8`; a smoltcp UDP socket
-//! speaks from the node's address, its datagram goes through the node's
-//! `TunPacketProcessor` like an app's, and the reply comes back through
+//! speaks from the node's address, its datagram goes through the outbound
+//! edge ([`crate::meshout`]) like an app's, and the reply comes back through
 //! [`Divert`] keyed on (remote, remote port, local port).
 
 use std::collections::VecDeque;
@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use fips::{TunPacketAction, TunPacketProcessor};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::socket::{icmp, udp};
@@ -23,6 +22,7 @@ use smoltcp::wire::{
 };
 
 use crate::meshhttp::{Device, FetchError, MeshLink, is_icmp_unreachable, random_u64};
+use crate::meshout::Action;
 
 /// Largest reply accepted: a DNS answer over the mesh is well under the
 /// 1280-byte MTU (spec §6 of fips-names); anything bigger is truncated by
@@ -52,18 +52,17 @@ pub fn query(
         .open(addr, port)
         .ok_or_else(|| FetchError::other("no free local port"))?;
     let local_port = flow.key.2;
-    let processor: TunPacketProcessor = link.processor.clone();
+    let processor = link.processor.clone();
     let outbound = link.outbound_tx.clone();
     let egress = move |mut packet: Vec<u8>| -> Result<(), FetchError> {
         match processor.process(&mut packet) {
-            TunPacketAction::Forward => outbound
+            Action::Forward => outbound
                 .blocking_send(packet)
                 .map_err(|_| FetchError::restarted()),
-            TunPacketAction::Hairpin => Err(FetchError::other("that is this node's own address")),
-            TunPacketAction::Respond(_) => Err(FetchError::unreachable(format!(
-                "the node refused to send to {addr}"
+            Action::Own => Err(FetchError::other("that is this node's own address")),
+            Action::Drop => Err(FetchError::unreachable(format!(
+                "{addr} is not a mesh address"
             ))),
-            TunPacketAction::Drop => Ok(()),
         }
     };
     exchange(
@@ -212,18 +211,17 @@ pub fn ping_sized(
         .open(addr, 0)
         .ok_or_else(|| FetchError::other("no free local port"))?;
     let ident = flow.key.2;
-    let processor: TunPacketProcessor = link.processor.clone();
+    let processor = link.processor.clone();
     let outbound = link.outbound_tx.clone();
     let egress = move |mut packet: Vec<u8>| -> Result<(), FetchError> {
         match processor.process(&mut packet) {
-            TunPacketAction::Forward => outbound
+            Action::Forward => outbound
                 .blocking_send(packet)
                 .map_err(|_| FetchError::restarted()),
-            TunPacketAction::Hairpin => Ok(()),
-            TunPacketAction::Respond(_) => Err(FetchError::unreachable(format!(
-                "the node refused to send to {addr}"
+            Action::Own => Ok(()),
+            Action::Drop => Err(FetchError::unreachable(format!(
+                "{addr} is not a mesh address"
             ))),
-            TunPacketAction::Drop => Ok(()),
         }
     };
     echo(

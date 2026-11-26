@@ -16,8 +16,8 @@ object FipsNative {
     external fun deriveIdentity(nsec: String): String
 
     /**
-     * Start the embedded node. [callback] receives `protectFd(int)` for every
-     * underlay socket. Returns "" on success, an error message otherwise.
+     * Start the embedded node. [callback] receives `protectFd(int)` for each
+     * UDP socket the node binds and every socket the shim dials itself. Returns "" on success, an error message otherwise.
      * Blocks until the node is up (worst case ~60s) — call off the main thread.
      */
     external fun start(configJson: String, tunFd: Int, callback: FipsVpnService): String

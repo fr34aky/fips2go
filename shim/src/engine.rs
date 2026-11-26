@@ -1,8 +1,8 @@
 //! Engine: one embedded FIPS node per process, started/stopped from JNI.
 //!
 //! `start()` builds the node from an in-memory config, wires the app-owned
-//! TUN seam and socket-protect hook, runs the node on a dedicated
-//! current-thread tokio runtime, and spawns the fd pump. `stop()` unwinds it
+//! TUN seam, hands the node's UDP sockets to the protect hook, runs the node
+//! on a dedicated current-thread tokio runtime, and spawns the fd pump. `stop()` unwinds it
 //! all and closes the dup'd fd last.
 
 use std::os::unix::io::RawFd;
@@ -11,10 +11,9 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use fips::control::ControlCommandHandle;
-use fips::control::read_handle::ControlReadHandle;
-
+use crate::SocketProtect;
 use crate::config::ShimConfig;
+use crate::control::Control;
 use crate::dns::DnsProxy;
 use crate::forward::Forwarder;
 use crate::pump::{Pump, PumpConfig};
@@ -24,6 +23,10 @@ const FORWARD_MTU: u16 = 1280;
 
 /// How long `start()` waits for the node to reach a started state.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `start()` then waits for the node's control socket, which the
+/// node binds on a task of its own once its rx loop runs. Milliseconds in
+/// practice; past this the engine runs without status and queries.
+const CONTROL_WAIT: Duration = Duration::from_secs(2);
 /// The in-process FIPS DNS responder (`dns.enabled` default bind).
 const LOCAL_RESPONDER: &str = "[::1]:5354";
 
@@ -75,6 +78,22 @@ fn apply_worker_thread_caps(worker_threads: usize) {
     tracing::info!(worker_threads, "capped FMP worker pools for mobile");
 }
 
+/// Where the node's control socket goes when the config names no place
+/// (`control_path`): the system's temporary directory, one file per start.
+/// The app always names one — an app cannot write to Android's temporary
+/// directory — so this is for the host (tests, the smoke run).
+fn default_control_path() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir()
+        .join(format!(
+            "fips2go-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Lock a mutex whether or not a thread panicked while holding it. Nothing
 /// guarded here is left half-written by a panic (the `ENGINE` slot is only
 /// ever replaced whole), and refusing a poisoned lock would turn one caught
@@ -114,10 +133,9 @@ struct Engine {
     node_thread: Option<std::thread::JoinHandle<()>>,
     pump: Option<Pump>,
     forwarder: Option<Forwarder>,
-    read_handle: ControlReadHandle,
-    /// Mutating twin of `read_handle`: routes `connect` / `disconnect` onto
-    /// the node's rx_loop (Diagnostics' manual dial of mDNS-seen peers).
-    cmd_handle: ControlCommandHandle,
+    /// The node's control socket: every `show_*` query, and the `connect`
+    /// command (Diagnostics' manual dial of mDNS-seen peers).
+    control: Arc<Control>,
     npub: String,
     address: String,
     /// Our dup of the VpnService TUN fd; closed after the pump joins.
@@ -125,7 +143,7 @@ struct Engine {
     /// Kept so [`network_changed`] can tell a new tunnel (same config: swap
     /// the pump's fd) from a changed config (restart the node).
     config_json: String,
-    protect: Option<fips::SocketProtect>,
+    protect: Option<SocketProtect>,
     /// Wakes the node's medium-change detector (`node.netmon.*`) — see
     /// [`network_hint`]. Per node: refreshed on every (re)start.
     netmon: fips::NetmonTrigger,
@@ -160,15 +178,16 @@ pub fn is_running() -> bool {
 }
 
 /// Start the embedded node. `tun_fd` is borrowed (dup'd internally); the
-/// caller keeps ownership of its own fd. `protect` receives every underlay
-/// socket fd (wire it to `VpnService.protect`).
+/// caller keeps ownership of its own fd. `protect` receives the fd of each
+/// UDP socket the node binds and of every socket the shim itself dials
+/// (wire it to `VpnService.protect`).
 ///
 /// The `ENGINE` mutex is held only for the final install, not for the whole
 /// (possibly slow) node startup — `status()` polls stay responsive.
 pub fn start(
     config_json: &str,
     tun_fd: RawFd,
-    protect: Option<fips::SocketProtect>,
+    protect: Option<SocketProtect>,
 ) -> Result<StartInfo, String> {
     let _lifecycle = lock(&LIFECYCLE);
     start_locked(config_json, tun_fd, protect)
@@ -178,7 +197,7 @@ pub fn start(
 fn start_locked(
     config_json: &str,
     tun_fd: RawFd,
-    protect: Option<fips::SocketProtect>,
+    protect: Option<SocketProtect>,
 ) -> Result<StartInfo, String> {
     if lock(&ENGINE).is_some() {
         return Err("already running".into());
@@ -195,7 +214,7 @@ fn start_locked(
 fn start_inner(
     config_json: &str,
     tun_fd: RawFd,
-    protect: Option<fips::SocketProtect>,
+    protect: Option<SocketProtect>,
 ) -> Result<(Engine, StartInfo), String> {
     let shim_config = ShimConfig::from_json(config_json)?;
     crate::init_logging(shim_config.log_level.as_deref());
@@ -212,6 +231,16 @@ fn start_inner(
     crate::ble::GLOBAL.detach();
     #[allow(unused_variables)]
     let has_ble = !fips_config.transports.ble.is_empty();
+
+    // The control socket is how the shim asks the running node anything.
+    let control = Arc::new(Control::new(
+        shim_config
+            .control_path
+            .clone()
+            .unwrap_or_else(default_control_path),
+    ));
+    fips_config.node.control.enabled = true;
+    fips_config.node.control.socket_path = control.path().to_string_lossy().into_owned();
 
     let mut node = fips::Node::new(fips_config).map_err(|e| format!("node init: {e}"))?;
     // The Bluetooth seam, before start(): the transport is built over this
@@ -232,11 +261,15 @@ fn start_inner(
     // Keep a clone for rebuilds on network change (the original is moved into
     // the DNS proxy below).
     let engine_protect = protect.clone();
-    if let Some(hook) = protect.clone() {
-        node.set_socket_protect(hook);
-    }
-    let read_handle = node.control_read_handle();
-    let cmd_handle = node.control_command_handle();
+    // The node's UDP sockets, one per transport instance that binds. The
+    // hook is what moves the FIPS Hotspot instance's socket onto the hotspot
+    // network (Kotlin's `protectFd` tells it by its bound address); for the
+    // others `VpnService.protect` changes nothing while this app's UID is
+    // outside its own tunnel or captured for `fd00::/8` only, which is
+    // always. fips's other sockets (TCP transport, netmon probes, STUN) are
+    // not announced and for the same reason need not be.
+    let udp_sockets = node.enable_app_owned_udp_fd();
+    let node_protect = protect.clone();
     let netmon = node.netmon_trigger();
 
     let relay_status: Arc<Mutex<Vec<fips::nostr::RelayStatusView>>> = Arc::default();
@@ -264,8 +297,16 @@ fn start_inner(
                     let _ = ready_tx.send(Err(format!("node start: {e}")));
                     return;
                 }
-                // Processor needs the started transports' MTU floor.
-                let _ = ready_tx.send(Ok(node.tun_packet_processor()));
+                // Every UDP transport that bound has sent its fd by now.
+                // Before the rx loop, so the hotspot socket is on its
+                // network by the time the node dials through it.
+                while let Ok(socket) = udp_sockets.try_recv() {
+                    tracing::debug!(fd = socket.fd, instance = ?socket.instance, "node UDP socket");
+                    if let Some(hook) = &node_protect {
+                        hook(socket.fd);
+                    }
+                }
+                let _ = ready_tx.send(Ok(()));
                 // Relay-pool refresher for the UI: the pool lives inside the
                 // Nostr runtime, which only this runtime may await on. Runs
                 // once per status poll (Notify permit), so it costs nothing
@@ -302,8 +343,8 @@ fn start_inner(
         })
         .map_err(|e| format!("spawn node thread: {e}"))?;
 
-    let processor = match ready_rx.recv_timeout(START_TIMEOUT) {
-        Ok(Ok(processor)) => processor,
+    match ready_rx.recv_timeout(START_TIMEOUT) {
+        Ok(Ok(())) => {}
         Ok(Err(e)) => {
             let _ = node_thread.join();
             return Err(e);
@@ -313,7 +354,14 @@ fn start_inner(
             let _ = node_thread.join();
             return Err("node thread died during start".into());
         }
-    };
+    }
+    let processor = crate::meshout::MeshOut::new(*our_fips_addr.as_bytes());
+    if !control.wait_ready(CONTROL_WAIT) {
+        tracing::warn!(
+            path = %control.path().display(),
+            "node control socket did not come up: no status, no queries"
+        );
+    }
 
     // Own a dup of the fd so Kotlin's ParcelFileDescriptor lifetime and ours
     // are independent.
@@ -454,8 +502,7 @@ fn start_inner(
         node_thread,
         pump: Some(pump),
         forwarder,
-        read_handle,
-        cmd_handle,
+        control,
         npub: npub.clone(),
         address: address.clone(),
         tun_fd: owned_fd,
@@ -749,32 +796,38 @@ pub fn names_online(validated: bool) {
 /// Nostr is off or the node has not published a snapshot yet); each call
 /// also asks the node runtime for a fresh snapshot, served by the next call.
 pub fn status_json() -> String {
-    let slot = lock(&ENGINE);
-    let value = match slot.as_ref() {
-        None => serde_json::json!({ "running": false }),
-        Some(engine) => serde_json::json!({
+    // The node is asked with the `ENGINE` lock released: the answer comes
+    // over its control socket, and a stop must not wait behind that.
+    let (mut value, control) = {
+        let slot = lock(&ENGINE);
+        let Some(engine) = slot.as_ref() else {
+            return serde_json::json!({ "running": false }).to_string();
+        };
+        engine.relay_refresh.notify_one();
+        let value = serde_json::json!({
             "running": true,
             "npub": engine.npub,
             "address": engine.address,
-            "status": engine.read_handle.query("show_status", None)
-                .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take)),
             "relays": lock(&engine.relay_status).clone(),
             "exit": engine.exit.selected().map(|npub| serde_json::json!({
                 "npub": npub,
                 "inner_ipv4": engine.exit.inner().to_string(),
             })),
-        }),
+        });
+        (value, engine.control.clone())
     };
-    if let Some(engine) = slot.as_ref() {
-        engine.relay_refresh.notify_one();
-    }
+    value["status"] = control
+        .query("show_status", None)
+        .ok()
+        .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take))
+        .unwrap_or(serde_json::Value::Null);
     value.to_string()
 }
 
-/// Generic read-only query passthrough (any snapshot-served `show_*`).
+/// Generic read-only query passthrough (any `show_*`). Blocking, up to
+/// [`crate::control::QUERY_TIMEOUT`]; the `ENGINE` lock is not held meanwhile.
 pub fn query_json(command: &str, params_json: &str) -> String {
-    let slot = lock(&ENGINE);
-    let Some(engine) = slot.as_ref() else {
+    let Some(control) = lock(&ENGINE).as_ref().map(|e| e.control.clone()) else {
         return r#"{"status":"error","message":"not running"}"#.to_string();
     };
     let params = if params_json.trim().is_empty() {
@@ -791,22 +844,19 @@ pub fn query_json(command: &str, params_json: &str) -> String {
             }
         }
     };
-    match engine.read_handle.query(command, params) {
-        Some(response) => response.to_string(),
-        None => serde_json::json!({
-            "status": "error",
-            "message": format!("unknown or non-snapshot command: {command}"),
-        })
-        .to_string(),
+    match control.query(command, params) {
+        Ok(response) => response.to_string(),
+        Err(e) => serde_json::json!({ "status": "error", "message": e }).to_string(),
     }
 }
 
 /// Manual dial (Diagnostics "Connect" on an mDNS-seen peer): round-trip a
-/// `connect` command through the node's rx_loop. Blocking — call off the UI
+/// `connect` command through the node's rx_loop, over its control socket.
+/// Blocking, up to [`crate::control::COMMAND_TIMEOUT`] — call off the UI
 /// thread. The `ENGINE` lock is dropped before the round-trip so status
 /// polls never queue behind a slow handshake initiation.
 pub fn connect_peer_json(npub: &str, address: &str) -> String {
-    let handle = lock(&ENGINE).as_ref().map(|e| e.cmd_handle.clone());
+    let handle = lock(&ENGINE).as_ref().map(|e| e.control.clone());
     let Some(handle) = handle else {
         return r#"{"status":"error","message":"not running"}"#.to_string();
     };
@@ -815,7 +865,7 @@ pub fn connect_peer_json(npub: &str, address: &str) -> String {
         "address": address,
         "transport": "udp",
     });
-    match handle.command_blocking("connect", Some(params)) {
+    match handle.request("connect", Some(params), crate::control::COMMAND_TIMEOUT) {
         Ok(response) => response.to_string(),
         Err(e) => serde_json::json!({ "status": "error", "message": e }).to_string(),
     }

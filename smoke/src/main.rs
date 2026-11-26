@@ -111,26 +111,23 @@ async fn main() {
     let (a_outbound_tx, _a_inbound_rx) = node_a.enable_app_owned_tun();
     let (_b_outbound_tx, b_inbound_rx) = node_b.enable_app_owned_tun();
 
-    // Socket-protect hook (Phase 2): on Android this would call
-    // VpnService.protect(fd); here we count announcements to prove every
-    // underlay socket is surfaced before traffic flows.
-    let protected = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let sink = protected.clone();
-    node_a.set_socket_protect(std::sync::Arc::new(move |fd| {
-        sink.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        println!("protect hook: underlay socket fd {fd}");
-    }));
+    // The UDP socket seam: on Android the shim passes each fd to
+    // VpnService.protect(fd) (and moves the hotspot socket onto its
+    // network); here we count them to prove the listen socket is surfaced
+    // by the time start() returns.
+    let udp_sockets = node_a.enable_app_owned_udp_fd();
 
     node_a.start().await.expect("node A start");
     node_b.start().await.expect("node B start");
-    let protect_calls = protected.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        protect_calls >= 1,
-        "protect hook must fire for the UDP listen socket"
-    );
+    let mut udp_fds = 0;
+    while let Ok(socket) = udp_sockets.try_recv() {
+        println!("node A UDP socket: fd {} ({:?})", socket.fd, socket.instance);
+        udp_fds += 1;
+    }
+    assert!(udp_fds >= 1, "the UDP listen socket's fd must be handed over");
     println!(
         "both nodes started (no system TUN, no DNS, no control socket); \
-         node A protect hook fired {protect_calls}x"
+         node A handed over {udp_fds} UDP socket(s)"
     );
 
     // App-side receive loop for B (a VpnService would write these to its fd).
@@ -155,9 +152,8 @@ async fn main() {
 
     // App-side send loop for A: retry until the mesh path is up (first sends
     // queue behind coordinate lookup + session establishment). Each packet
-    // runs through the outbound processor (Phase 2) exactly like the Android
-    // pump would — it must decide Forward for a mesh-destined packet.
-    let processor = node_a.tun_packet_processor();
+    // is pushed as it is: the embedder owes the node fd00::/8 packets from
+    // its own address and an MSS clamp on TCP SYNs, and this is UDP.
     let packet = build_ipv6_udp(
         *id_a.address().as_bytes(),
         *id_b.address().as_bytes(),
@@ -166,14 +162,8 @@ async fn main() {
     let send_task = tokio::spawn(async move {
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
-            let mut pkt = packet.clone();
-            match processor.process(&mut pkt) {
-                fips::TunPacketAction::Forward => {
-                    if a_outbound_tx.send(pkt).await.is_err() {
-                        return;
-                    }
-                }
-                other => panic!("processor must Forward mesh-destined packets, got {other:?}"),
+            if a_outbound_tx.send(packet.clone()).await.is_err() {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

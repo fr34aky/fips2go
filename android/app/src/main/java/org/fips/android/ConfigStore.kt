@@ -611,6 +611,10 @@ object ConfigStore {
             // Always sent, file or no file: the shim watches the path, so the
             // first name added while connected resolves without a rebind.
             .put("hosts_path", HostsStore.file(context).absolutePath)
+            // The node's control socket, which the shim reads status and
+            // every `show_*` query through. In the app's private directory:
+            // no other UID can reach it. The node creates and removes it.
+            .put("control_path", java.io.File(context.filesDir, "control.sock").absolutePath)
 
         // Public domain names over fips: the pin file next to the hosts file.
         // Sending the path is what turns the feature on in the shim; a name

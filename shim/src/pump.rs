@@ -1,13 +1,14 @@
 //! The TUN fd pump: bridges the VpnService fd to the node's app-owned TUN
-//! channels, with the node's own `TunPacketProcessor` deciding each outbound
-//! packet (system-TUN parity) and the DNS proxy intercepting queries.
+//! channels, with [`crate::meshout`] deciding each mesh packet (the embedder's
+//! half of the app-owned TUN contract: `fd00::/8` only, TCP MSS clamped both
+//! ways) and the DNS proxy intercepting queries.
 //!
 //! Threads (all owned here). Idle threads make ZERO wakeups — measured
 //! on-device, the previous 250 ms stop-flag ticks were 12 wake/s across the
 //! three threads, ~62% of the whole process's idle wakeups. Each thread has
 //! an explicit wake for shutdown instead:
 //! - **reader** — `poll()`+`read()` the fd (infinite timeout); DNS intercept
-//!   → processor → forward / write-back / drop. Woken by an eventfd that
+//!   → outbound edge → forward / write-back / drop. Woken by an eventfd that
 //!   [`Pump::join`] and [`Pump::swap_fd`] write.
 //! - **writer** — single writer of the fd; blocking-drains `writer_rx`.
 //!   Woken by an empty-`Vec` sentinel (no real packet is empty: DNS replies,
@@ -30,9 +31,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use fips::{TunPacketAction, TunPacketProcessor};
-
 use crate::dns::DnsProxy;
+use crate::meshout::{Action, MeshOut};
 
 /// Max IPv6 packet we accept from the fd (jumbo-safe; VpnService MTU is
 /// far below this).
@@ -123,7 +123,7 @@ struct Io {
 
 #[derive(Clone)]
 struct ReaderCtx {
-    processor: TunPacketProcessor,
+    processor: MeshOut,
     outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     writer_tx: Sender<Vec<u8>>,
     dns_addr: [u8; 16],
@@ -138,7 +138,7 @@ pub struct PumpConfig {
     /// after the threads have been joined).
     pub tun_fd: RawFd,
     pub running: Arc<AtomicBool>,
-    pub processor: TunPacketProcessor,
+    pub processor: MeshOut,
     /// app → mesh (drained by the node's rx_loop).
     pub outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// mesh → app (fed by the node).
@@ -246,6 +246,10 @@ impl Pump {
                                     }
                                     continue;
                                 }
+                                // The MSS a peer announces bounds what
+                                // this side sends it: same ceiling as ours.
+                                let mut pkt = pkt;
+                                crate::meshout::clamp_inbound(&mut pkt);
                                 if writer_tx.send(pkt).is_err() {
                                     break;
                                 }
@@ -531,7 +535,7 @@ fn run_reader(
     wake_fd: RawFd,
     running: &AtomicBool,
     live: &AtomicBool,
-    processor: &TunPacketProcessor,
+    processor: &MeshOut,
     outbound_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
     writer_tx: &Sender<Vec<u8>>,
     dns_addr: &[u8; 16],
@@ -626,13 +630,13 @@ fn run_reader(
                             break; // forwarder gone
                         }
                     }
-                    // The processor forwards every fd00::/8 destination
-                    // that is not this node (one with no route yet is the
-                    // node's to queue or refuse), and the exit is never this
-                    // node (`ExitSwitch::set` refuses our own npub). Anything
+                    // The edge forwards every fd00::/8 destination that is
+                    // not this node (one with no route yet is the node's to
+                    // queue or refuse), and the exit is never this node
+                    // (`ExitSwitch::set` refuses our own npub). Anything
                     // else would be dropped, never sent around the exit.
                     crate::exit::Outbound::Mesh(mut outer) => {
-                        if matches!(processor.process(&mut outer), TunPacketAction::Forward)
+                        if matches!(processor.process(&mut outer), Action::Forward)
                             && outbound_tx.blocking_send(outer).is_err()
                         {
                             break; // node gone
@@ -650,12 +654,13 @@ fn run_reader(
             }
         }
 
-        // Mesh-bound: run the node's outbound pipeline (filter/clamp/hairpin).
+        // Mesh-bound: clamp a SYN's MSS and hand it to the node, which
+        // answers on the inbound channel what it cannot deliver (ICMPv6 no
+        // route, Packet Too Big).
         match processor.process(packet) {
-            TunPacketAction::Forward => {
+            Action::Forward => {
                 // Track the flow so the peer's replies pass the inbound
-                // firewall (packet is post-processor but pre-encryption:
-                // ports are still readable here).
+                // firewall (pre-encryption: ports are still readable here).
                 if let Some(f) = filter {
                     f.note_outbound(packet);
                 }
@@ -663,22 +668,16 @@ fn run_reader(
                     break; // node gone
                 }
             }
-            TunPacketAction::Hairpin => {
+            // This node's own address. The kernel delivers that locally, so
+            // it does not arrive here; if it ever does, back it goes.
+            Action::Own => {
                 if writer_tx.send(packet.to_vec()).is_err() {
                     break;
                 }
             }
-            // Respond/Drop are the node refusing an outbound packet (no
-            // route, filtered) — rare, and exactly what a "mesh site won't
-            // load" report needs visible, so log at info.
-            TunPacketAction::Respond(response) => {
-                tracing::info!(dst = %dst_of(packet), "mesh outbound refused: ICMPv6 sent back");
-                if writer_tx.send(response).is_err() {
-                    break;
-                }
-            }
-            TunPacketAction::Drop => {
-                tracing::info!(dst = %dst_of(packet), "mesh outbound dropped by node processor");
+            // `classify` lets only fd00::/8 through to here.
+            Action::Drop => {
+                tracing::info!(dst = %dst_of(packet), "mesh outbound dropped: not a mesh packet");
             }
         }
     }

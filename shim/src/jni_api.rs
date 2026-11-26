@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// `FipsVpnService`): each underlay fd is passed to its
 /// `protectFd(int): Boolean` method. Fires from arbitrary Rust threads, so
 /// the hook owns a `JavaVM` reference and attaches on demand.
-fn protect_hook_from(env: &mut JNIEnv, callback: &JObject) -> Option<fips::SocketProtect> {
+fn protect_hook_from(env: &mut JNIEnv, callback: &JObject) -> Option<crate::SocketProtect> {
     if callback.is_null() {
         return None;
     }
@@ -91,7 +91,8 @@ pub extern "system" fn Java_org_fips_android_FipsNative_deriveIdentity(
 }
 
 /// `start(configJson, tunFd, callback)` → `""` on success, error message
-/// otherwise. `callback.protectFd(int)` is invoked for every underlay socket.
+/// otherwise. `callback.protectFd(int)` is invoked for each UDP socket the
+/// node binds and every socket the shim dials itself.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_start(
     mut env: JNIEnv,

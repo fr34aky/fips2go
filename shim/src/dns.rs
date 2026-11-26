@@ -52,7 +52,7 @@ pub struct DnsProxy {
     /// Writes response packets back to the TUN fd.
     pub writer_tx: Sender<Vec<u8>>,
     /// Socket-protect hook — upstream queries must bypass the tunnel.
-    pub protect: Option<fips::SocketProtect>,
+    pub protect: Option<crate::SocketProtect>,
     /// The app's hosts file (readable name → npub), `None` when the config
     /// names none. fips has the same feature but only for its hardcoded
     /// `/etc/fips/hosts`, which an app cannot write — so the names are

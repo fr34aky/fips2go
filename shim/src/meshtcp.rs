@@ -26,11 +26,11 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use fips::TunPacketAction;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
+use crate::meshout::Action;
 use crate::meshhttp::{
     Device, FetchError, MeshLink, is_icmp_unreachable, random_u64, register_identity,
 };
@@ -419,14 +419,13 @@ fn pipe(relay: &Relay, local: TcpStream, first: Vec<u8>) -> Result<(), FetchErro
     let outbound = link.outbound_tx.clone();
     let egress = move |mut packet: Vec<u8>| -> Result<(), FetchError> {
         match processor.process(&mut packet) {
-            TunPacketAction::Forward => outbound
+            Action::Forward => outbound
                 .blocking_send(packet)
                 .map_err(|_| FetchError::restarted()),
-            TunPacketAction::Hairpin => Err(FetchError::other("that is this node's own address")),
-            TunPacketAction::Respond(_) => Err(FetchError::unreachable(format!(
-                "the node refused to send to {addr}"
+            Action::Own => Err(FetchError::other("that is this node's own address")),
+            Action::Drop => Err(FetchError::unreachable(format!(
+                "{addr} is not a mesh address"
             ))),
-            TunPacketAction::Drop => Ok(()),
         }
     };
     let result = run(
