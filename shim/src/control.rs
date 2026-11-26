@@ -24,9 +24,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-/// A command crosses to the rx loop and back. Longer than the 5 s fips
-/// itself gives that round trip, so its own "timeout" answer gets here.
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(7);
+/// A command crosses to the rx loop and back. The one deadline has to hold
+/// the wait for a socket not bound yet ([`BIND_GRACE`]) and then the 5 s
+/// fips itself gives that round trip, with room to spare, so that fips's
+/// own "timeout" answer gets here and not ours.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest answer read: a command's is a line. The bound is so a caller
 /// cannot be made to hold more.
 const MAX_RESPONSE: u64 = 1 << 20;

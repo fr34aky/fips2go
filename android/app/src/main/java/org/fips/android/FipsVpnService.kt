@@ -807,9 +807,8 @@ class FipsVpnService : VpnService() {
         hotspotStatus = null
     }
 
-    /** The stored mesh-app selection, as an immutable copy. */
-    private fun currentMeshApps(): Set<String> =
-        (prefs().getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()).toSet()
+    /** The stored mesh-app selection, as an immutable copy (never this app). */
+    private fun currentMeshApps(): Set<String> = AppPickerActivity.storedMeshApps(this)
 
     /** Build and establish the TUN. `ipv6Clearnet` decides whether `::/0` is claimed. */
     private fun establishTunnel(
@@ -838,10 +837,10 @@ class FipsVpnService : VpnService() {
             // other app keeps the normal network untouched.
             var allowed = 0
             for (pkg in meshApps) {
-                // Never this app, whatever the stored list says: captured
-                // with the default route, the node's own underlay sockets
-                // (most of which are not protect()ed) would enter its tunnel.
-                // The picker already hides it; this is where it must hold.
+                // Never this app: captured with the default route, the
+                // node's own underlay sockets (most of which are not
+                // protect()ed) would enter its tunnel. `storedMeshApps`
+                // already leaves it out; this is where it must hold.
                 if (pkg == packageName) continue
                 try {
                     builder.addAllowedApplication(pkg)

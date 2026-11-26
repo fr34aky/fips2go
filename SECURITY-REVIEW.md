@@ -151,7 +151,16 @@ Everything crosses JNI as JSON strings.
 - The node's control socket is on, in the app's private directory. It is the
   interface upstream fips offers for sending a running node a command; the
   app uses it for Diagnostics' manual connect and for nothing else (status
-  is read in process).
+  is read in process). Binding it, fips sets the process umask to 007 for
+  the length of the `bind` call, at every node start: a file another thread
+  creates in that instant gets group bits the app's own 077 would not give
+  it. The app's files are in its private directory and its group is its
+  own, so nothing is exposed.
+- The FIPS Hotspot socket is moved onto the hotspot network once the node's
+  `start` has returned, not at bind. A peer the node dials from inside
+  `start` through that socket (a static peer address inside the hotspot's
+  subnet; hotspot peers are normally found by mDNS, later) has its first
+  handshake leave on the default network, and links on fips's retry.
 - The inbound firewall's default allowlist is empty and fips needs no inbound
   TUN ports; that is intentional, not a misconfiguration.
 - `enable_nostr` and the in-app `.fips` resolver are hardcoded on.
