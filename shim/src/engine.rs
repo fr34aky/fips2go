@@ -301,13 +301,31 @@ fn start_inner(
                     return;
                 }
                 // Every UDP transport that bound has sent its fd by now.
-                // Before the rx loop, so the hotspot socket is on its
-                // network by the time the node dials through it.
-                while let Ok(socket) = udp_sockets.try_recv() {
+                // Handled here, before the rx loop: a FIPS Hotspot peer is
+                // found by mDNS, which runs in that loop, so the hotspot
+                // socket is on its network before the node dials through
+                // it. (A configured peer is dialed inside `start`, through
+                // the main socket, for which the hook changes nothing.)
+                let announce = move |socket: fips::AppOwnedUdpSocket| {
                     tracing::debug!(fd = socket.fd, instance = ?socket.instance, "node UDP socket");
                     if let Some(hook) = &node_protect {
                         hook(socket.fd);
                     }
+                };
+                while let Ok(socket) = udp_sockets.try_recv() {
+                    announce(socket);
+                }
+                // A socket the node binds later is sent on the same channel.
+                // Blocked in recv until then; ends when the node is dropped.
+                let later = std::thread::Builder::new()
+                    .name("fips-udp-fd".into())
+                    .spawn(move || {
+                        while let Ok(socket) = udp_sockets.recv() {
+                            announce(socket);
+                        }
+                    });
+                if let Err(e) = later {
+                    tracing::warn!(error = %e, "no thread for later UDP sockets");
                 }
                 let _ = ready_tx.send(Ok(()));
                 // Relay-pool refresher for the UI: the pool lives inside the

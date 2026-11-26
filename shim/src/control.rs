@@ -1,6 +1,6 @@
 //! Client for the node's control socket: how the shim reads node state
-//! (`show_*`) and sends it the two mutating commands (`connect`,
-//! `disconnect`).
+//! (`show_*`) and sends it a command (`connect`; the socket takes
+//! `disconnect` too, which the shim does not use).
 //!
 //! This is the interface fips offers everything outside the node — `fipsctl`
 //! and `fipstop` speak it — a Unix socket taking one JSON line and answering
@@ -28,8 +28,9 @@ use serde_json::Value;
 
 /// A snapshot query: answered at once or not worth waiting for.
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
-/// A command crosses to the rx loop and back.
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+/// A command crosses to the rx loop and back. Longer than the 5 s fips
+/// itself gives that round trip, so its own "timeout" answer gets here.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(7);
 /// Largest answer read. `show_cache` on a busy node is the big one, far
 /// below this; the bound is so a caller cannot be made to hold more.
 const MAX_RESPONSE: u64 = 16 << 20;
@@ -37,6 +38,26 @@ const MAX_RESPONSE: u64 = 16 << 20;
 #[derive(Debug)]
 pub struct Control {
     path: PathBuf,
+}
+
+/// Connect, waiting `timeout` at most. `UnixStream::connect` has no
+/// deadline: once a node that has stopped accepting has a full backlog it
+/// blocks for good. A Unix socket's connect waits by the send timeout, so
+/// that is set first.
+fn connect(path: &Path, timeout: Duration) -> Result<UnixStream, String> {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+        .map_err(|e| format!("control socket: {e}"))?;
+    let addr = socket2::SockAddr::unix(path).map_err(|e| format!("control socket: {e}"))?;
+    socket
+        .set_write_timeout(Some(timeout))
+        .and_then(|()| socket.connect(&addr))
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                "control socket: no answer in time".to_string()
+            }
+            _ => format!("control socket: {e}"),
+        })?;
+    Ok(UnixStream::from(std::os::fd::OwnedFd::from(socket)))
 }
 
 impl Control {
@@ -57,8 +78,7 @@ impl Control {
         timeout: Duration,
     ) -> Result<Value, String> {
         let deadline = Instant::now() + timeout;
-        let mut stream =
-            UnixStream::connect(&self.path).map_err(|e| format!("control socket: {e}"))?;
+        let mut stream = connect(&self.path, timeout)?;
         let mut line = serde_json::json!({ "command": command, "params": params }).to_string();
         line.push('\n');
         stream
@@ -116,30 +136,17 @@ impl Control {
         }
         self.request(command, params, QUERY_TIMEOUT)
     }
-
-    /// Wait until the node has bound the socket (it does so on a task of its
-    /// own once the rx loop runs, shortly after `start` returns). True when
-    /// a query was answered within `wait`.
-    pub fn wait_ready(&self, wait: Duration) -> bool {
-        let deadline = Instant::now() + wait;
-        loop {
-            if self.query("show_status", None).is_ok() {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
 }
 
 /// How old an answer may be and still be served without asking again first.
 /// Above the UI's 2 s polls, so a screen that is polling never waits.
 const FRESH: Duration = Duration::from_secs(5);
-/// After a query that got no answer, how long before a caller is made to
-/// wait for one again.
+/// After the node failed to answer anything, how long before a caller is
+/// made to wait for it again.
 const RETRY: Duration = Duration::from_secs(2);
+/// The oldest answer ever served. Past this a node that has stopped
+/// answering is reported as such, not shown with figures from long ago.
+const MAX_STALE: Duration = Duration::from_secs(30);
 /// Distinct queries remembered. The app asks a fixed handful.
 const MAX_ENTRIES: usize = 32;
 
@@ -149,16 +156,23 @@ struct Entry {
     answer: Option<(Value, Instant)>,
     /// A refresh is queued or running.
     pending: bool,
-    /// When the node last failed to answer this.
+}
+
+#[derive(Default)]
+struct State {
+    entries: std::collections::HashMap<String, Entry>,
+    /// When the node last failed to answer a query, any query: it is one
+    /// node behind one socket, so one that is not answering `show_peers`
+    /// is not asked to keep a caller waiting for `show_links` either.
     failed: Option<Instant>,
 }
 
 /// A refresh for the worker: the cache key, the command and its params.
 type Job = (String, String, Option<Value>);
-type Entries = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Entry>>>;
+type Shared = std::sync::Arc<std::sync::Mutex<State>>;
 
-fn locked(map: &Entries) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Entry>> {
-    map.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+fn locked(state: &Shared) -> std::sync::MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Queries for callers that must not wait: Kotlin polls status and the
@@ -167,48 +181,52 @@ fn locked(map: &Entries) -> std::sync::MutexGuard<'_, std::collections::HashMap<
 ///
 /// An answer younger than [`FRESH`] is returned at once and a worker thread
 /// fetches the next one, so a poller sees the node's state one poll late and
-/// never blocks. Only a query with no recent answer waits for the node
-/// ([`QUERY_TIMEOUT`] at most), and when the node did not answer, nothing
-/// waits for it again for [`RETRY`]: the last answer is served meanwhile. A
-/// node that is slow therefore costs a poller one timeout, not one per call,
-/// and an answer once given is never replaced by "no answer".
+/// never blocks. A caller waits for the node ([`QUERY_TIMEOUT`] at most) only
+/// when there is no fresh answer, no refresh of that query already under
+/// way, and the node has not just failed to answer something: after a
+/// failure nothing waits again for [`RETRY`], whatever the query. So a node
+/// that is slow costs the main thread one timeout per [`RETRY`], not one per
+/// call. Meanwhile the last answer is served, up to [`MAX_STALE`] old; past
+/// that the query fails, which callers show as "no figures".
 pub struct Cached {
     control: std::sync::Arc<Control>,
-    entries: Entries,
+    state: Shared,
     /// To the worker; it ends when this is dropped.
     jobs: std::sync::Mutex<Option<std::sync::mpsc::Sender<Job>>>,
 }
 
 impl Cached {
     pub fn new(control: std::sync::Arc<Control>) -> Self {
-        let entries = Entries::default();
+        let state = Shared::default();
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         let worker = {
             let control = control.clone();
-            let entries = entries.clone();
+            let state = state.clone();
             std::thread::Builder::new()
                 .name("fips-control".into())
                 .spawn(move || {
                     // Blocks in recv: no wakeups while nobody asks.
                     for (key, command, params) in rx {
                         let result = control.query(&command, params);
-                        let mut map = locked(&entries);
-                        if let Some(entry) = map.get_mut(&key) {
-                            entry.pending = false;
-                            match result {
-                                Ok(answer) => {
+                        let mut state = locked(&state);
+                        match result {
+                            Ok(answer) => {
+                                state.failed = None;
+                                if let Some(entry) = state.entries.get_mut(&key) {
                                     entry.answer = Some((answer, Instant::now()));
-                                    entry.failed = None;
                                 }
-                                Err(_) => entry.failed = Some(Instant::now()),
                             }
+                            Err(_) => state.failed = Some(Instant::now()),
+                        }
+                        if let Some(entry) = state.entries.get_mut(&key) {
+                            entry.pending = false;
                         }
                     }
                 })
         };
         Self {
             control,
-            entries,
+            state,
             // No worker (thread limit): every query asks the node itself.
             jobs: std::sync::Mutex::new(worker.ok().map(|_| tx)),
         }
@@ -219,45 +237,49 @@ impl Cached {
     }
 
     /// The node's answer to a `show_*` query: a recent one at once, else
-    /// asked for now. `Err` only when the node has never answered this and
-    /// does not answer now.
+    /// asked for now if that is worth a wait. `Err` when there is no answer
+    /// younger than [`MAX_STALE`] and none could be had.
     pub fn query(&self, command: &str, params: Option<Value>) -> Result<Value, String> {
         let key = match &params {
             Some(p) => format!("{command}\0{p}"),
             None => command.to_string(),
         };
         let stale = {
-            let mut map = locked(&self.entries);
-            if map.len() >= MAX_ENTRIES && !map.contains_key(&key) {
-                map.clear();
+            let mut state = locked(&self.state);
+            if state.entries.len() >= MAX_ENTRIES && !state.entries.contains_key(&key) {
+                state.entries.clear();
             }
-            let entry = map.entry(key.clone()).or_default();
             let now = Instant::now();
-            let recent_failure = entry.failed.is_some_and(|at| now.duration_since(at) < RETRY);
-            match &entry.answer {
-                Some((answer, at)) if now.duration_since(*at) < FRESH || recent_failure => {
-                    let answer = answer.clone();
-                    if !entry.pending && self.refresh(&key, command, &params) {
-                        entry.pending = true;
-                    }
-                    return Ok(answer);
+            let node_failed = state.failed.is_some_and(|at| now.duration_since(at) < RETRY);
+            let entry = state.entries.entry(key.clone()).or_default();
+            let (answer, age) = match &entry.answer {
+                Some((answer, at)) => (Some(answer.clone()), now.duration_since(*at)),
+                None => (None, Duration::MAX),
+            };
+            let usable = answer.filter(|_| age < MAX_STALE);
+            // Wait for the node only when nothing else will bring an answer
+            // and it has not just shown that it is not answering.
+            let wait = age >= FRESH && !entry.pending && !node_failed;
+            if !wait {
+                if !entry.pending && self.refresh(&key, command, &params) {
+                    entry.pending = true;
                 }
-                None if recent_failure => return Err("the node did not answer".into()),
-                other => other.as_ref().map(|(answer, _)| answer.clone()),
+                return usable.ok_or_else(|| "the node did not answer".to_string());
             }
+            usable
         };
-        // Nothing recent: ask, with the map unlocked.
+        // Ask, with the state unlocked.
         let result = self.control.query(command, params);
-        let mut map = locked(&self.entries);
-        let entry = map.entry(key).or_default();
+        let mut state = locked(&self.state);
         match result {
             Ok(answer) => {
-                entry.answer = Some((answer.clone(), Instant::now()));
-                entry.failed = None;
+                state.failed = None;
+                state.entries.entry(key).or_default().answer =
+                    Some((answer.clone(), Instant::now()));
                 Ok(answer)
             }
             Err(e) => {
-                entry.failed = Some(Instant::now());
+                state.failed = Some(Instant::now());
                 stale.ok_or(e)
             }
         }
@@ -272,27 +294,31 @@ impl Cached {
         })
     }
 
-    /// Whether the node has ever answered `command` (without params).
+    /// Whether an answer to `command` (without params) is held.
     pub fn answered(&self, command: &str) -> bool {
-        locked(&self.entries)
+        locked(&self.state)
+            .entries
             .get(command)
             .is_some_and(|e| e.answer.is_some())
     }
 
-    /// Wait until the node has bound the socket and answered a status query
-    /// (see [`Control::wait_ready`]); the answer is kept for the first poll.
+    /// Wait, `wait` at most, until the node has bound the socket and
+    /// answered a status query; that answer is kept for the first poll.
     pub fn wait_ready(&self, wait: Duration) -> bool {
         let deadline = Instant::now() + wait;
         loop {
-            if self.control.query("show_status", None).is_ok() {
-                // Through the cache this time, so it holds the answer.
-                locked(&self.entries).remove("show_status");
-                return self.query("show_status", None).is_ok();
-            }
-            if Instant::now() >= deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            if let Ok(answer) = self.control.request("show_status", None, left.min(QUERY_TIMEOUT)) {
+                let mut state = locked(&self.state);
+                state.failed = None;
+                state.entries.entry("show_status".into()).or_default().answer =
+                    Some((answer, Instant::now()));
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10).min(left));
         }
     }
 }
@@ -403,7 +429,9 @@ mod tests {
                 .join()
                 .unwrap();
         });
-        assert!(Control::new(&path).wait_ready(Duration::from_secs(5)));
+        let cached = Cached::new(std::sync::Arc::new(Control::new(&path)));
+        assert!(cached.wait_ready(Duration::from_secs(5)));
+        assert!(cached.answered("show_status"), "the answer is kept");
         server.join().unwrap();
     }
 
@@ -483,5 +511,70 @@ mod tests {
         assert_eq!(a["data"]["k"], 1);
         assert_eq!(b["data"]["k"], 2);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn waiting_for_a_socket_that_never_appears_takes_the_wait_and_no_more() {
+        let cached = Cached::new(std::sync::Arc::new(Control::new(socket_path("never.sock"))));
+        let started = Instant::now();
+        assert!(!cached.wait_ready(Duration::from_millis(300)));
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(300) && took < Duration::from_millis(900), "{took:?}");
+    }
+
+    /// One node behind one socket: when it does not answer one query, a
+    /// caller is not made to wait for each of the others in turn.
+    #[test]
+    fn a_node_that_does_not_answer_one_query_is_not_waited_for_on_the_others() {
+        let path = socket_path("mute-many.sock");
+        let listener = UnixListener::bind(&path).unwrap(); // answers nothing
+        let cached = Cached::new(std::sync::Arc::new(Control::new(&path)));
+        assert!(cached.query("show_peers", None).is_err()); // the one wait
+        let started = Instant::now();
+        for command in ["show_sessions", "show_links", "show_lan_peers", "show_status"] {
+            assert!(cached.query(command, None).is_err());
+        }
+        assert!(started.elapsed() < Duration::from_millis(200), "waited per query");
+        drop(listener);
+    }
+
+    /// A node that has stopped accepting fills its backlog; a connect to it
+    /// must come back by the deadline, not block for good.
+    #[test]
+    fn a_full_backlog_costs_the_timeout_and_no_more() {
+        let path = socket_path("full.sock");
+        let listener =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        listener.bind(&socket2::SockAddr::unix(&path).unwrap()).unwrap();
+        listener.listen(1).unwrap();
+        let control = Control::new(&path);
+        let started = Instant::now();
+        // Far more than the backlog holds; every one returns.
+        for _ in 0..8 {
+            let err = control
+                .request("show_status", None, Duration::from_millis(100))
+                .unwrap_err();
+            assert!(err.contains("no answer in time"), "{err}");
+        }
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        drop(listener);
+    }
+
+    #[test]
+    fn an_answer_too_old_is_not_served() {
+        let path = socket_path("old.sock");
+        let server = counting(&path, 1);
+        let cached = Cached::new(std::sync::Arc::new(Control::new(&path)));
+        assert!(cached.query("show_status", None).is_ok());
+        server.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // Age the answer past MAX_STALE instead of waiting it out.
+        {
+            let mut state = locked(&cached.state);
+            let entry = state.entries.get_mut("show_status").unwrap();
+            let (answer, at) = entry.answer.take().unwrap();
+            entry.answer = Some((answer, at - MAX_STALE - Duration::from_secs(1)));
+        }
+        assert!(cached.query("show_status", None).is_err());
     }
 }
