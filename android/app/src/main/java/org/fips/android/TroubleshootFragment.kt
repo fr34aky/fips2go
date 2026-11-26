@@ -311,7 +311,7 @@ class TroubleshootFragment : Fragment() {
 
     /**
      * Live FMP (network/routing links to direct peers) and FSP (end-to-end
-     * encrypted sessions) view, from the node's lock-free `show_*` snapshots.
+     * encrypted sessions) view, from the node's `show_*` queries.
      * FMP byte counters come from `show_links`, joined via `link_id`.
      */
     private fun refreshSessions() {

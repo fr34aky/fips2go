@@ -91,8 +91,8 @@ pub extern "system" fn Java_org_fips_android_FipsNative_deriveIdentity(
 }
 
 /// `start(configJson, tunFd, callback)` → `""` on success, error message
-/// otherwise. `callback.protectFd(int)` is invoked for each UDP socket the
-/// node binds and every socket the shim dials itself.
+/// otherwise. `callback.protectFd(int)` is invoked for each UDP listen
+/// socket of the node and every socket the shim dials itself.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_fips_android_FipsNative_start(
     mut env: JNIEnv,

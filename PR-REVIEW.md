@@ -95,10 +95,16 @@ Do this before reading a single diff hunk.
    new identity while claiming to restore one; and clipboard copies of it must
    set `EXTRA_IS_SENSITIVE`.
 
-8. **Every underlay socket is still protected.** The node announces socket fds
-   to the shim's hook, which calls `VpnService.protect()`. A new socket on a
-   path that skips the hook routes its traffic back into the tunnel. Check
-   `PHASE3-NOTES.md`'s coverage table rather than assuming.
+8. **The app's own UID is never captured with a default route.** That is
+   what keeps the node's underlay out of its own tunnel: most of fips's
+   sockets (TCP transport, netmon probes, STUN, hole-punch, relay
+   websockets, mDNS) never reach `VpnService.protect()`. The app is outside
+   the tunnel when mesh apps are selected and captured for `fd00::/8` only
+   otherwise; a change to `establishTunnel` or the app picker that breaks
+   either is the finding. The hook itself still gets the shim's own sockets
+   and the node's UDP listen sockets, and it is what moves the FIPS Hotspot
+   socket onto its network — a change that stops that fd reaching
+   `protectFd` breaks the hotspot.
 
 9. **Settings migrations preserve existing choices.** `ConfigStore.applyDefaults()`
    seeds only keys the user has never saved, guarded by `contains()`, because

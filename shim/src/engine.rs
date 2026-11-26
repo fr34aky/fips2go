@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::SocketProtect;
 use crate::config::ShimConfig;
-use crate::control::Control;
+use crate::control::{Cached, Control};
 use crate::dns::DnsProxy;
 use crate::forward::Forwarder;
 use crate::pump::{Pump, PumpConfig};
@@ -25,7 +25,7 @@ const FORWARD_MTU: u16 = 1280;
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `start()` then waits for the node's control socket, which the
 /// node binds on a task of its own once its rx loop runs. Milliseconds in
-/// practice; past this the engine runs without status and queries.
+/// practice; past this the engine runs with no node status to show.
 const CONTROL_WAIT: Duration = Duration::from_secs(2);
 /// The in-process FIPS DNS responder (`dns.enabled` default bind).
 const LOCAL_RESPONDER: &str = "[::1]:5354";
@@ -133,9 +133,10 @@ struct Engine {
     node_thread: Option<std::thread::JoinHandle<()>>,
     pump: Option<Pump>,
     forwarder: Option<Forwarder>,
-    /// The node's control socket: every `show_*` query, and the `connect`
-    /// command (Diagnostics' manual dial of mDNS-seen peers).
-    control: Arc<Control>,
+    /// The node's control socket: every `show_*` query (answered from the
+    /// last reply, see [`Cached`]: Kotlin polls on its main thread), and the
+    /// `connect` command (Diagnostics' manual dial of mDNS-seen peers).
+    control: Arc<Cached>,
     npub: String,
     address: String,
     /// Our dup of the VpnService TUN fd; closed after the pump joins.
@@ -179,7 +180,7 @@ pub fn is_running() -> bool {
 
 /// Start the embedded node. `tun_fd` is borrowed (dup'd internally); the
 /// caller keeps ownership of its own fd. `protect` receives the fd of each
-/// UDP socket the node binds and of every socket the shim itself dials
+/// UDP listen socket of the node and of every socket the shim itself dials
 /// (wire it to `VpnService.protect`).
 ///
 /// The `ENGINE` mutex is held only for the final install, not for the whole
@@ -241,6 +242,7 @@ fn start_inner(
     ));
     fips_config.node.control.enabled = true;
     fips_config.node.control.socket_path = control.path().to_string_lossy().into_owned();
+    let control = Arc::new(Cached::new(control));
 
     let mut node = fips::Node::new(fips_config).map_err(|e| format!("node init: {e}"))?;
     // The Bluetooth seam, before start(): the transport is built over this
@@ -266,8 +268,9 @@ fn start_inner(
     // network (Kotlin's `protectFd` tells it by its bound address); for the
     // others `VpnService.protect` changes nothing while this app's UID is
     // outside its own tunnel or captured for `fd00::/8` only, which is
-    // always. fips's other sockets (TCP transport, netmon probes, STUN) are
-    // not announced and for the same reason need not be.
+    // always. fips's other sockets (TCP transport, netmon probes, STUN, and
+    // the hole-punch sockets a traversed link runs over) are not announced
+    // and for the same reason need not be.
     let udp_sockets = node.enable_app_owned_udp_fd();
     let node_protect = protect.clone();
     let netmon = node.netmon_trigger();
@@ -358,8 +361,8 @@ fn start_inner(
     let processor = crate::meshout::MeshOut::new(*our_fips_addr.as_bytes());
     if !control.wait_ready(CONTROL_WAIT) {
         tracing::warn!(
-            path = %control.path().display(),
-            "node control socket did not come up: no status, no queries"
+            path = %control.control().path().display(),
+            "node control socket did not come up: no node status, no queries"
         );
     }
 
@@ -791,7 +794,8 @@ pub fn names_online(validated: bool) {
     }
 }
 
-/// Compact status JSON for the UI. Always answers, running or not. `relays`
+/// Compact status JSON for the UI. Always answers, running or not, and
+/// without waiting for the node once it has answered a first time. `relays`
 /// lists the Nostr relay pool with per-relay connection state (empty when
 /// Nostr is off or the node has not published a snapshot yet); each call
 /// also asks the node runtime for a fresh snapshot, served by the next call.
@@ -816,16 +820,22 @@ pub fn status_json() -> String {
         });
         (value, engine.control.clone())
     };
+    // The last answer at once, refreshed for the next poll. A node that
+    // never answered (its control socket did not come up) is still a
+    // running node: an empty status, which the Overview shows as connected
+    // with no figures, not null, which it shows as still starting.
     value["status"] = control
         .query("show_status", None)
         .ok()
         .and_then(|mut v| v.get_mut("data").map(serde_json::Value::take))
-        .unwrap_or(serde_json::Value::Null);
+        .unwrap_or_else(|| serde_json::json!({}));
     value.to_string()
 }
 
-/// Generic read-only query passthrough (any `show_*`). Blocking, up to
-/// [`crate::control::QUERY_TIMEOUT`]; the `ENGINE` lock is not held meanwhile.
+/// Generic read-only query passthrough (any `show_*`). A query asked within
+/// the last few seconds is answered at once from the last reply and
+/// refreshed behind it; otherwise it waits for the node, up to
+/// [`crate::control::QUERY_TIMEOUT`]. The `ENGINE` lock is not held meanwhile.
 pub fn query_json(command: &str, params_json: &str) -> String {
     let Some(control) = lock(&ENGINE).as_ref().map(|e| e.control.clone()) else {
         return r#"{"status":"error","message":"not running"}"#.to_string();
@@ -865,7 +875,10 @@ pub fn connect_peer_json(npub: &str, address: &str) -> String {
         "address": address,
         "transport": "udp",
     });
-    match handle.request("connect", Some(params), crate::control::COMMAND_TIMEOUT) {
+    match handle
+        .control()
+        .request("connect", Some(params), crate::control::COMMAND_TIMEOUT)
+    {
         Ok(response) => response.to_string(),
         Err(e) => serde_json::json!({ "status": "error", "message": e }).to_string(),
     }
@@ -1537,7 +1550,21 @@ mod tests {
         let mut fds = [0i32; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let [read_fd, write_fd] = fds;
-        start(&config, read_fd, None).expect("start with the hotspot overlay");
+        // The protect hook must be handed both sockets, and be able to tell
+        // the hotspot one by its bound address: that is how Kotlin's
+        // `protectFd` finds the socket to move onto the hotspot network.
+        let seen: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::default();
+        let sink = seen.clone();
+        let hook: crate::SocketProtect = Arc::new(move |fd| {
+            use std::os::fd::{FromRawFd, IntoRawFd};
+            // Borrowed: read the address, give the fd back unclosed.
+            let socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+            if let Ok(addr) = socket.local_addr() {
+                lock(&sink).push(addr);
+            }
+            let _ = socket.into_raw_fd();
+        });
+        start(&config, read_fd, Some(hook)).expect("start with the hotspot overlay");
         // Stop the engine however this test ends: a panic that left it running
         // would fail every other engine test with "already running".
         struct StopOnDrop(i32, i32);
@@ -1549,6 +1576,16 @@ mod tests {
             }
         }
         let _stop = StopOnDrop(read_fd, write_fd);
+        {
+            let seen = lock(&seen);
+            assert_eq!(seen.len(), 2, "one fd per UDP instance: {seen:?}");
+            assert_eq!(
+                seen.iter().filter(|a| a.ip().to_string() == "127.0.0.1").count(),
+                1,
+                "the hotspot instance's socket, bound to its address: {seen:?}"
+            );
+            assert_eq!(seen[0].port(), seen[1].port(), "one shared port: {seen:?}");
+        }
 
         // `show_transports` is served from the tick-published snapshot, which
         // is empty until the first tick (1 s here).

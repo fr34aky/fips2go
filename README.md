@@ -139,12 +139,14 @@ usable on a device you also use for everything else.
   Settings → Appearance says light, or to follow the phone.
 
 Standalone repo — it depends on fips as a pinned **git dependency**
-(`fr34aky/fips` @ `android-hooks`, upstream v0.5.1+ plus the small embedder
-hooks: socket-protect, `TunPacketProcessor`, public `ControlReadHandle::query`,
-`ControlCommandHandle` for socket-less connect/disconnect, the `show_lan_peers`
-mDNS-sightings query, dial-scoped UDP instances for the hotspot, and a
-`NetmonTrigger` to wake the medium-change detector), so it clones and builds
-without a sibling fips checkout.
+(`fr34aky/fips` @ `android-hooks`: upstream fips plus a few additions it
+does not have yet — the `show_lan_peers` mDNS-sightings query, keeping
+tunnel addresses out of mDNS adverts, dial-scoped UDP instances sharing a
+port for the hotspot, the relay pool's connection state, and a ceiling on
+peers dialed from Nostr adverts), so it clones and builds without a sibling
+fips checkout. Everything else the app needs it takes through upstream's own
+embedder seams: the app-owned TUN, the UDP socket handover, the BLE radio
+slot, the netmon trigger and the control socket.
 
 ## Ecosystem: fips2go, fips-ui and fips-pub-domains
 
@@ -398,10 +400,10 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   host-routes — `2000::/128` for netd, `2001:4860:4860::8888/128` for
   Chromium's 60 s-cached reachability probe — keep AAAA queries and thus
   `.fips` names resolving) for the captured apps only, MTU 1280. The TUN fd is dup'd by the shim; a reader
-  thread classifies each outbound packet — `fd00::/8` goes through the node's
-  own `TunPacketProcessor` (destination filter, MSS clamp, hairpin, ICMPv6;
-  byte-identical to the daemon's system-TUN path), everything else to the
-  userspace forwarder.
+  thread classifies each outbound packet — `fd00::/8` is handed to the node with
+  the TCP MSS of a SYN clamped (in both directions; the node itself answers
+  what it cannot deliver with ICMPv6), everything else to the userspace
+  forwarder.
 - **DNS**: covered-app DNS is sent to the `fd00::53` sentinel and intercepted
   in the pump. `.fips` names go to the in-process FIPS responder
   (`[::1]:5354`) — a name from the app's hosts file (`hosts_path`) is first
@@ -412,12 +414,15 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   [fips-pub-domains' android.md](https://github.com/fr34aky/fips-pub-domains/blob/main/docs/android.md))
   and otherwise forwarded to upstream resolvers over protected sockets
   (SERVFAIL on total failure). Configurable via `dns_upstreams`.
-- **Socket protection**: the node announces every underlay socket fd to the
-  shim's hook, which crosses JNI to `VpnService.protect()`. Covered: UDP
-  listen/adopted/connected-peer, TCP listener/accepted/dialed (pre-SYN),
-  Nostr STUN/hole-punch. Not covered (no fd in those libraries): nostr-sdk
-  relay websockets, mDNS — benign because the fips app itself is not
-  captured by the per-app tunnel.
+- **Socket protection**: the shim's hook crosses JNI to
+  `VpnService.protect()`. Covered: every socket the shim dials itself
+  (forwarder, DNS upstreams) and the node's UDP listen sockets, which is
+  also how the FIPS Hotspot socket is moved onto its network. Not covered:
+  the node's TCP transport, netmon probe, STUN and hole-punch sockets (a
+  hole-punched link runs over one of those), nostr-sdk relay websockets,
+  mDNS — benign because the fips app itself is never captured by its
+  tunnel with a default route: it is outside it when mesh apps are
+  selected, and captured for `fd00::/8` only otherwise.
 - **FIPS Hotspot** (Settings toggle, on by default; API 29+, needs the fine
   location permission — Android hides SSIDs and scan results without it):
   while connected, the app auto-joins the open SSID `!FIPS` by two paths — a
@@ -446,8 +451,10 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   claimed so IPv6 internet traffic is refused inside the tunnel rather than
   leaking around the exit. Switching exits while connected keeps the node
   running.
-- **Status**: `FipsNative.status()`/`query()` are served lock-free from the
-  node's `ControlReadHandle` snapshots — same data as `fipsctl show_*`.
+- **Status**: `FipsNative.status()`/`query()` ask the node over its control
+  socket (a file in the app's private directory) — same data as
+  `fipsctl show_*`. A poller is answered at once from the last reply, which
+  is refreshed behind it.
 
 ## Status / caveats
 

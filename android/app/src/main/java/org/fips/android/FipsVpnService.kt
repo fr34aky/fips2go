@@ -212,7 +212,7 @@ class FipsVpnService : VpnService() {
     private fun prefs() = getSharedPreferences("fips", Context.MODE_PRIVATE)
 
     /**
-     * Called from Rust (JNI) for each UDP socket the node binds and every
+     * Called from Rust (JNI) for each UDP listen socket of the node and every
      * socket the shim dials itself (forwarder, DNS upstreams).
      */
     fun protectFd(fd: Int): Boolean {

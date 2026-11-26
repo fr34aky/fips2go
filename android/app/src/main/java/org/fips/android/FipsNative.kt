@@ -17,7 +17,7 @@ object FipsNative {
 
     /**
      * Start the embedded node. [callback] receives `protectFd(int)` for each
-     * UDP socket the node binds and every socket the shim dials itself. Returns "" on success, an error message otherwise.
+     * UDP listen socket of the node and every socket the shim dials itself. Returns "" on success, an error message otherwise.
      * Blocks until the node is up (worst case ~60s) — call off the main thread.
      */
     external fun start(configJson: String, tunFd: Int, callback: FipsVpnService): String
@@ -73,7 +73,11 @@ object FipsNative {
      */
     external fun status(): String
 
-    /** Any snapshot-served `show_*` query, e.g. `query("show_peers", "")`. */
+    /**
+     * Any `show_*` query, e.g. `query("show_peers", "")`. Asked again within a
+     * few seconds it answers at once from the last reply; otherwise it waits
+     * for the node, up to a second.
+     */
     external fun query(command: String, paramsJson: String): String
 
     /**

@@ -14,10 +14,10 @@ name = "fips_android"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-# fips with the Android embedder hooks (app-owned TUN seam, socket-protect,
-# TunPacketProcessor, ControlReadHandle::query, ControlCommandHandle,
-# show_lan_peers) — the `android-hooks` branch of the fr34aky/fips fork,
-# pinned. The crate is published as `fips-mesh` (library name `fips`), so
+# fips plus what the app needs and upstream does not have yet (show_lan_peers,
+# mDNS exclude_addrs, UDP share_port and dial_prefixes, relay status, the
+# Nostr discovery ceiling) — the `android-hooks` branch of the fr34aky/fips
+# fork, pinned. The crate is published as `fips-mesh` (library name `fips`), so
 # the dependency renames it. For local fips development, override with:
 #   [patch."https://github.com/fr34aky/fips"]
 #   fips-mesh = { path = "../fips" }

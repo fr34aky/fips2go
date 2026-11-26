@@ -29,7 +29,7 @@ pub mod pump;
 /// network, not through this app's own tunnel: `VpnService.protect`, plus
 /// whatever else Kotlin does with it (`FipsVpnService.protectFd` moves the
 /// FIPS Hotspot socket onto its network). Handed every socket the shim dials
-/// itself and each UDP socket the node binds. From any thread.
+/// itself and each UDP listen socket of the node. From any thread.
 pub type SocketProtect = std::sync::Arc<dyn Fn(std::os::unix::io::RawFd) + Send + Sync>;
 
 /// Initialize tracing. Lines fan out to the in-app ring buffer plus the

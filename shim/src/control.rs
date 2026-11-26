@@ -11,7 +11,9 @@
 //! enter, so it gives nothing on the phone a way in that it did not have.
 //!
 //! Every request is its own connection: blocking, with a deadline, so a
-//! caller is never held longer than `timeout` however busy the node is. A
+//! caller is never held longer than `timeout` however busy the node is.
+//! Callers on the app's main thread go through [`Cached`], which answers
+//! from the last reply and fetches the next one on a thread of its own. A
 //! `show_*` query is answered by fips's accept task from snapshots and never
 //! reaches the rx loop; it does wake the node's runtime, which the in-process
 //! handle did not, so nothing should poll through this on a short timer while
@@ -132,6 +134,169 @@ impl Control {
     }
 }
 
+/// How old an answer may be and still be served without asking again first.
+/// Above the UI's 2 s polls, so a screen that is polling never waits.
+const FRESH: Duration = Duration::from_secs(5);
+/// After a query that got no answer, how long before a caller is made to
+/// wait for one again.
+const RETRY: Duration = Duration::from_secs(2);
+/// Distinct queries remembered. The app asks a fixed handful.
+const MAX_ENTRIES: usize = 32;
+
+#[derive(Default)]
+struct Entry {
+    /// The last answer the node gave, and when.
+    answer: Option<(Value, Instant)>,
+    /// A refresh is queued or running.
+    pending: bool,
+    /// When the node last failed to answer this.
+    failed: Option<Instant>,
+}
+
+/// A refresh for the worker: the cache key, the command and its params.
+type Job = (String, String, Option<Value>);
+type Entries = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Entry>>>;
+
+fn locked(map: &Entries) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Entry>> {
+    map.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Queries for callers that must not wait: Kotlin polls status and the
+/// Diagnostics queries on the main thread, where the fork's in-process
+/// handle answered from memory.
+///
+/// An answer younger than [`FRESH`] is returned at once and a worker thread
+/// fetches the next one, so a poller sees the node's state one poll late and
+/// never blocks. Only a query with no recent answer waits for the node
+/// ([`QUERY_TIMEOUT`] at most), and when the node did not answer, nothing
+/// waits for it again for [`RETRY`]: the last answer is served meanwhile. A
+/// node that is slow therefore costs a poller one timeout, not one per call,
+/// and an answer once given is never replaced by "no answer".
+pub struct Cached {
+    control: std::sync::Arc<Control>,
+    entries: Entries,
+    /// To the worker; it ends when this is dropped.
+    jobs: std::sync::Mutex<Option<std::sync::mpsc::Sender<Job>>>,
+}
+
+impl Cached {
+    pub fn new(control: std::sync::Arc<Control>) -> Self {
+        let entries = Entries::default();
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        let worker = {
+            let control = control.clone();
+            let entries = entries.clone();
+            std::thread::Builder::new()
+                .name("fips-control".into())
+                .spawn(move || {
+                    // Blocks in recv: no wakeups while nobody asks.
+                    for (key, command, params) in rx {
+                        let result = control.query(&command, params);
+                        let mut map = locked(&entries);
+                        if let Some(entry) = map.get_mut(&key) {
+                            entry.pending = false;
+                            match result {
+                                Ok(answer) => {
+                                    entry.answer = Some((answer, Instant::now()));
+                                    entry.failed = None;
+                                }
+                                Err(_) => entry.failed = Some(Instant::now()),
+                            }
+                        }
+                    }
+                })
+        };
+        Self {
+            control,
+            entries,
+            // No worker (thread limit): every query asks the node itself.
+            jobs: std::sync::Mutex::new(worker.ok().map(|_| tx)),
+        }
+    }
+
+    pub fn control(&self) -> &std::sync::Arc<Control> {
+        &self.control
+    }
+
+    /// The node's answer to a `show_*` query: a recent one at once, else
+    /// asked for now. `Err` only when the node has never answered this and
+    /// does not answer now.
+    pub fn query(&self, command: &str, params: Option<Value>) -> Result<Value, String> {
+        let key = match &params {
+            Some(p) => format!("{command}\0{p}"),
+            None => command.to_string(),
+        };
+        let stale = {
+            let mut map = locked(&self.entries);
+            if map.len() >= MAX_ENTRIES && !map.contains_key(&key) {
+                map.clear();
+            }
+            let entry = map.entry(key.clone()).or_default();
+            let now = Instant::now();
+            let recent_failure = entry.failed.is_some_and(|at| now.duration_since(at) < RETRY);
+            match &entry.answer {
+                Some((answer, at)) if now.duration_since(*at) < FRESH || recent_failure => {
+                    let answer = answer.clone();
+                    if !entry.pending && self.refresh(&key, command, &params) {
+                        entry.pending = true;
+                    }
+                    return Ok(answer);
+                }
+                None if recent_failure => return Err("the node did not answer".into()),
+                other => other.as_ref().map(|(answer, _)| answer.clone()),
+            }
+        };
+        // Nothing recent: ask, with the map unlocked.
+        let result = self.control.query(command, params);
+        let mut map = locked(&self.entries);
+        let entry = map.entry(key).or_default();
+        match result {
+            Ok(answer) => {
+                entry.answer = Some((answer.clone(), Instant::now()));
+                entry.failed = None;
+                Ok(answer)
+            }
+            Err(e) => {
+                entry.failed = Some(Instant::now());
+                stale.ok_or(e)
+            }
+        }
+    }
+
+    /// Queue a background fetch; false when there is no worker to do it.
+    fn refresh(&self, key: &str, command: &str, params: &Option<Value>) -> bool {
+        let jobs = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.as_ref().is_some_and(|tx| {
+            tx.send((key.to_string(), command.to_string(), params.clone()))
+                .is_ok()
+        })
+    }
+
+    /// Whether the node has ever answered `command` (without params).
+    pub fn answered(&self, command: &str) -> bool {
+        locked(&self.entries)
+            .get(command)
+            .is_some_and(|e| e.answer.is_some())
+    }
+
+    /// Wait until the node has bound the socket and answered a status query
+    /// (see [`Control::wait_ready`]); the answer is kept for the first poll.
+    pub fn wait_ready(&self, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            if self.control.query("show_status", None).is_ok() {
+                // Through the cache this time, so it holds the answer.
+                locked(&self.entries).remove("show_status");
+                return self.query("show_status", None).is_ok();
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +404,84 @@ mod tests {
                 .unwrap();
         });
         assert!(Control::new(&path).wait_ready(Duration::from_secs(5)));
+        server.join().unwrap();
+    }
+
+    /// A server that answers `n` and counts up, `connections` times.
+    fn counting(path: &Path, connections: usize) -> std::thread::JoinHandle<()> {
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        serve(path, connections, move |_| {
+            let i = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            format!("{{\"status\":\"ok\",\"data\":{{\"n\":{i}}}}}\n").into_bytes()
+        })
+    }
+
+    fn n_of(answer: &Value) -> u64 {
+        answer["data"]["n"].as_u64().unwrap()
+    }
+
+    #[test]
+    fn a_poller_gets_the_last_answer_at_once_and_the_next_one_a_poll_later() {
+        let path = socket_path("cached.sock");
+        let server = counting(&path, 3);
+        let cached = Cached::new(std::sync::Arc::new(Control::new(&path)));
+        // Nothing known: this one asks the node.
+        assert_eq!(n_of(&cached.query("show_status", None).unwrap()), 0);
+        // Served from memory, and a refresh is under way.
+        let started = Instant::now();
+        assert_eq!(n_of(&cached.query("show_status", None).unwrap()), 0);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        // The refreshed answer turns up without anyone waiting for it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while n_of(&cached.query("show_status", None).unwrap()) == 0 {
+            assert!(Instant::now() < deadline, "the refresh never landed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(cached);
+        drop(server); // may still be in accept: not joined
+    }
+
+    #[test]
+    fn an_answer_once_given_outlives_a_node_that_stops_answering() {
+        let path = socket_path("gone.sock");
+        let server = counting(&path, 1);
+        let cached = Cached::new(std::sync::Arc::new(Control::new(&path)));
+        assert_eq!(n_of(&cached.query("show_status", None).unwrap()), 0);
+        server.join().unwrap(); // the listener is gone now
+        std::fs::remove_file(&path).unwrap();
+        for _ in 0..5 {
+            assert_eq!(n_of(&cached.query("show_status", None).unwrap()), 0);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(cached.answered("show_status"));
+    }
+
+    #[test]
+    fn a_node_that_never_answered_is_not_waited_for_on_every_call() {
+        let path = socket_path("mute.sock");
+        let listener = UnixListener::bind(&path).unwrap(); // accepts nothing, answers nothing
+        let cached = Cached::new(std::sync::Arc::new(Control::new(&path)));
+        assert!(cached.query("show_peers", None).is_err()); // waits the timeout once
+        let started = Instant::now();
+        for _ in 0..5 {
+            assert!(cached.query("show_peers", None).is_err());
+        }
+        assert!(started.elapsed() < Duration::from_millis(200), "waited again");
+        assert!(!cached.answered("show_peers"));
+        drop(listener);
+    }
+
+    #[test]
+    fn queries_with_different_params_are_kept_apart() {
+        let path = socket_path("params-cache.sock");
+        let server = serve(&path, 2, |request| {
+            format!("{{\"status\":\"ok\",\"data\":{}}}\n", request["params"]).into_bytes()
+        });
+        let cached = Cached::new(std::sync::Arc::new(Control::new(&path)));
+        let a = cached.query("show_x", Some(serde_json::json!({ "k": 1 }))).unwrap();
+        let b = cached.query("show_x", Some(serde_json::json!({ "k": 2 }))).unwrap();
+        assert_eq!(a["data"]["k"], 1);
+        assert_eq!(b["data"]["k"], 2);
         server.join().unwrap();
     }
 }
