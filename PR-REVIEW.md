@@ -44,9 +44,10 @@ Do this before reading a single diff hunk.
    particular go stale within hours.
 4. **Project guidance.** `CLAUDE.md` is the architecture and constraints
    document, and it is specific. `PHASE1-NOTES.md` / `PHASE2-NOTES.md` /
-   `PHASE3-NOTES.md` document the porting history and the socket-protect
-   coverage table — consult them before accepting a change to the embedding
-   seam.
+   `PHASE3-NOTES.md` document the porting history — consult them before
+   accepting a change to the embedding seam, but not for which sockets are
+   protected: that part of them is superseded, and criterion 8 below and
+   `CLAUDE.md`'s Socket protection bullet are current.
 5. **Prior art.** Search closed PRs and commits for the same file. Much of this
    codebase's behaviour is the result of a specific device-observed bug, and
    the commit message usually explains it.

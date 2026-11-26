@@ -11,8 +11,9 @@ use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 use std::sync::Arc;
 
 /// Build the socket-protect hook from the Java callback object (the
-/// `FipsVpnService`): each underlay fd is passed to its
-/// `protectFd(int): Boolean` method. Fires from arbitrary Rust threads, so
+/// `FipsVpnService`): the fd of each of the node's UDP listen sockets and of
+/// every socket the shim dials is passed to its `protectFd(int): Boolean`
+/// method. Fires from arbitrary Rust threads, so
 /// the hook owns a `JavaVM` reference and attaches on demand.
 fn protect_hook_from(env: &mut JNIEnv, callback: &JObject) -> Option<crate::SocketProtect> {
     if callback.is_null() {

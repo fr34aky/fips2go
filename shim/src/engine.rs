@@ -328,7 +328,18 @@ fn start_inner(
                 if let Err(e) = later {
                     tracing::warn!(error = %e, "no thread for later UDP sockets");
                 }
-                let _ = ready_tx.send(Ok(()));
+                if ready_tx.send(Ok(())).is_err() {
+                    // Nobody is waiting: `start` gave up on this node
+                    // (START_TIMEOUT). Stop it here, before the rx loop,
+                    // which is where the control socket is bound: a node
+                    // nobody owns must not take that path from the next
+                    // start and then unlink it on its way out.
+                    tracing::warn!("node started after its start was given up; stopping it");
+                    if let Err(e) = node.stop().await {
+                        tracing::warn!(error = %e, "stopping the abandoned node");
+                    }
+                    return;
+                }
                 // Relay-pool refresher for the UI: the pool lives inside the
                 // Nostr runtime, which only this runtime may await on. Runs
                 // once per status poll (Notify permit), so it costs nothing
@@ -372,9 +383,10 @@ fn start_inner(
             return Err(e);
         }
         Err(RecvTimeoutError::Timeout) => {
-            // Not joined (it may never return), but told to stop: a start
-            // that completes late must not leave a node running, holding
-            // the control socket and the DNS port of the next one.
+            // Not joined (it may never return). When its start does
+            // complete, the node thread finds nobody waiting and stops the
+            // node before its rx loop; the stop signal covers a start that
+            // completed in the instant before this.
             let _ = stop_tx.send(());
             return Err("node start timed out".into());
         }

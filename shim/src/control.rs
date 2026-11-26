@@ -34,6 +34,8 @@ const MAX_RESPONSE: u64 = 1 << 20;
 /// binds it on a task of its own once its rx loop runs, shortly after
 /// `start` returns.
 const BIND_GRACE: Duration = Duration::from_secs(2);
+/// The shortest wait worth starting; less is treated as the deadline passed.
+const MIN_WAIT: Duration = Duration::from_millis(1);
 
 #[derive(Debug)]
 pub struct Control {
@@ -47,8 +49,10 @@ pub struct Control {
 fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, String> {
     let grace = Instant::now() + BIND_GRACE;
     loop {
+        // Under a millisecond counts as none: a timeout that rounds down
+        // to zero means "no timeout" to the kernel.
         let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        if left < MIN_WAIT {
             return Err("control socket: no answer in time".into());
         }
         let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
@@ -97,7 +101,7 @@ impl Control {
         line.push('\n');
         // What is left of the one deadline, not a fresh timeout.
         let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        if left < MIN_WAIT {
             return Err("control socket: no answer in time".into());
         }
         stream
@@ -111,7 +115,7 @@ impl Control {
         let mut chunk = [0u8; 16 * 1024];
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if left < MIN_WAIT {
                 return Err("control socket: no answer in time".into());
             }
             stream
