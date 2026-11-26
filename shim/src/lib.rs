@@ -8,6 +8,7 @@
 
 pub mod ble;
 pub mod config;
+pub mod control;
 pub mod dns;
 pub mod engine;
 pub mod exit;
@@ -17,11 +18,19 @@ pub mod forward;
 mod jni_api;
 pub mod logbuf;
 pub mod meshhttp;
+pub mod meshout;
 pub mod meshtcp;
 pub mod meshudp;
 pub mod names;
 pub mod packet;
 pub mod pump;
+
+/// Called with the raw fd of a socket that must leave on the underlying
+/// network, not through this app's own tunnel: `VpnService.protect`, plus
+/// whatever else Kotlin does with it (`FipsVpnService.protectFd` moves the
+/// FIPS Hotspot socket onto its network). Handed every socket the shim dials
+/// itself and each UDP listen socket of the node. From any thread.
+pub type SocketProtect = std::sync::Arc<dyn Fn(std::os::unix::io::RawFd) + Send + Sync>;
 
 /// Initialize tracing. Lines fan out to the in-app ring buffer plus the
 /// platform sink (logcat tag "fips" on Android, stderr elsewhere). Level from

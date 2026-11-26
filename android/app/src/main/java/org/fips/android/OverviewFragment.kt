@@ -402,8 +402,7 @@ class OverviewFragment : Fragment() {
                 ?.let { ConfigStore.exitLabel(it) }
                 ?: ConfigStore.exitLabel(ConfigStore.ExitNode("", npub))
         }
-        val noApps = (ConfigStore.prefs(ctx)
-            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()).isEmpty()
+        val noApps = AppPickerActivity.storedMeshApps(ctx).isEmpty()
         view?.findViewById<TextView>(R.id.internet_route_summary)?.text = when {
             !running && stored == null -> "Mesh apps use this phone's connection."
             // Starting, or a rebind restarting the node: the tunnel is up and
@@ -453,8 +452,7 @@ class OverviewFragment : Fragment() {
 
     private fun updateMeshApps() {
         val root = view ?: return
-        val selected = ConfigStore.prefs(requireContext())
-            .getStringSet(AppPickerActivity.KEY_MESH_APPS, emptySet()) ?: emptySet()
+        val selected = AppPickerActivity.storedMeshApps(requireContext())
         val n = selected.size
         root.findViewById<TextView>(R.id.mesh_apps_summary).text = when (n) {
             0 -> "No apps selected — no app can reach the mesh yet."

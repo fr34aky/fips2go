@@ -28,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpSocket, UdpSocket};
 use tokio::sync::Notify;
 
-use fips::SocketProtect;
+use crate::SocketProtect;
 
 use crate::dns::DnsProxy;
 

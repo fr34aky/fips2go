@@ -1201,6 +1201,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "smoltcp",
+ "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",

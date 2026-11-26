@@ -18,7 +18,8 @@
 //! fd (a new tunnel after an IPv6-route flip or a changed app selection)
 //! while the bridge and everything upstream keep running.
 //! - **bridge** — forwards mesh→app packets from the node's inbound receiver
-//!   into `writer_rx`, so the writer is the fd's only writer (replies to the
+//!   into `writer_rx` (the MSS of a SYN or SYN-ACK clamped on the way, see
+//!   [`crate::meshout`]), so the writer is the fd's only writer (replies to the
 //!   shim's own mesh flows are diverted to them instead). Ends when the
 //!   node drops its inbound sender during drain.
 
@@ -211,7 +212,14 @@ impl Pump {
                     let mut logged_ports = std::collections::HashSet::new();
                     while running.load(Ordering::Relaxed) {
                         match inbound_rx.recv() {
-                            Ok(pkt) => {
+                            Ok(mut pkt) => {
+                                // The MSS a peer announces bounds what this
+                                // side sends it. The node's processor clamps
+                                // only what goes out, so bound what comes
+                                // in here: ahead of the divert, so the
+                                // shim's own smoltcp flows are held to it
+                                // like an app's.
+                                crate::meshout::clamp_inbound(&mut pkt);
                                 let Some(pkt) = divert.claim(pkt) else {
                                     continue; // an in-process flow's reply
                                 };

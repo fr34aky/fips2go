@@ -14,10 +14,11 @@ name = "fips_android"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-# fips with the Android embedder hooks (app-owned TUN seam, socket-protect,
-# TunPacketProcessor, ControlReadHandle::query, ControlCommandHandle,
-# show_lan_peers) — the `android-hooks` branch of the fr34aky/fips fork,
-# pinned. The crate is published as `fips-mesh` (library name `fips`), so
+# fips plus what the app needs and upstream does not have yet (the public
+# read handle for node status, TunPacketProcessor, show_lan_peers,
+# mDNS exclude_addrs, UDP share_port and dial_prefixes, relay status, the
+# Nostr discovery ceiling) — the `android-hooks` branch of the fr34aky/fips
+# fork, pinned. The crate is published as `fips-mesh` (library name `fips`), so
 # the dependency renames it. For local fips development, override with:
 #   [patch."https://github.com/fr34aky/fips"]
 #   fips-mesh = { path = "../fips" }
@@ -34,6 +35,9 @@ pubdom-resolve = { git = "https://github.com/fr34aky/fips-pub-domains", rev = "8
 # already has through fips and pubdom-resolve: same version, same features.
 nostr-sdk = { version = "0.44", default-features = false }
 libc = "0.2"
+# The control socket's connect needs a deadline std does not offer. Already
+# in the tree through tokio, at this version.
+socket2 = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

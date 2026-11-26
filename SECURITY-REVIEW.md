@@ -115,10 +115,20 @@ Everything crosses JNI as JSON strings.
   but check the clipboard is flagged sensitive and that `deriveIdentity` is
   never handed an empty string (which means "generate", and would silently mint
   a new identity while claiming to restore one).
-- **Tunnel leaks.** Every underlay socket must be passed to
-  `VpnService.protect()`, or its traffic routes back into the tunnel. Missing
-  protection, or a socket created on a path that skips the hook, is a real
-  finding.
+- **Tunnel leaks.** The node's underlay must never route into its own
+  tunnel. What guarantees that is that the app's own UID is never captured
+  with a default route: outside the tunnel when mesh apps are selected,
+  captured for `fd00::/8` only otherwise (`FipsVpnService.establishTunnel`,
+  and the app picker never offering this app). A change that captures the
+  app with `0.0.0.0/0` or `::/0` is a real finding. `VpnService.protect()`
+  is not the guard: it is applied to the shim's own sockets and the node's
+  UDP listen sockets only (see the deliberate choices below).
+- **The control socket.** The node listens on `files/control.sock` and takes
+  mutating commands (`connect`, `disconnect`) as well as queries. Only the
+  app's private directory keeps other UIDs out. Flag anything that moves it
+  to a shared location, widens the directory's permissions, or lets text
+  from outside the app choose the command sent (the shim sends only
+  `connect`, with an npub and address from the node's own mDNS sightings).
 - **Updater integrity.** `Updater.kt` must verify the downloaded APK against
   the release `.sha256` before handing it to the package installer, and must
   not fall back to installing an unverified file.
@@ -127,6 +137,30 @@ Everything crosses JNI as JSON strings.
 
 ## Deliberate design choices — not findings
 
+- Most of the node's sockets are not passed to `VpnService.protect()`: its
+  TCP transport, netmon probe, STUN and hole-punch sockets, nostr-sdk's relay
+  websockets and mDNS. The app builds against upstream fips's embedder seams,
+  which hand over the UDP listen sockets only, and protection changes nothing
+  for a UID that is never captured with a default route. One known edge: with
+  no mesh app selected the app is captured for `fd00::/8`, so a fips peer at
+  a ULA LAN address (`fd…`) is inside the tunnel's route. Over TCP it would
+  not connect. Over UDP the listen socket is protected only once the node's
+  `start` has returned, where the fork's hook ran at bind, so a handshake to
+  such a peer sent from inside `start` is lost and the link comes up on fips's
+  retry.
+- The node's control socket is on, in the app's private directory. It is the
+  interface upstream fips offers for sending a running node a command; the
+  app uses it for Diagnostics' manual connect and for nothing else (status
+  is read in process). Binding it, fips sets the process umask to 007 for
+  the length of the `bind` call, at every node start: a file another thread
+  creates in that instant gets group bits the app's own 077 would not give
+  it. The app's files are in its private directory and its group is its
+  own, so nothing is exposed.
+- The FIPS Hotspot socket is moved onto the hotspot network once the node's
+  `start` has returned, not at bind. A peer the node dials from inside
+  `start` through that socket (a static peer address inside the hotspot's
+  subnet; hotspot peers are normally found by mDNS, later) has its first
+  handshake leave on the default network, and links on fips's retry.
 - The inbound firewall's default allowlist is empty and fips needs no inbound
   TUN ports; that is intentional, not a misconfiguration.
 - `enable_nostr` and the in-app `.fips` resolver are hardcoded on.

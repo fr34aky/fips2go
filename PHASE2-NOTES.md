@@ -1,5 +1,13 @@
 # Phase 2 — embedder hooks inside the fips codebase
 
+> **Superseded in part (2026-11-26).** The app no longer uses
+> `set_socket_protect`, and the fork drops it at its next pin
+> (`TunPacketProcessor` stays). The socket
+> coverage listed below is history: today only the shim's own sockets and the
+> node's UDP listen sockets reach `VpnService.protect()`, and what keeps the
+> node's underlay out of its tunnel is that the app's UID is never captured
+> with a default route. `CLAUDE.md` and `SECURITY-REVIEW.md` are current.
+
 Date: 2026-08-08. All local: the changes live on the **`android-hooks` branch
 in the worktree at `fips-android/fips/`** (commit `a1c796d`), never pushed;
 your main checkout at `~/fips` is untouched.

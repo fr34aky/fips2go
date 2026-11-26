@@ -47,6 +47,20 @@ class AppPickerActivity : AppCompatActivity() {
         const val PREFS = "fips"
         const val KEY_MESH_APPS = "mesh_apps"
         private const val STATE_APPLIED = "applied_selection"
+
+        /**
+         * The stored mesh-app selection, as an immutable copy and never with
+         * this app in it. The one place the stored set is read: the tunnel,
+         * the rebind comparison, the Overview and this screen must agree,
+         * and this app must never be among the captured ones — captured
+         * with the default route, the node's own underlay sockets (most of
+         * which are not `protect()`ed) would enter its tunnel. The list
+         * below never offers it; this holds whatever ended up stored.
+         */
+        fun storedMeshApps(context: android.content.Context): Set<String> =
+            (context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                .getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet())
+                .filterTo(mutableSetOf()) { it != context.packageName }
     }
 
     private data class AppEntry(val pkg: String, val label: String, val icon: Drawable)
@@ -72,8 +86,7 @@ class AppPickerActivity : AppCompatActivity() {
                 }.getOrNull()
             }
 
-        val selected =
-            (prefs().getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet()).toMutableSet()
+        val selected = storedMeshApps(this).toMutableSet()
 
         // Selected apps first, as of opening the screen. The order is NOT
         // re-sorted on toggle: a row jumping away under the finger is worse
@@ -159,7 +172,7 @@ class AppPickerActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         if (isChangingConfigurations) return
-        val now = (prefs().getStringSet(KEY_MESH_APPS, emptySet()) ?: emptySet()).toSet()
+        val now = storedMeshApps(this)
         if (now == appliedSelection) return
         appliedSelection = now
         FipsVpnService.requestRebind(this)
