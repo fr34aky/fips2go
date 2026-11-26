@@ -15,7 +15,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 # fips plus what the app needs and upstream does not have yet (the public
-# read handle for node status, show_lan_peers,
+# read handle for node status, TunPacketProcessor, show_lan_peers,
 # mDNS exclude_addrs, UDP share_port and dial_prefixes, relay status, the
 # Nostr discovery ceiling) — the `android-hooks` branch of the fr34aky/fips
 # fork, pinned. The crate is published as `fips-mesh` (library name `fips`), so

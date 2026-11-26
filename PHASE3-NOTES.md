@@ -1,10 +1,9 @@
 # Phase 3 — JNI shim + Kotlin VpnService app
 
-> **Superseded in part (2026-11-26).** `set_socket_protect` and the node's
-> `TunPacketProcessor` are no longer used: the shim clamps the MSS itself
-> (`meshout.rs`) and takes the node's UDP sockets through
-> `enable_app_owned_udp_fd`. Status is still read through
-> `ControlReadHandle::query`. The component table below is history; `CLAUDE.md` is current.
+> **Superseded in part (2026-11-26).** `set_socket_protect` is no longer
+> used: the shim takes the node's UDP sockets through
+> `enable_app_owned_udp_fd`. The node's `TunPacketProcessor` and
+> `ControlReadHandle::query` are still what the pump and status use. The component table below is history; `CLAUDE.md` is current.
 
 Date: 2026-08-08. All local. Depends on the `android-hooks` worktree
 (`fips-android/fips/`, commits `a1c796d` + `bda3997` — the second adds the

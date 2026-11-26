@@ -140,7 +140,8 @@ usable on a device you also use for everything else.
 
 Standalone repo — it depends on fips as a pinned **git dependency**
 (`fr34aky/fips` @ `android-hooks`: upstream fips plus a few additions it
-does not have yet — a public read handle for node status, the
+does not have yet — a public read handle for node status, the outbound
+packet processor with its per-destination MSS clamp, the
 `show_lan_peers` mDNS-sightings query, keeping
 tunnel addresses out of mDNS adverts, dial-scoped UDP instances sharing a
 port for the hotspot, the relay pool's connection state, and a ceiling on
@@ -401,9 +402,10 @@ fips = { path = "../fips" }   # your local fips checkout on android-hooks
   host-routes — `2000::/128` for netd, `2001:4860:4860::8888/128` for
   Chromium's 60 s-cached reachability probe — keep AAAA queries and thus
   `.fips` names resolving) for the captured apps only, MTU 1280. The TUN fd is dup'd by the shim; a reader
-  thread classifies each outbound packet — `fd00::/8` is handed to the node with
-  the TCP MSS of a SYN clamped (in both directions; the node itself answers
-  what it cannot deliver with ICMPv6), everything else to the userspace
+  thread classifies each outbound packet — `fd00::/8` goes through the node's
+  own `TunPacketProcessor` (destination filter, per-destination MSS clamp,
+  hairpin, ICMPv6; byte-identical to the daemon's system-TUN path; the shim
+  bounds the MSS of inbound SYNs as well), everything else to the userspace
   forwarder.
 - **DNS**: covered-app DNS is sent to the `fd00::53` sentinel and intercepted
   in the pump. `.fips` names go to the in-process FIPS responder

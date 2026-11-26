@@ -1039,7 +1039,7 @@ mod tests {
 
             let inner = ipv4_syn(1460);
             let outer = wrap(&inner, &addr_a, &addr_b);
-            let processor = crate::meshout::MeshOut::new(addr_a);
+            let processor = a.tun_packet_processor();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel::<bool>();
             let expect = outer.clone();
             let receiver = std::thread::spawn(move || {
@@ -1058,12 +1058,12 @@ mod tests {
                 loop {
                     let mut pkt = outer.clone();
                     match processor.process(&mut pkt) {
-                        crate::meshout::Action::Forward => {
+                        fips::TunPacketAction::Forward => {
                             if a_out.send(pkt).await.is_err() {
                                 return;
                             }
                         }
-                        other => panic!("the outbound edge must forward IPv4-in-IPv6, got {other:?}"),
+                        other => panic!("processor must forward IPv4-in-IPv6, got {other:?}"),
                     }
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }

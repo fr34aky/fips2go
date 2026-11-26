@@ -1,28 +1,23 @@
-//! What the shim does to a mesh packet at the edge of the node's app-owned
-//! TUN channels, in both directions.
+//! The mesh → app half of the TCP MSS clamp.
 //!
 //! fips documents the contract of `Node::enable_app_owned_tun`: the embedder
-//! pushes only `fd00::/8`-destined IPv6 packets, clamps the TCP MSS on
-//! SYN-flagged segments in both directions, and gets ICMPv6 errors (no
-//! route, Packet Too Big) back on the inbound channel. This module is that
-//! contract's embedder half. It replaces the `TunPacketProcessor` the fips
-//! fork used to hand out, so the shim needs nothing here that upstream fips
-//! does not export.
+//! clamps the TCP MSS on SYN-flagged segments in both directions. Outbound
+//! is the node's own `TunPacketProcessor` (from the fips fork), because the
+//! right ceiling there is per destination: the path MTU the node has learned,
+//! which on a Bluetooth link is routinely below the IPv6 minimum, where no
+//! Packet Too Big brings a phone's TCP down to it. That map is the node's,
+//! and upstream fips does not hand it to an embedder.
 //!
-//! The ceiling is one constant, where the node's own system-TUN reader uses
-//! a per-destination value: [`MAX_MSS`] is the segment that fits a 1280-byte
-//! path, which every hop must carry and which is also what the node itself
-//! applies to a destination it has not measured yet. A flow over a path the
-//! node has learned to be wider no longer gets the larger segment (1220 at
-//! most on this tunnel, whose MTU is 1280), and one over a path learned to
-//! be narrower than 1280 is no longer clamped below it here: that is left
-//! to the node, which splits or answers Packet Too Big.
+//! Inbound nobody clamped: the processor covers what goes out only, while
+//! the daemon's system-TUN writer also clamps what comes in. This is that
+//! half, as an upper bound: [`max_mss`] is the segment of a 1280-byte path,
+//! which every hop must carry. A peer that announces less keeps its value
+//! (its own node clamps what it sends for the path it knows); one that
+//! announces more is held to this.
 
 use fips::ipv6tun::icmp::mss_ceiling;
 use fips::ipv6tun::tcp_mss::clamp_tcp_mss;
 
-/// First byte of every mesh address (`fd00::/8`).
-const MESH_PREFIX: u8 = fips::identity::IPV6_ADDRESS_PREFIX;
 /// The IPv6 minimum link MTU: the wire size every mesh path carries.
 const MIN_PATH_MTU: u16 = 1280;
 
@@ -31,45 +26,9 @@ pub fn max_mss() -> u16 {
     mss_ceiling(MIN_PATH_MTU)
 }
 
-/// What to do with a packet headed for the mesh.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Action {
-    /// Push it into the node's outbound channel (MSS clamped in place).
-    Forward,
-    /// Addressed to this node itself: the node has no route to itself, so
-    /// the caller delivers it locally or reports it.
-    Own,
-    /// Not a mesh packet (not IPv6, truncated, or not for `fd00::/8`).
-    Drop,
-}
-
-/// The outbound edge: cheap to clone, no state but this node's address.
-#[derive(Clone, Debug)]
-pub struct MeshOut {
-    our_addr: [u8; 16],
-}
-
-impl MeshOut {
-    pub fn new(our_addr: [u8; 16]) -> Self {
-        Self { our_addr }
-    }
-
-    /// Decide one app → mesh packet; a SYN's MSS is clamped in place.
-    pub fn process(&self, packet: &mut [u8]) -> Action {
-        if packet.len() < 40 || packet[0] >> 4 != 6 || packet[24] != MESH_PREFIX {
-            return Action::Drop;
-        }
-        if packet[24..40] == self.our_addr {
-            return Action::Own;
-        }
-        clamp_tcp_mss(packet, max_mss());
-        Action::Forward
-    }
-}
-
-/// The inbound edge: clamp the MSS a mesh peer announced in a SYN or
-/// SYN-ACK, so this side never sends it a segment a 1280-byte path cannot
-/// carry. Anything that is not such a segment is left as it is.
+/// Clamp the MSS a mesh peer announced in a SYN or SYN-ACK, so this side
+/// never sends it a segment a 1280-byte path cannot carry. Anything that is
+/// not such a segment is left as it is.
 pub fn clamp_inbound(packet: &mut [u8]) {
     if packet.len() >= 40 && packet[0] >> 4 == 6 {
         clamp_tcp_mss(packet, max_mss());
@@ -139,61 +98,39 @@ mod tests {
     }
 
     #[test]
-    fn an_outbound_syn_is_clamped_and_still_checksums() {
-        let out = MeshOut::new(ME);
-        let mut packet = syn(ME, PEER, 1220);
-        assert_eq!(out.process(&mut packet), Action::Forward);
+    fn an_inbound_syn_is_clamped_and_still_checksums() {
+        let mut packet = syn(PEER, ME, 1400);
+        clamp_inbound(&mut packet);
         assert_eq!(mss_of(&packet), 1143);
         assert_eq!(checksum(&packet), 0, "checksum fixed up after the clamp");
     }
 
     #[test]
     fn a_smaller_mss_is_left_alone() {
-        let out = MeshOut::new(ME);
-        let mut packet = syn(ME, PEER, 1000);
+        let mut packet = syn(PEER, ME, 400);
         let before = packet.clone();
-        assert_eq!(out.process(&mut packet), Action::Forward);
-        assert_eq!(packet, before);
-    }
-
-    #[test]
-    fn an_inbound_syn_is_clamped_too() {
-        let mut packet = syn(PEER, ME, 1400);
         clamp_inbound(&mut packet);
-        assert_eq!(mss_of(&packet), 1143);
-        assert_eq!(checksum(&packet), 0);
-    }
-
-    #[test]
-    fn this_nodes_own_address_is_not_forwarded() {
-        let out = MeshOut::new(ME);
-        let mut packet = syn(ME, ME, 1220);
-        assert_eq!(out.process(&mut packet), Action::Own);
-        assert_eq!(mss_of(&packet), 1220, "untouched");
-    }
-
-    #[test]
-    fn what_is_not_a_mesh_packet_is_dropped() {
-        let out = MeshOut::new(ME);
-        let mut off_mesh = syn(ME, [0x20; 16], 1220);
-        assert_eq!(out.process(&mut off_mesh), Action::Drop);
-        assert_eq!(out.process(&mut [0x45u8; 60]), Action::Drop);
-        assert_eq!(out.process(&mut [0x60u8; 20]), Action::Drop);
-    }
-
-    /// IPv4-in-IPv6 for an exit (next header 4) goes out as it came: the
-    /// inner TCP is clamped by `exit.rs`, not here.
-    #[test]
-    fn exit_traffic_is_forwarded_unchanged() {
-        let out = MeshOut::new(ME);
-        let mut packet = vec![0u8; 80];
-        packet[0] = 0x60;
-        packet[4..6].copy_from_slice(&40u16.to_be_bytes());
-        packet[6] = 4;
-        packet[8..24].copy_from_slice(&ME);
-        packet[24..40].copy_from_slice(&PEER);
-        let before = packet.clone();
-        assert_eq!(out.process(&mut packet), Action::Forward);
         assert_eq!(packet, before);
+    }
+
+    #[test]
+    fn what_is_not_a_tcp_syn_is_left_alone() {
+        let mut udp = crate::packet::build_ipv6_udp(PEER, ME, 53, 4000, b"x");
+        let before = udp.clone();
+        clamp_inbound(&mut udp);
+        assert_eq!(udp, before);
+
+        // IPv4-in-IPv6 from an exit: `exit.rs` clamps the inner TCP.
+        let mut tunnel = vec![0u8; 80];
+        tunnel[0] = 0x60;
+        tunnel[4..6].copy_from_slice(&40u16.to_be_bytes());
+        tunnel[6] = 4;
+        let before = tunnel.clone();
+        clamp_inbound(&mut tunnel);
+        assert_eq!(tunnel, before);
+
+        let mut short = [0x60u8; 20];
+        clamp_inbound(&mut short);
+        assert_eq!(short, [0x60u8; 20]);
     }
 }

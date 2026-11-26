@@ -2,7 +2,7 @@
 //!
 //! The Kotlin side owns the `VpnService` and its TUN fd; this crate owns
 //! everything else: node lifecycle on a dedicated thread, the fd pump
-//! (with [`meshout`] as the embedder's half of fips's app-owned TUN contract),
+//! (with the node's own [`fips::TunPacketProcessor`] for system-TUN parity),
 //! a DNS proxy that splits `.fips` queries to the in-process responder and
 //! everything else to upstream resolvers, and the JNI surface.
 

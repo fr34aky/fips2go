@@ -152,8 +152,9 @@ async fn main() {
 
     // App-side send loop for A: retry until the mesh path is up (first sends
     // queue behind coordinate lookup + session establishment). Each packet
-    // is pushed as it is: the embedder owes the node fd00::/8 packets from
-    // its own address and an MSS clamp on TCP SYNs, and this is UDP.
+    // runs through the outbound processor exactly like the Android pump
+    // would — it must decide Forward for a mesh-destined packet.
+    let processor = node_a.tun_packet_processor();
     let packet = build_ipv6_udp(
         *id_a.address().as_bytes(),
         *id_b.address().as_bytes(),
@@ -162,8 +163,14 @@ async fn main() {
     let send_task = tokio::spawn(async move {
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
-            if a_outbound_tx.send(packet.clone()).await.is_err() {
-                return;
+            let mut pkt = packet.clone();
+            match processor.process(&mut pkt) {
+                fips::TunPacketAction::Forward => {
+                    if a_outbound_tx.send(pkt).await.is_err() {
+                        return;
+                    }
+                }
+                other => panic!("processor must Forward mesh-destined packets, got {other:?}"),
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

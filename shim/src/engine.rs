@@ -327,7 +327,8 @@ fn start_inner(
                 // way stop here, before the rx loop, which is where the
                 // control socket is bound: a node nobody owns must not take
                 // that path from the next start and unlink it on its way out.
-                let abandoned = ready_tx.send(Ok(())).is_err();
+                // The processor needs the started transports' MTU floor.
+                let abandoned = ready_tx.send(Ok(node.tun_packet_processor())).is_err();
                 if abandoned || stop_rx.try_recv().is_ok() {
                     tracing::warn!("node stopped before its rx loop: its start was given up or cancelled");
                     if let Err(e) = node.stop().await {
@@ -371,8 +372,8 @@ fn start_inner(
         })
         .map_err(|e| format!("spawn node thread: {e}"))?;
 
-    match ready_rx.recv_timeout(START_TIMEOUT) {
-        Ok(Ok(())) => {}
+    let processor = match ready_rx.recv_timeout(START_TIMEOUT) {
+        Ok(Ok(processor)) => processor,
         Ok(Err(e)) => {
             let _ = node_thread.join();
             return Err(e);
@@ -389,8 +390,7 @@ fn start_inner(
             let _ = node_thread.join();
             return Err("node thread died during start".into());
         }
-    }
-    let processor = crate::meshout::MeshOut::new(*our_fips_addr.as_bytes());
+    };
 
     // Own a dup of the fd so Kotlin's ParcelFileDescriptor lifetime and ours
     // are independent.
