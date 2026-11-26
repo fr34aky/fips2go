@@ -211,7 +211,12 @@ impl Pump {
                     let mut logged_ports = std::collections::HashSet::new();
                     while running.load(Ordering::Relaxed) {
                         match inbound_rx.recv() {
-                            Ok(pkt) => {
+                            Ok(mut pkt) => {
+                                // The MSS a peer announces bounds what this
+                                // side sends it: same ceiling as ours. Ahead
+                                // of the divert, so the shim's own smoltcp
+                                // flows are held to it like an app's.
+                                crate::meshout::clamp_inbound(&mut pkt);
                                 let Some(pkt) = divert.claim(pkt) else {
                                     continue; // an in-process flow's reply
                                 };
@@ -246,10 +251,6 @@ impl Pump {
                                     }
                                     continue;
                                 }
-                                // The MSS a peer announces bounds what
-                                // this side sends it: same ceiling as ours.
-                                let mut pkt = pkt;
-                                crate::meshout::clamp_inbound(&mut pkt);
                                 if writer_tx.send(pkt).is_err() {
                                     break;
                                 }

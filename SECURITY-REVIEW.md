@@ -143,8 +143,12 @@ Everything crosses JNI as JSON strings.
   websockets and mDNS. The app builds against upstream fips's embedder seams,
   which hand over the UDP listen sockets only, and protection changes nothing
   for a UID that is never captured with a default route. One known edge: with
-  no mesh app selected the app is captured for `fd00::/8`, so a fips TCP peer
-  at a ULA LAN address would route into the tunnel and not connect.
+  no mesh app selected the app is captured for `fd00::/8`, so a fips peer at
+  a ULA LAN address (`fd…`) is inside the tunnel's route. Over TCP it would
+  not connect. Over UDP the listen socket is protected only once the node's
+  `start` has returned, where the fork's hook ran at bind, so a handshake to
+  such a peer sent from inside `start` is lost and the link comes up on fips's
+  retry.
 - The node's control socket is on, in the app's private directory. It is the
   interface upstream fips offers for reading node state; the app used a
   fork-only in-process handle before.
