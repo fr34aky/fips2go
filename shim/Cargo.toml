@@ -22,7 +22,7 @@ crate-type = ["cdylib", "lib"]
 # the dependency renames it. For local fips development, override with:
 #   [patch."https://github.com/fr34aky/fips"]
 #   fips-mesh = { path = "../fips" }
-fips = { git = "https://github.com/fr34aky/fips", rev = "a4f4816", package = "fips-mesh", default-features = false }
+fips = { git = "https://github.com/fr34aky/fips", rev = "8b8433a", package = "fips-mesh", default-features = false }
 ipstack = "1"
 jni = "0.21"
 # Public domain names over fips (www.example.org → a mesh node): the policy

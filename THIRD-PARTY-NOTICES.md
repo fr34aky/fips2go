@@ -11,7 +11,7 @@ listed for completeness, though they run at build time and do not ship).
 [fips](https://github.com/jmcorgan/fips) v0.6.0-dev (crates `fips-mesh`
 and `fips-core`) — MIT License, Copyright (c) Johnathan Corgan. The mesh
 daemon this app embeds (via the `fr34aky/fips` fork, branch
-`android-hooks`, git dependency at rev a4f4816, which adds the embedder
+`android-hooks`, git dependency at rev 8b8433a, which adds the embedder
 hooks under the same license).
 
 ## fips-pub-domains

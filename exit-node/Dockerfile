@@ -4,7 +4,7 @@
 # shim/Cargo.lock records it), so the exit speaks the same fips as the phone.
 # Full, because GitHub does not serve a fetch by abbreviated hash. CI checks
 # it against the lockfile.
-ARG FIPS_REV=a4f4816c036d8e544bd07e1004e9556006ac4270
+ARG FIPS_REV=8b8433ab1864b878bc270720c4b63ab9eaa94b57
 
 FROM rust:1.94.1-bookworm AS build
 ARG FIPS_REV

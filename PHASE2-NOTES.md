@@ -1,7 +1,7 @@
 # Phase 2 — embedder hooks inside the fips codebase
 
 > **Superseded in part (2026-11-26).** The app no longer uses
-> `set_socket_protect`, and the fork drops it at its next pin
+> `set_socket_protect`, and the fork no longer carries it
 > (`TunPacketProcessor` stays). The socket
 > coverage listed below is history: today only the shim's own sockets and the
 > node's UDP listen sockets reach `VpnService.protect()`, and what keeps the
