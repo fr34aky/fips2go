@@ -282,7 +282,9 @@ fn start_inner(
     let relay_wake = relay_refresh.clone();
     // Node thread: current-thread runtime, same shape as the fips binary.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    // The go for the rx loop: sent once `start` has the node's report.
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
     let node_thread = std::thread::Builder::new()
         .name("fips-node".into())
         .spawn(move || {
@@ -321,16 +323,16 @@ fn start_inner(
                         hook(socket.fd);
                     }
                 }
-                // `start` may have given up on this node (START_TIMEOUT):
-                // then nobody is waiting, or, if it gave up in the instant
-                // before this send, the stop signal is already there. Either
-                // way stop here, before the rx loop, which is where the
-                // control socket is bound: a node nobody owns must not take
-                // that path from the next start and unlink it on its way out.
                 // The processor needs the started transports' MTU floor.
-                let abandoned = ready_tx.send(Ok(node.tun_packet_processor())).is_err();
-                if abandoned || stop_rx.try_recv().is_ok() {
-                    tracing::warn!("node stopped before its rx loop: its start was given up or cancelled");
+                let reported = ready_tx.send(Ok(node.tun_packet_processor())).is_ok();
+                // Into the rx loop only on `start`'s explicit go. It may
+                // have given up on this node (START_TIMEOUT): then nobody
+                // took the report, or the go never comes (its sender is
+                // dropped). The rx loop is where the control socket is
+                // bound, and a node nobody owns must not take that path
+                // from the next start and unlink it on its way out.
+                if !reported || go_rx.await.is_err() {
+                    tracing::warn!("node stopped before its rx loop: its start was given up");
                     if let Err(e) = node.stop().await {
                         tracing::warn!(error = %e, "stopping the abandoned node");
                     }
@@ -373,17 +375,18 @@ fn start_inner(
         .map_err(|e| format!("spawn node thread: {e}"))?;
 
     let processor = match ready_rx.recv_timeout(START_TIMEOUT) {
-        Ok(Ok(processor)) => processor,
+        Ok(Ok(processor)) => {
+            let _ = go_tx.send(());
+            processor
+        }
         Ok(Err(e)) => {
             let _ = node_thread.join();
             return Err(e);
         }
         Err(RecvTimeoutError::Timeout) => {
             // Not joined (it may never return). When its start does
-            // complete, the node thread finds nobody waiting and stops the
-            // node before its rx loop; the stop signal covers a start that
-            // completed in the instant before this.
-            let _ = stop_tx.send(());
+            // complete, the node thread gets no go (`go_tx` is dropped
+            // here) and stops the node before its rx loop.
             return Err("node start timed out".into());
         }
         Err(RecvTimeoutError::Disconnected) => {
@@ -1212,8 +1215,20 @@ mod tests {
             // back as the NODE's error — proves the control socket is bound
             // and served. The client's own failures (no socket, refused,
             // timed out) are errors too, and all begin "control socket".
-            let bad = connect_peer_json("npub1notvalid", "127.0.0.1:1");
-            let bad: serde_json::Value = serde_json::from_str(&bad).unwrap();
+            // The node binds the socket on a task of its own after `start`
+            // returns; the client waits 2 s for it, a loaded machine may
+            // need longer, so ask until the node has had 20 s.
+            let asked = std::time::Instant::now();
+            let bad = loop {
+                let bad = connect_peer_json("npub1notvalid", "127.0.0.1:1");
+                let bad: serde_json::Value = serde_json::from_str(&bad).unwrap();
+                let from_client = bad["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("control socket"));
+                if !from_client || asked.elapsed() > Duration::from_secs(20) {
+                    break bad;
+                }
+            };
             assert_eq!(bad["status"], "error", "bad npub rejected: {bad}");
             let message = bad["message"].as_str().unwrap_or_default();
             assert!(

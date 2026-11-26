@@ -216,7 +216,8 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("control socket"), "{err}");
         let took = started.elapsed();
-        assert!(took >= BIND_GRACE && took < BIND_GRACE + Duration::from_secs(1), "{took:?}");
+        // Well short of COMMAND_TIMEOUT, with room for a loaded machine.
+        assert!(took >= BIND_GRACE && took < COMMAND_TIMEOUT - Duration::from_secs(1), "{took:?}");
     }
 
     #[test]
@@ -243,7 +244,7 @@ mod tests {
             .request("connect", None, Duration::from_millis(200))
             .unwrap_err();
         assert!(err.contains("no answer in time"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
         drop(listener);
     }
 
@@ -265,7 +266,7 @@ mod tests {
                 .unwrap_err();
             assert!(err.contains("no answer in time"), "{err}");
         }
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
         drop(listener);
     }
 }

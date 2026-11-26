@@ -389,7 +389,8 @@ fork, add a patch to `shim/Cargo.toml` (and `smoke/Cargo.toml`):
 
 ```toml
 [patch."https://github.com/fr34aky/fips"]
-fips = { path = "../fips" }   # your local fips checkout on android-hooks
+fips-mesh = { path = "../fips" }   # your local fips checkout on android-hooks
+# (the key is the PACKAGE name; `fips = …` matches nothing and cargo only warns)
 ```
 
 ## How it works
