@@ -838,6 +838,11 @@ class FipsVpnService : VpnService() {
             // other app keeps the normal network untouched.
             var allowed = 0
             for (pkg in meshApps) {
+                // Never this app, whatever the stored list says: captured
+                // with the default route, the node's own underlay sockets
+                // (most of which are not protect()ed) would enter its tunnel.
+                // The picker already hides it; this is where it must hold.
+                if (pkg == packageName) continue
                 try {
                     builder.addAllowedApplication(pkg)
                     allowed++

@@ -670,8 +670,10 @@ fn run_reader(
                 }
             }
             // This node's own address. The kernel delivers that locally, so
-            // it does not arrive here; if it ever does, back it goes.
+            // it does not arrive here; if it ever does, back it goes, with
+            // the checksum finished in case it was left to offload.
             Action::Own => {
+                fips::ipv6tun::tcp_mss::recalculate_l4_checksum(packet);
                 if writer_tx.send(packet.to_vec()).is_err() {
                     break;
                 }

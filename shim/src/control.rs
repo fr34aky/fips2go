@@ -72,6 +72,9 @@ fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, String> {
                 {
                     std::thread::sleep(Duration::from_millis(20));
                 }
+                // A signal: a connect under a socket timeout is not
+                // restarted. Again, against the same deadline.
+                std::io::ErrorKind::Interrupted => {}
                 _ => return Err(format!("control socket: {e}")),
             },
         }

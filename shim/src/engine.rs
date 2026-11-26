@@ -282,7 +282,7 @@ fn start_inner(
     let relay_wake = relay_refresh.clone();
     // Node thread: current-thread runtime, same shape as the fips binary.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     let node_thread = std::thread::Builder::new()
         .name("fips-node".into())
         .spawn(move || {
@@ -307,34 +307,29 @@ fn start_inner(
                 // socket is on its network before the node dials through
                 // it. (A configured peer is dialed inside `start`, through
                 // the main socket, for which the hook changes nothing.)
-                let announce = move |socket: fips::AppOwnedUdpSocket| {
+                //
+                // Here and nowhere later, on purpose. The fd is a borrow,
+                // good while the transport runs, and on this thread right
+                // after `start` it is. fips sends one again only when a
+                // stopped node is started again, which the engine never
+                // does (it builds a new node); reading the channel from
+                // another thread at some later time would hand the hook a
+                // number that may by then belong to a different socket.
+                while let Ok(socket) = udp_sockets.try_recv() {
                     tracing::debug!(fd = socket.fd, instance = ?socket.instance, "node UDP socket");
                     if let Some(hook) = &node_protect {
                         hook(socket.fd);
                     }
-                };
-                while let Ok(socket) = udp_sockets.try_recv() {
-                    announce(socket);
                 }
-                // A socket the node binds later is sent on the same channel.
-                // Blocked in recv until then; ends when the node is dropped.
-                let later = std::thread::Builder::new()
-                    .name("fips-udp-fd".into())
-                    .spawn(move || {
-                        while let Ok(socket) = udp_sockets.recv() {
-                            announce(socket);
-                        }
-                    });
-                if let Err(e) = later {
-                    tracing::warn!(error = %e, "no thread for later UDP sockets");
-                }
-                if ready_tx.send(Ok(())).is_err() {
-                    // Nobody is waiting: `start` gave up on this node
-                    // (START_TIMEOUT). Stop it here, before the rx loop,
-                    // which is where the control socket is bound: a node
-                    // nobody owns must not take that path from the next
-                    // start and then unlink it on its way out.
-                    tracing::warn!("node started after its start was given up; stopping it");
+                // `start` may have given up on this node (START_TIMEOUT):
+                // then nobody is waiting, or, if it gave up in the instant
+                // before this send, the stop signal is already there. Either
+                // way stop here, before the rx loop, which is where the
+                // control socket is bound: a node nobody owns must not take
+                // that path from the next start and unlink it on its way out.
+                let abandoned = ready_tx.send(Ok(())).is_err();
+                if abandoned || stop_rx.try_recv().is_ok() {
+                    tracing::warn!("node stopped before its rx loop: its start was given up or cancelled");
                     if let Err(e) = node.stop().await {
                         tracing::warn!(error = %e, "stopping the abandoned node");
                     }
@@ -1214,11 +1209,17 @@ mod tests {
             );
 
             // Command round-trip through the rx_loop: a bad npub must come
-            // back as a structured error — proves the embedder command
-            // channel is served, not just that the JSON was well-formed.
+            // back as the NODE's error — proves the control socket is bound
+            // and served. The client's own failures (no socket, refused,
+            // timed out) are errors too, and all begin "control socket".
             let bad = connect_peer_json("npub1notvalid", "127.0.0.1:1");
             let bad: serde_json::Value = serde_json::from_str(&bad).unwrap();
             assert_eq!(bad["status"], "error", "bad npub rejected: {bad}");
+            let message = bad["message"].as_str().unwrap_or_default();
+            assert!(
+                !message.is_empty() && !message.starts_with("control socket"),
+                "the node answered, not the client: {bad}"
+            );
 
             stop();
             assert!(!is_running());
